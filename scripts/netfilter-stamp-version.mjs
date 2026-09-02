@@ -15,11 +15,19 @@
  * changed — is a replace macOS skips **silently**, and no later build can undo it.
  */
 import path from 'node:path'
-import { extVersionToStamp } from './lib/netfilter-artifact.mjs'
+import { extVersionToStamp, SHIPPED_APP, EXT_PROFILE } from './lib/netfilter-artifact.mjs'
+import { localProfileHash, localToolchain, shippedProfileName } from './lib/netfilter-local.mjs'
 
 const repo = path.resolve(import.meta.dirname, '..')
 try {
-  const v = extVersionToStamp(repo)
+  // The two inputs no repo file can show: the provisioning profile this Mac would embed, and the
+  // toolchain that would build it. Both are read here rather than in the library, because both are
+  // macOS-only and the library is unit-tested on the CI's Linux.
+  const name = shippedProfileName(path.join(repo, SHIPPED_APP, ...EXT_PROFILE))
+  const v = extVersionToStamp(repo, {
+    profile: name === null ? null : localProfileHash(name),
+    toolchain: localToolchain(),
+  })
   if (v) process.stdout.write(v)
 } catch (err) {
   process.stderr.write(`netfilter-stamp-version: ${err.message}\n`)

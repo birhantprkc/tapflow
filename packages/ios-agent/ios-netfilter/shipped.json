@@ -5,5 +5,7 @@
   "app": "b71d7039fadb16fee7e010c14d927d164cafe52148a3912088e78010bd3f72b7",
   "appFileCount": 10,
   "hostBundleVersion": "1788336153",
-  "extBundleVersion": "1788336153"
+  "extBundleVersion": "1788336153",
+  "extProfile": "fe0bf373c971ae225fdee05de9c6708027c03f0e7e52118de03bbc7ca78ff858",
+  "extToolchain": "17F113/25F70"
 }

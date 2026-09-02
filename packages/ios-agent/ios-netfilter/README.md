@@ -199,8 +199,26 @@ log show --last 5m --debug --predicate 'process == "sysextd"' | grep -i conflict
 **★설치할 때 두 가지를 반드시 지킨다** — 둘 다 어기면 증상이 같다(새 빌드인데 옛 코드가 조용히 돈다):
 
 1. **`CFBundleVersion`을 올린다.** 버전이 같으면 activation이 `result 0`을 돌려주면서도 번들 교체를
-   조용히 건너뛴다. `build.sh`가 매 빌드 유니크 버전을 주입한다(xcodegen이 버전을 리터럴로 박아
-   build setting override가 안 먹으므로 generate 후 `plutil` 필수).
+   조용히 건너뛴다. xcodegen이 버전을 리터럴로 박아 build setting override가 안 먹으므로 generate 후
+   `plutil`이 필수다.
+
+   **호스트와 확장이 각각 다른 규칙을 따른다**(#724). 호스트 앱은 매 빌드 새 epoch을 받는다. 확장은
+   자기 입력이 안 바뀌었으면 **버전을 유지한다** — 그래야 `Host/`만 고친 릴리스가 사용자 맥의
+   provider를 교체하지 않는다. 교체는 맥의 모든 새 연결을 그 사이 멈추게 하므로 공짜가 아니다.
+
+   확장 입력은 `Host/`를 뺀 레포 파일 전부에, 프로비저닝 프로파일과 툴체인(`DTXcodeBuild`/`DTSDKBuild`)을
+   더한 것이다(#728). `Extension/`이나 `Shared/`를 고쳤다면 버전은 자동으로 오른다. `Host/`만 고쳤다면
+   안 오르고, **그것이 의도한 동작이다** — 확장 바이너리가 같으므로 교체할 것이 없다.
+
+   판정이 못 보는 것이 남는다. 팀 ID 변경처럼 레포에도 프로파일에도 툴체인에도 안 나타나는 변화가
+   그렇다. 그럴 때는 강제한다.
+
+   ```bash
+   FORCE_EXT_BUMP=1 ./build.sh
+   ```
+
+   판정 자체는 `scripts/netfilter-stamp-version.mjs`가 하고, 답을 못 내면 새 버전을 만든다. 불필요한
+   교체는 몇 초를 쓰지만, 바뀐 확장에 버전을 재사용하면 macOS가 교체를 조용히 건너뛰기 때문이다.
 2. **컨테이너 앱을 먼저 죽인다.** 이미 실행 중인 앱에 `open`/exec을 하면 `main`을 다시 안 타므로
    `OSSystemExtensionRequest` 자체가 발생하지 않는다.
    ```bash

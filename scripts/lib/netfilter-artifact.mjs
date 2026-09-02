@@ -1,5 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
+import { createHash } from 'node:crypto'
 import { hashFiles, walk } from './artifact-hash.mjs'
 
 /**
@@ -110,6 +111,48 @@ function versionNumber(v) {
   return Number.isFinite(n) ? n : null
 }
 
+/** Read a top-level `<string>` value out of an XML plist by key, or null. Regex rather than
+ *  `plutil`, for the reason `versionIn` gives: this runs on the CI's Linux. */
+function stringIn(plistPath, key) {
+  if (!fs.existsSync(plistPath)) return null
+  const m = fs.readFileSync(plistPath, 'utf8')
+    .match(new RegExp(`<key>${key}</key>\\s*<string>([^<]*)</string>`))
+  return m ? m[1] : null
+}
+
+/**
+ * The toolchain the committed extension was built with.
+ *
+ * **`BuildMachineOSBuild` is deliberately not in here**, and leaving it out is the whole reason this
+ * is a chosen pair rather than "the build stamps". It sits in the same plist and moves on every macOS
+ * point update, so including it would bump the extension for a software update that changed nothing
+ * about the binary — reintroducing the cost #724 removed, with a different trigger.
+ *
+ * `DTXcodeBuild` and `DTSDKBuild` are readable before a build as `xcodebuild -version` and
+ * `xcrun --sdk macosx --show-sdk-build-version`, which is what makes the comparison possible without
+ * building first. Measured: `17F113` and `25F70` on both sides.
+ */
+export function extToolchain(repo) {
+  const plist = path.join(repo, SHIPPED_APP, ...EXT_PLIST)
+  const xcode = stringIn(plist, 'DTXcodeBuild')
+  const sdk = stringIn(plist, 'DTSDKBuild')
+  return xcode && sdk ? `${xcode}/${sdk}` : null
+}
+
+/** Where the extension's provisioning profile sits inside the shipped bundle. It is the extension's
+ *  only sealed resource, so it is part of what macOS validates. */
+export const EXT_PROFILE = [
+  'Contents', 'Library', 'SystemExtensions',
+  'dev.tapflow.netfilter.ext.systemextension', 'Contents', 'embedded.provisionprofile',
+]
+
+/** The provisioning profile the committed extension shipped with, by content. */
+export function extProfileHash(repo) {
+  const p = path.join(repo, SHIPPED_APP, ...EXT_PROFILE)
+  if (!fs.existsSync(p)) return null
+  return createHash('sha256').update(fs.readFileSync(p)).digest('hex')
+}
+
 /** Read `CFBundleVersion` out of a plist on disk, or null. Regex rather than `plutil`, because this
  *  runs on the CI's Linux where `plutil` does not exist — both plists are XML with exactly one such
  *  key. */
@@ -187,6 +230,12 @@ export function computeRecord(repo) {
     appFileCount: appFiles.length,
     hostBundleVersion: versionIn(path.join(repo, SHIPPED_APP, 'Contents', 'Info.plist')),
     extBundleVersion: versionIn(path.join(repo, SHIPPED_APP, ...EXT_PLIST)),
+    // **Two inputs that are not repo files, recorded from the artifact so they still can be.** Both
+    // change the shipped extension with nothing under `ios-netfilter/` moving, which after #724 means
+    // a version reused and a replace macOS skips silently. Reading them out of the committed bundle
+    // keeps the record machine-independent and keeps the Linux guard able to check it.
+    extProfile: extProfileHash(repo),
+    extToolchain: extToolchain(repo),
   }
 }
 
@@ -196,7 +245,7 @@ export function computeRecord(repo) {
  * Reuse is only ever the version **the committed app already declares** — the artifact rather than
  * the record, because the record is derived from it and one of the two has to be the original.
  */
-export function extVersionToStamp(repo) {
+export function extVersionToStamp(repo, local) {
   const record = readRecord(repo)
   if (!record || typeof record.extSources !== 'string') return null
   const now = hashFiles(path.join(repo, NETFILTER_DIR), collectExtSources(repo), withoutBuildStamp)
@@ -210,6 +259,13 @@ export function extVersionToStamp(repo) {
   // Free in the healthy case: `build.sh` calls this before `xcodebuild`, while `bin/` still holds the
   // app the record was written from.
   if (computeRecord(repo).app !== record.app) return null
+  // **What the build machine will put in, against what the committed bundle has.** The repo hash
+  // above cannot see either: the provisioning profile and the toolchain live on the maintainer's Mac.
+  // The caller reads them — those probes are macOS-only and this module runs on the CI's Linux — and
+  // **no answer means a fresh version**, which is this module's standing rule for anything it cannot
+  // judge. Getting it wrong the other way is a replace macOS skips without a word.
+  if (!local || local.profile !== record.extProfile) return null
+  if (local.toolchain !== record.extToolchain) return null
   const shipped = versionIn(path.join(repo, SHIPPED_APP, ...EXT_PLIST))
   return versionNumber(shipped) === null ? null : shipped
 }
