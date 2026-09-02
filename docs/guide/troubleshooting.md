@@ -235,9 +235,22 @@ Replacing an already-installed extension finishes only after the Mac restarts. *
 tapflow doctor ios
 ```
 
-It reports four things separately: whether it is **installed**, whether it is **approved**, whether it is **switched on**, and whether the extension currently running is the **same version this tapflow carries**. The last two are separate because the ones before them can all be right while the control still does not work — a replacement waiting for a restart is one such state, and a filter switched off is another. Switched off has no version of its own: the extension stays listed as activated, so every version reads correctly while nothing is being filtered.
+It reports four things separately: whether it is **installed**, whether it is **approved**, whether it is **switched on**, and whether the versions on this Mac are the **ones this tapflow carries**. The last two are separate because the ones before them can all be right while the control still does not work — a replacement waiting for a restart is one such state, and a filter switched off is another. Switched off has no version of its own: the extension stays listed as activated, so every version reads correctly while nothing is being filtered.
 
-If it reports a version mismatch, what to do depends on which side is behind. If this tapflow carries the newer filter, `tapflow migrate net-filter` installs it. If the Mac runs the newer one, upgrade this checkout instead — migrate refuses that direction, because replacing a newer filter breaks the agent that depends on it. If it asks for a restart, restart the Mac.
+**Two things carry a version**: the app in `/Applications` and the system extension inside it. They move independently, because a release that changes only the app has no reason to make macOS replace a running filter. The check names whichever is behind, and they need different things.
+
+| What it says is behind | What to do |
+|---|---|
+| The app in `/Applications` | `tapflow migrate net-filter`. It copies the app; macOS skips the activation, so nothing is interrupted. The agent calls that binary, which is why a stale one matters |
+| The extension, with a restart mentioned | Restart the Mac. The replacement is installed and finishes then |
+| The extension, with no restart mentioned | `tapflow migrate net-filter` |
+| This Mac is set up for a newer tapflow | Upgrade this checkout instead. Migrate refuses that direction, because replacing a newer filter breaks the agent depending on it |
+
+**If the app is gone but the extension is still running, tapflow refuses to reinstall.** The extension's version says which filter is running, not which app it came from, so nothing can tell whether that Mac was set up by a newer tapflow than yours — and installing over it would replace a working filter someone else may depend on. Reinstall from the tapflow whose version matches, or clear the extension and start again:
+
+```sh
+systemextensionsctl uninstall 6FBS3QP893 dev.tapflow.netfilter.ext
+```
 
 ### If it still does not work
 

@@ -102,6 +102,19 @@ export function cmdMigrateNetFilter(opts: { ignoreRunningDevices?: boolean } = {
       ])
       process.exit(1)
       break
+    case 'refused-host-unknown':
+      // The command whose whole purpose is this repair, so it has to explain why it will not do it.
+      banner('error', 'CANNOT TELL WHAT THIS MAC IS RUNNING', [
+        `Extension ${outcome.activated} is enforcing, but ${NET_FILTER_APP} is gone.`,
+        'The extension version says which filter is running, not which app it came from, so tapflow',
+        'cannot tell whether this Mac was set up by a newer tapflow than this one. Installing over it',
+        'would replace a working filter somebody else depends on.',
+        '',
+        'Either reinstall from the tapflow whose version matches, or clear the extension and start over:',
+        '  systemextensionsctl uninstall 6FBS3QP893 dev.tapflow.netfilter.ext',
+      ])
+      process.exit(1)
+      break
     case 'refused-downgrade':
       banner('error', 'MIGRATION REFUSED', [
         `This Mac runs filter ${outcome.installed} and this tapflow carries ${outcome.shipped}.`,
@@ -126,5 +139,13 @@ export function cmdMigrateNetFilter(opts: { ignoreRunningDevices?: boolean } = {
       ])
       process.exit(1)
       break
+    default: {
+      // **The compiler cannot see a missing case here, and that is why this line exists.** `setup`'s
+      // switch returns a value, so an unhandled member is a type error there; this one returns void,
+      // and `refused-host-unknown` fell straight through it — printing nothing and exiting 0 in the
+      // one state the outcome was invented for.
+      const unhandled: never = outcome
+      throw new Error(`unhandled install outcome: ${JSON.stringify(unhandled)}`)
+    }
   }
 }

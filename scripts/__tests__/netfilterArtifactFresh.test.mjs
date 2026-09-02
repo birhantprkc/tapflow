@@ -3,7 +3,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { execFileSync } from 'node:child_process'
 import {
-  computeRecord, readRecord, collectSources, collectExtSources, collectAppFiles,
+  computeRecord, readRecord, collectSources, collectExtSources, collectHostSources, collectAppFiles,
   extVersionWentBackwards, extVersionToStamp, RECORD,
 } from '../lib/netfilter-artifact.mjs'
 
@@ -24,6 +24,11 @@ const REPO = path.resolve(import.meta.dirname, '../..')
 // that certifies its own absence.
 const MIN_SOURCE_FILES = 8
 const MIN_APP_FILES = 6
+// **Per half, because the combined floor cannot see a migration between them.** Three files could
+// move from the extension's side to the host's and the total would not move — and from then on those
+// files would stop bumping the extension's version, permanently and quietly.
+const MIN_EXT_SOURCE_FILES = 6
+const MIN_HOST_SOURCE_FILES = 2
 
 describe('the shipped network filter matches what it was recorded against', () => {
   it('has a record at all', () => {
@@ -50,6 +55,8 @@ describe('the shipped network filter matches what it was recorded against', () =
   it('sees enough files to be checking anything', () => {
     expect(collectSources(REPO).length, 'the source glob matched almost nothing').toBeGreaterThanOrEqual(MIN_SOURCE_FILES)
     expect(collectAppFiles(REPO).length, 'the app bundle looks empty').toBeGreaterThanOrEqual(MIN_APP_FILES)
+    expect(collectExtSources(REPO).length, 'the extension half matched almost nothing').toBeGreaterThanOrEqual(MIN_EXT_SOURCE_FILES)
+    expect(collectHostSources(REPO).length, 'the host half matched almost nothing').toBeGreaterThanOrEqual(MIN_HOST_SOURCE_FILES)
   })
 
   it('still matches the sources it was built from', () => {
@@ -148,25 +155,39 @@ describe('the extension version only ever goes up', () => {
 })
 
 describe('what build.sh stamps into the extension', () => {
-  it('reuses nothing when the record predates the split', () => {
-    // The first build after this change mints a fresh version, because `build.sh` is itself an
-    // extension input and changing it is a real change. One replace, once — and #726 made a replace
-    // survivable, which is why this could be done in this order.
-    const record = readRecord(REPO)
-    if (typeof record.extSources !== 'string') {
-      expect(extVersionToStamp(REPO), 'a legacy record must not be reused as a version').toBeNull()
+  it('reuses the shipped version when the extension inputs are unchanged', () => {
+    expect(computeRecord(REPO).extSources, 'the tree and the record disagree — rebuild first')
+      .toBe(readRecord(REPO).extSources)
+    expect(extVersionToStamp(REPO), 'an unchanged extension was going to be given a new version')
+      .toBe(readRecord(REPO).extBundleVersion)
+  })
+
+  it('refuses to reuse when an extension source changed', () => {
+    // **Driven rather than waited for.** Both halves of this rule used to sit behind an `if` on a
+    // condition the committed tree does not satisfy, so only the reuse branch ever ran — the half
+    // that prevents a silent skip was executed by nothing, in a test named after it.
+    const victim = collectExtSources(REPO).find((f) => f.endsWith('.swift'))
+    expect(victim, 'no Swift file in the extension half — this test is checking nothing').toBeTruthy()
+    const original = fs.readFileSync(victim, 'utf8')
+    try {
+      fs.writeFileSync(victim, `${original}\n// probe\n`)
+      expect(extVersionToStamp(REPO), 'a changed extension was going to keep its version').toBeNull()
+    } finally {
+      fs.writeFileSync(victim, original)
     }
   })
 
-  it('reuses the shipped version when the extension inputs are unchanged', () => {
-    // Not a claim about today's tree: it asserts the rule, using whatever the record says now.
+  it('refuses to reuse when the record and the shipped app describe different builds', () => {
+    // The decision comes from the record and the version comes from the app, so a tree holding one
+    // from each — the ordinary result of resolving a binary conflict — would stamp a number belonging
+    // to neither, and the record written afterwards would be perfectly self-consistent.
     const record = readRecord(REPO)
-    const now = computeRecord(REPO)
-    const stamp = extVersionToStamp(REPO)
-    if (record.extSources === now.extSources) {
-      expect(stamp, 'an unchanged extension was going to be given a new version').toBe(record.extBundleVersion)
-    } else {
-      expect(stamp, 'a changed extension was going to keep its version').toBeNull()
+    const original = fs.readFileSync(path.join(REPO, RECORD), 'utf8')
+    try {
+      fs.writeFileSync(path.join(REPO, RECORD), JSON.stringify({ ...record, app: 'deadbeef' }, null, 2))
+      expect(extVersionToStamp(REPO), 'it reused a version from an app the record does not describe').toBeNull()
+    } finally {
+      fs.writeFileSync(path.join(REPO, RECORD), original)
     }
   })
 
@@ -185,6 +206,15 @@ describe('what build.sh stamps into the extension', () => {
         fs.writeFileSync(f, text.replace(/(<key>CFBundleVersion<\/key>\s*<string>)[^<]*(<\/string>)/, '$19999999999$2'))
       }
       expect(computeRecord(REPO).extSources, 'the build stamp leaks into the extension hash').toBe(before)
+
+      // **And the rest of the plist still counts**, which is the direction the assertion above cannot
+      // reach. Widening the normalizer until it blanked the whole file would satisfy it and satisfy
+      // the record comparison too, because both sides normalize identically — while
+      // `NEProviderClasses` and the mach service name silently left the extension's identity.
+      for (const [f, text] of original) {
+        fs.writeFileSync(f, text.replace('<key>CFBundleVersion</key>', '<key>TapflowProbeKey</key>'))
+      }
+      expect(computeRecord(REPO).extSources, 'the normalizer blanks more of the plist than the stamp').not.toBe(before)
     } finally {
       for (const [f, text] of original) fs.writeFileSync(f, text)
     }

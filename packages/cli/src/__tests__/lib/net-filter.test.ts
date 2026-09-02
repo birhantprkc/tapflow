@@ -12,7 +12,7 @@ import { accessSync, chmodSync, existsSync, readFileSync, readdirSync, statSync 
 import { createServer } from 'node:net'
 import { confirm } from '@clack/prompts'
 import { join } from 'node:path'
-import { installNetFilter, readNetFilterState, NET_FILTER_APP } from '../../lib/net-filter.js'
+import { installNetFilter, readNetFilterState, extensionBundle, NET_FILTER_APP } from '../../lib/net-filter.js'
 import { runDoctorChecks } from '../../lib/doctor.js'
 import { runSetupIos } from '../../lib/setup.js'
 
@@ -452,6 +452,25 @@ describe('net filter — installing', () => {
   // invisible rather than harmless. Once a host-only rebuild leaves them different, every comparison
   // that crosses has to be found.
 
+  it('points at a plist that is actually in the committed bundle', async () => {
+    // **Against the real filesystem, because the mocks cannot see this.** They match paths by
+    // substring, so a path with `Contents/Contents` in it satisfies every one of them — and the first
+    // version of this shipped exactly that, reading `null` on every real Mac. Null there means "this
+    // package carries no filter", so both commands refused with *reinstall tapflow*, which could not
+    // fix it, and 328 tests stayed green.
+    const { existsSync: realExists } = await vi.importActual<typeof import('node:fs')>('node:fs')
+    const app = join(process.cwd(), 'node_modules', '@tapflowio', 'ios-agent', 'bin', 'TapflowNetFilter.app')
+    const root = realExists(app)
+      ? app
+      : join(process.cwd(), '..', 'ios-agent', 'bin', 'TapflowNetFilter.app')
+    expect(realExists(root), `no shipped app to check against at ${root}`).toBe(true)
+    // The exact thing `bundleVersion` will `defaults read`.
+    expect(
+      realExists(join(extensionBundle(root), 'Contents', 'Info.plist')),
+      'the extension bundle path does not resolve to a plist in the shipped app',
+    ).toBe(true)
+  })
+
   it('is not current when only the app in /Applications is behind', () => {
     // The shape a host-only release produces, and the one the split exists to make ordinary. The
     // extension macOS runs is already ours; the binary the agent executes is not.
@@ -628,6 +647,20 @@ describe('doctor — what it says about the filter', () => {
     // Both are true at once, and they want different actions. Neither replaces the other.
     expect(version.ok).toBe(false)
     expect(version.detail).toMatch(/Restart the Mac/)
+  })
+
+  it('names the app, not the extension, when the Mac is set up by a newer tapflow', async () => {
+    // A host-only release moves one number and not the other, so this branch fires with the extension
+    // versions equal. Reporting the extension pair printed the same number twice as the evidence they
+    // differed, and never named the thing that was actually newer.
+    machine({ installed: NEWER, activated: SHIPPED, shippedExt: SHIPPED })
+    const [, version] = await netFilterChecks()
+    expect(version.ok).toBe(false)
+    expect(version.detail).toMatch(/newer tapflow/)
+    expect(version.detail, 'it named the extension for a host mismatch').toContain('/Applications')
+    expect(version.detail).toContain(NEWER)
+    expect(version.detail, 'it printed the same version twice as proof of a difference')
+      .not.toMatch(new RegExp(`extension ${SHIPPED} and this one carries ${SHIPPED}`))
   })
 
   it('names the app, not the extension, when only the host is behind', async () => {

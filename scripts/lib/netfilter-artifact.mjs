@@ -51,17 +51,26 @@ const HOST_SOURCE_FILES = []
  * rebuilds so far. Splitting the version needs a way to ask "did the *extension* change", which is
  * what these two lists are for.
  *
- * **Everything that is not `Host/` counts as an extension input**, `project.yml` and `build.sh`
- * included. Both change what the extension binary is without touching a line of Swift — signing
- * flags, the hardened runtime, the entitlements — and an extension that changed without its version
- * changing is replaced **silently** by macOS, which is the failure `project.yml` warns about in
- * capitals. So the boundary is drawn to be wrong in the direction that costs an unnecessary replace
- * rather than a skipped one.
+ * **Everything in the repo that is not `Host/` counts as an extension input**, `project.yml` and
+ * `build.sh` included. Both change what the extension binary is without touching a line of Swift —
+ * signing flags, the hardened runtime, the entitlements — and an extension that changed without its
+ * version changing is replaced **silently** by macOS, which is the failure `project.yml` warns about
+ * in capitals. Within the repo the boundary is therefore drawn to be wrong in the direction that
+ * costs an unnecessary replace rather than a skipped one.
  *
- * What that boundary still misses is `Host/`'s own signing surface: the sysext is nested inside the
- * host app and validated against it, so a host entitlement change alters the context an unchanged
- * extension runs in. `Host/` cannot simply be added — `Host/Info.plist` carries the per-build stamp
- * — so the field-level line is a decision of its own, tracked separately.
+ * **It is repo files only, and that limit is now load-bearing rather than incidental.** The shipped
+ * sysext also embeds a provisioning profile and a Developer ID signature that come from the
+ * maintainer's Mac, and it is built by whatever Xcode is installed. Renewing the extension's
+ * provisioning profile — an annual event — changes the shipped binary with no file here moving, so
+ * the version would be reused and macOS would skip the replace on every Mac that already has it.
+ * Before this split that blind spot was harmless: an unwatched input still took a fresh epoch. It is
+ * not harmless now, which is why `build.sh` takes `FORCE_EXT_BUMP=1` and why detecting it
+ * automatically is tracked separately.
+ *
+ * The same limit covers `Host/`'s own signing surface: the sysext is nested inside the host app and
+ * validated against it, so a host entitlement change alters the context an unchanged extension runs
+ * in. `Host/` cannot simply be added — `Host/Info.plist` carries the per-build stamp — so the
+ * field-level line is a decision of its own.
  */
 const CFBUNDLEVERSION = /(<key>CFBundleVersion<\/key>\s*<string>)[^<]*(<\/string>)/
 
@@ -174,6 +183,15 @@ export function extVersionToStamp(repo) {
   if (!record || typeof record.extSources !== 'string') return null
   const now = hashFiles(path.join(repo, NETFILTER_DIR), collectExtSources(repo), withoutBuildStamp)
   if (now !== record.extSources) return null
+  // **The decision comes from the record and the value comes from the app, so they have to be the
+  // same build.** A merge that takes `shipped.json` from one side and `bin/` from the other — the
+  // ordinary outcome of a binary conflict — leaves a record describing build A beside an app from
+  // build B, and reusing B's version there stamps a number that belongs to neither. The next record
+  // is written from the result and is perfectly self-consistent, so nothing downstream can tell.
+  //
+  // Free in the healthy case: `build.sh` calls this before `xcodebuild`, while `bin/` still holds the
+  // app the record was written from.
+  if (computeRecord(repo).app !== record.app) return null
   const shipped = versionIn(path.join(repo, SHIPPED_APP, ...EXT_PLIST))
   return Number.isFinite(Number(shipped)) ? shipped : null
 }

@@ -157,13 +157,21 @@ function buildNetFilterChecks(): DoctorCheck[] {
   // `isNewer`, not a second `Number() >`: that one answered `false` for a version neither side could
   // parse, while the installer's guard answers `true` and refuses. The two disagreeing sent the user
   // to a `migrate net-filter` that would refuse the moment they ran it.
-  if (isNewer(s.activatedExt, s.shippedExt)
-      || (s.installedHost !== null && isNewer(s.installedHost, s.shippedHost))) {
+  //
+  // **The sentence names the pair that actually triggered**, which needs saying because the two
+  // disjuncts are now different measurements. Reporting the extension pair for a host mismatch prints
+  // two identical numbers as the evidence they differ — and under this scheme the host disjunct is
+  // the one that fires most often, since a host-only release moves that number alone.
+  const newerExt = isNewer(s.activatedExt, s.shippedExt)
+  const newerHost = s.installedHost !== null && isNewer(s.installedHost, s.shippedHost)
+  if (newerExt || newerHost) {
     return [running, {
       label: 'Network filter version',
       ok: false,
       warn: true,
-      detail: `This Mac is set up for a newer tapflow — it runs extension ${s.activatedExt} and this one carries ${s.shippedExt}. Upgrade this checkout rather than reinstalling the filter.`,
+      detail: newerExt
+        ? `This Mac is set up for a newer tapflow — it runs extension ${s.activatedExt} and this one carries ${s.shippedExt}. Upgrade this checkout rather than reinstalling the filter.`
+        : `This Mac is set up for a newer tapflow — the app in /Applications is ${s.installedHost} and this one carries ${s.shippedHost}. Upgrade this checkout rather than reinstalling the filter.`,
     }]
   }
   // The app on disk is this build's and the extension running is not: macOS finishes a replacement

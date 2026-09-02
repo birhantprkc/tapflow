@@ -192,17 +192,26 @@ export function isNetFilterCurrent(s: NetFilterState): boolean {
  * buy a derivable value at the price of another 10-second probe and another way to answer `null`,
  * where "could not read it" and "it is not there" are the same answer.
  */
-const EXT_PLIST = [
-  'Contents', 'Library', 'SystemExtensions',
-  'dev.tapflow.netfilter.ext.systemextension', 'Contents', 'Info.plist',
-]
+/**
+ * The system extension's own bundle, nested inside an app bundle.
+ *
+ * **A bundle root, not a plist path** — `bundleVersion` appends `Contents/Info.plist` itself, and
+ * handing it a path that already ends in `Contents` produced `Contents/Contents/Info.plist`, an
+ * unreadable path that answered `null` for every install. Null there means "this package carries no
+ * filter", so `setup ios` and `migrate net-filter` both refused with *reinstall tapflow*, which
+ * cannot fix it. The mistake survived a full green suite because the fixtures matched paths by
+ * substring and said yes to both.
+ */
+export function extensionBundle(appPath: string): string {
+  return join(appPath, 'Contents', 'Library', 'SystemExtensions', 'dev.tapflow.netfilter.ext.systemextension')
+}
 
 export function readNetFilterState(): NetFilterState {
   const shipped = shippedAppPath()
   return {
     shippedHost: shipped ? bundleVersion(shipped) : null,
     installedHost: bundleVersion(NET_FILTER_APP),
-    shippedExt: shipped ? bundleVersion(join(shipped, ...EXT_PLIST.slice(0, -1))) : null,
+    shippedExt: shipped ? bundleVersion(extensionBundle(shipped)) : null,
     activatedExt: activatedVersion(),
   }
 }
