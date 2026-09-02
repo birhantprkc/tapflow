@@ -244,7 +244,7 @@ const FILTER_STATE_FILES = [
  * Stale counts as stopped, on the agent's own rule — three missed pulses, with `pulseSeconds` taken
  * from the file rather than assumed, because the provider slows its pulse while nothing is offline.
  */
-export function isFilterEnforcing(now = Date.now()): boolean {
+export function isFilterEnforcing(now = Date.now(), since = 0): boolean {
   for (const path of FILTER_STATE_FILES) {
     if (!existsSync(path)) continue
     try {
@@ -255,6 +255,14 @@ export function isFilterEnforcing(now = Date.now()): boolean {
       // provider writes when it cannot write the first, so a Mac that failed over leaves an old file
       // at the first one and a live heartbeat at the second. Returning here read that Mac as stopped
       // and made every run pay the disable/enable cycle this module exists to make rare.
+      // **`since` is how a caller asks "did somebody start *after* this moment".** Freshness alone
+      // cannot tell a live provider from one that died inside the window — the file is written every
+      // pulse and removed asynchronously two hops after `--off` returns, so a provider killed by an
+      // activation leaves a file that is up to fifteen seconds young. A caller waiting for a filter to
+      // come *back* would read that as success on its first look, which is the false report the wait
+      // exists to prevent. `doctor` passes nothing, because it only asks whether anything is running
+      // now.
+      if (raw.at <= since) continue
       if (Math.floor(now / 1000) - raw.at <= 3 * Math.max(pulse, 1)) return true
       continue
     } catch {
@@ -377,7 +385,7 @@ const COPY_TIMEOUT_MS = 60_000
  * **The successful path does not wait**, so this is only ever spent on a run that has something to
  * report. Waiting is what makes the report possible.
  */
-const CONFIRM_DEADLINE_MS = 30_000
+export const CONFIRM_DEADLINE_MS = 30_000
 
 /** How often to look. The file is written once and then pulsed, so this only decides how quickly a
  *  success is noticed. */
@@ -523,7 +531,13 @@ export function installNetFilter(opts: InstallOptions = {}): InstallOutcome {
     // itself. The framework hands the configuration to the provider afterwards with nothing coming
     // back, and this run has just switched the filter off on the strength of that report. So the last
     // thing it does is look.
-    case 0: return waitForEnforcing(opts.confirmDeadlineMs ?? CONFIRM_DEADLINE_MS)
+    // **From a baseline, not from freshness.** The heartbeat this is waiting for has to have been
+    // written after the activation returned; the previous provider's last one can still be inside the
+    // freshness window, and reading it would report success over a Mac where nothing came back.
+    //
+    // The second is exclusive, so a provider that came up inside the same second waits one more —
+    // cheaper than the ambiguity, since the file only carries whole seconds.
+    case 0: return waitForEnforcing(opts.confirmDeadlineMs ?? CONFIRM_DEADLINE_MS, Math.floor(Date.now() / 1000))
       ? { status: 'installed' }
       : { status: 'installed-unconfirmed' }
     // **Approval and reboot differ in whether the filter came back**, which is why only one of them
@@ -556,10 +570,10 @@ export function installNetFilter(opts: InstallOptions = {}): InstallOutcome {
  * two commands that are synchronous themselves, and making it async to sleep would mean making
  * `installNetFilter`, `setUpNetFilter` and `cmdMigrateNetFilter` async for a pause.
  */
-function waitForEnforcing(deadlineMs: number): boolean {
+function waitForEnforcing(deadlineMs: number, since: number): boolean {
   const until = Date.now() + deadlineMs
   for (;;) {
-    if (isFilterEnforcing()) return true
+    if (isFilterEnforcing(Date.now(), since)) return true
     if (Date.now() >= until) return false
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, CONFIRM_POLL_MS)
   }

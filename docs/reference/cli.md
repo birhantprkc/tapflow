@@ -90,6 +90,11 @@ first, like every other install here, and tells you when macOS is waiting for yo
 System Settings. If you decline, or the Mac was set up before the filter shipped,
 [`tapflow migrate net-filter`](#tapflow-migrate-net-filter) installs it on its own.
 
+Installing it ends with a wait of up to thirty seconds for the filter to report itself running, so
+that step can pause before it reports. When nothing reports, setup says so rather than showing the
+step as done — see
+[the same behaviour under `migrate net-filter`](#tapflow-migrate-net-filter).
+
 setup only ensures a bootable device/AVD exists; the relay boots it on demand when a session opens. After it registers `ANDROID_HOME`/PATH, open a new terminal (or `exec $SHELL`) before running `tapflow doctor`.
 
 | Option | Description |
@@ -400,7 +405,12 @@ state and iOS network control does not; running the command again turns it back 
 **It waits for the filter to report itself running before saying it worked.** macOS answers "not
 refused" rather than "working" when an extension is installed — the configuration reaches the filter
 afterwards, with nothing coming back — so the command watches for up to thirty seconds and leaves as
-soon as a filter appears. When none does it says that instead of claiming success. Your network is
-unaffected either way, because a filter that is not running blocks nothing.
+soon as a filter appears. `tapflow setup ios` does the same when it installs the filter.
+
+When none appears the command says so and **exits non-zero**, because that state is the one where the
+configuration is switched on and nothing is answering for it. Usually the filter is simply still
+starting, and `tapflow doctor ios` will say so a moment later. If new connections on the Mac have
+stopped working, see [Troubleshooting](/guide/troubleshooting#network-lost-on-replace) — the remedy is
+to take the filter out of the path with `--off`.
 
 Run `tapflow doctor ios` afterwards to confirm what the Mac ended up with.

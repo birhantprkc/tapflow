@@ -12,7 +12,7 @@ import { accessSync, chmodSync, existsSync, readFileSync, readdirSync, statSync 
 import { createServer } from 'node:net'
 import { confirm } from '@clack/prompts'
 import { join } from 'node:path'
-import { installNetFilter, readNetFilterState, extensionBundle, NET_FILTER_APP } from '../../lib/net-filter.js'
+import { installNetFilter, readNetFilterState, extensionBundle, isFilterEnforcing, NET_FILTER_APP } from '../../lib/net-filter.js'
 import { runDoctorChecks } from '../../lib/doctor.js'
 import { runSetupIos } from '../../lib/setup.js'
 
@@ -120,15 +120,21 @@ function machine(opts: {
   booted?: string[]
   /** Something holding :4000. */
   relayUp?: boolean
+  /** How old the heartbeat is, in seconds. **The reason this is expressible at all**: a provider
+   *  killed by an activation leaves a file that is still inside the freshness window, and a
+   *  confirmation that only looks at freshness reads it as success. */
+  heartbeatAgeSeconds?: number
 }) {
   const {
     shipped = SHIPPED, installed = SHIPPED, activated = SHIPPED, activatedState,
     shippedExt = shipped,
-    filterRunning = true, booted = [], relayUp = false,
+    filterRunning = true, booted = [], relayUp = false, heartbeatAgeSeconds = 0,
   } = opts
   mockReadFileSync.mockImplementation((p) => {
     if (String(p) === FILTER_STATE_FILE) {
-      return JSON.stringify({ at: Math.floor(Date.now() / 1000), pulseSeconds: 5, rule: [] }) as never
+      return JSON.stringify({
+        at: Math.floor(Date.now() / 1000) - heartbeatAgeSeconds, pulseSeconds: 5, rule: [],
+      }) as never
     }
     // `hostLogTail` reads a log that need not exist.
     return '' as never
@@ -411,8 +417,39 @@ describe('net filter — installing', () => {
   // strength of that report.
 
   it('reports installed when a filter reports itself running', () => {
+    // The fixture rewrites the heartbeat on every read, so it crosses the baseline second on its own
+    // — which is what a provider coming up actually does, and why this one is allowed to wait.
     machine({ installed: OLDER, activated: OLDER })
-    expect(installNetFilter({ confirmDeadlineMs: 0 })).toEqual({ status: 'installed' })
+    expect(installNetFilter({ confirmDeadlineMs: 4_000 })).toEqual({ status: 'installed' })
+  })
+
+  it('does not accept a heartbeat written before the install', () => {
+    // **The false success this whole step exists to prevent, and freshness alone cannot see it.** The
+    // previous provider pulses every five seconds and its file survives the activation that killed it
+    // — removal is asynchronous, two hops after `--off` returns — so twelve seconds old is still
+    // inside the fifteen-second window `isFilterEnforcing` calls alive. Reading it would report
+    // "available now" over a Mac where nothing came back.
+    machine({ installed: OLDER, activated: OLDER, heartbeatAgeSeconds: 12 })
+    expect(installNetFilter({ confirmDeadlineMs: 0 }),
+      'a dead provider\'s last pulse was read as the new one starting').toEqual({ status: 'installed-unconfirmed' })
+  })
+
+  it('does not accept a heartbeat from the same second as the install', () => {
+    // **The boundary, and it is exclusive on purpose.** The file carries whole seconds, so a pulse
+    // written in the second the activation returned could be either provider. One more second of
+    // waiting is cheaper than resolving that ambiguity in favour of success.
+    machine({ installed: OLDER, activated: OLDER, heartbeatAgeSeconds: 0 })
+    expect(installNetFilter({ confirmDeadlineMs: 0 })).toEqual({ status: 'installed-unconfirmed' })
+  })
+
+  it('still reads a merely-fresh heartbeat as running for doctor', () => {
+    // The other half: `doctor` asks whether anything is filtering *now* and passes no baseline, so the
+    // same twelve-second-old file is a running filter to it. Tightening the shared function for the
+    // installer's question must not tighten that one.
+    machine({ heartbeatAgeSeconds: 12 })
+    expect(isFilterEnforcing()).toBe(true)
+    expect(isFilterEnforcing(Date.now(), Math.floor(Date.now() / 1000)),
+      'a baseline was ignored').toBe(false)
   })
 
   it('reports it could not confirm when nothing starts enforcing', () => {
@@ -426,7 +463,10 @@ describe('net filter — installing', () => {
   it('waits rather than deciding on the first look', () => {
     // A provider launched fresh takes seconds to apply its settings — 5.8 measured, one run in five
     // 21.3 — so asking once and answering would report failure on almost every real replace.
-    machine({ installed: OLDER, activated: OLDER })
+    // **The heartbeat is dated after the baseline**, so the only thing gating this is the file
+    // appearing. Left at the current second it would also be waiting for the clock to tick, and the
+    // elapsed assertion below would be measuring that rather than the sleep.
+    machine({ installed: OLDER, activated: OLDER, heartbeatAgeSeconds: -2 })
     let looks = 0
     mockExistsSync.mockImplementation((p) => {
       const q = String(p)
@@ -434,8 +474,12 @@ describe('net filter — installing', () => {
       if (q.startsWith(NET_FILTER_APP) || q.includes('TapflowNetFilter.app')) return true
       return q === '/Applications/Xcode.app'
     })
-    expect(installNetFilter({ confirmDeadlineMs: 5_000 })).toEqual({ status: 'installed' })
+    const began = Date.now()
+    expect(installNetFilter({ confirmDeadlineMs: 8_000 })).toEqual({ status: 'installed' })
     expect(looks, 'it answered on the first look').toBeGreaterThan(2)
+    // **Elapsed, not just the count.** Counting alone passes with `CONFIRM_POLL_MS` at zero or the
+    // sleep deleted, which turns a thirty-second wait into millions of `existsSync` calls.
+    expect(Date.now() - began, 'it spun instead of sleeping between looks').toBeGreaterThanOrEqual(2 * 400)
   })
 
   it('does not wait on the paths where there is nothing to confirm', () => {

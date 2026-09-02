@@ -1,6 +1,6 @@
 import { banner } from '../lib/print.js'
 import { migrateDataDir } from '../lib/migrate-data-dir.js'
-import { installNetFilter, NET_FILTER_APP } from '../lib/net-filter.js'
+import { installNetFilter, CONFIRM_DEADLINE_MS, NET_FILTER_APP } from '../lib/net-filter.js'
 
 // `tapflow migrate data-dir` — one-shot move of a legacy .tapflow-data/ into the unified .tapflow/data/.
 export function cmdMigrateDataDir(): void {
@@ -65,12 +65,18 @@ export function cmdMigrateNetFilter(opts: { ignoreRunningDevices?: boolean } = {
       // making.
       banner('error', 'INSTALLED, BUT NOTHING IS FILTERING YET', [
         `Installed to ${NET_FILTER_APP}, and macOS accepted it — but no filter reported itself`,
-        'as running within 30 seconds, so iOS network control may not work yet.',
+        `as running within ${CONFIRM_DEADLINE_MS / 1000} seconds.`,
         '',
-        'Your network is unaffected either way: a filter that is not running blocks nothing.',
-        '',
-        'Check whether it caught up on its own, and what to do if not:',
+        // **The honest half.** Reaching here means the configuration was switched back on and nothing
+        // answered, which is the shape that took this Mac's network down on 2026-09-02. Saying "your
+        // network is unaffected" would be telling someone the symptom in front of them cannot be
+        // happening — and the remedy for it appears nowhere else in this command's output.
+        'It may still be starting. Check first:',
         '  tapflow doctor ios',
+        '',
+        'If new connections on this Mac have stopped working, take the filter out of the path:',
+        `  ${NET_FILTER_APP}/Contents/MacOS/TapflowNetFilter --off`,
+        'Traffic returns immediately; iOS network control stays off until you run this command again.',
       ])
       process.exit(1)
       break
