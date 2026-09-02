@@ -244,7 +244,7 @@ const FILTER_STATE_FILES = [
  * Stale counts as stopped, on the agent's own rule — three missed pulses, with `pulseSeconds` taken
  * from the file rather than assumed, because the provider slows its pulse while nothing is offline.
  */
-export function isFilterEnforcing(now = Date.now()): boolean {
+export function isFilterEnforcing(now = Date.now(), since = 0): boolean {
   for (const path of FILTER_STATE_FILES) {
     if (!existsSync(path)) continue
     try {
@@ -255,6 +255,14 @@ export function isFilterEnforcing(now = Date.now()): boolean {
       // provider writes when it cannot write the first, so a Mac that failed over leaves an old file
       // at the first one and a live heartbeat at the second. Returning here read that Mac as stopped
       // and made every run pay the disable/enable cycle this module exists to make rare.
+      // **`since` is how a caller asks "did somebody start *after* this moment".** Freshness alone
+      // cannot tell a live provider from one that died inside the window — the file is written every
+      // pulse and removed asynchronously two hops after `--off` returns, so a provider killed by an
+      // activation leaves a file that is up to fifteen seconds young. A caller waiting for a filter to
+      // come *back* would read that as success on its first look, which is the false report the wait
+      // exists to prevent. `doctor` passes nothing, because it only asks whether anything is running
+      // now.
+      if (raw.at <= since) continue
       if (Math.floor(now / 1000) - raw.at <= 3 * Math.max(pulse, 1)) return true
       continue
     } catch {
@@ -329,10 +337,19 @@ export interface InstallOptions {
   /** Replace even though devices are in use. The refusal exists because a replace interrupts every
    *  new connection on the Mac; this is the caller saying they know and want it anyway. */
   ignoreRunningDevices?: boolean
+  /**
+   * How long to wait for a filter to report itself running, in milliseconds.
+   *
+   * A parameter rather than a constant because a test that means "it never came back" would otherwise
+   * spend the real deadline proving it — 60 seconds across two cases, measured. Passing `0` asks once
+   * and answers, which is the same code path a slow provider takes on its last poll.
+   */
+  confirmDeadlineMs?: number
 }
 
 export type InstallOutcome =
   | { status: 'installed' }
+  | { status: 'installed-unconfirmed' }
   | { status: 'already-current' }
   | { status: 'needs-approval'; filterLeftDisabled: boolean }
   | { status: 'needs-reboot' }
@@ -356,6 +373,23 @@ const OFF_TIMEOUT_MS = 15_000
  *  rather than a slow one — and after the disable above, a copy that never returns is what leaves the
  *  filter off with nothing said. */
 const COPY_TIMEOUT_MS = 60_000
+
+/**
+ * How long the filter gets to come back up before the run says it could not tell.
+ *
+ * The provider writes its state file once from `startFilter`, so this is the time between the
+ * preference save being accepted and settings actually being applied. Measured on this Mac: about
+ * four seconds for a provider that was already resident, and `SimulatorNetwork.ts` records 5.8s for
+ * one launched fresh, with one run in five taking 21.3. Thirty is that worst case with room.
+ *
+ * **The successful path does not wait**, so this is only ever spent on a run that has something to
+ * report. Waiting is what makes the report possible.
+ */
+export const CONFIRM_DEADLINE_MS = 30_000
+
+/** How often to look. The file is written once and then pulsed, so this only decides how quickly a
+ *  success is noticed. */
+const CONFIRM_POLL_MS = 500
 
 /** How long `--install` gets. Generous because it can be waiting on a macOS approval dialog — the
  *  host has its own approval and stall deadlines (exit 4 and 6) and this is only the backstop for a
@@ -493,7 +527,19 @@ export function installNetFilter(opts: InstallOptions = {}): InstallOutcome {
     return { status: 'failed', code: -1, detail: 'the filter host did not run', filterLeftDisabled: true }
   }
   switch (run.status) {
-    case 0: return { status: 'installed' }
+    // **Exit 0 is "nothing refused", which is smaller than "it works"** — `Host/main.swift` says so
+    // itself. The framework hands the configuration to the provider afterwards with nothing coming
+    // back, and this run has just switched the filter off on the strength of that report. So the last
+    // thing it does is look.
+    // **From a baseline, not from freshness.** The heartbeat this is waiting for has to have been
+    // written after the activation returned; the previous provider's last one can still be inside the
+    // freshness window, and reading it would report success over a Mac where nothing came back.
+    //
+    // The second is exclusive, so a provider that came up inside the same second waits one more —
+    // cheaper than the ambiguity, since the file only carries whole seconds.
+    case 0: return waitForEnforcing(opts.confirmDeadlineMs ?? CONFIRM_DEADLINE_MS, Math.floor(Date.now() / 1000))
+      ? { status: 'installed' }
+      : { status: 'installed-unconfirmed' }
     // **Approval and reboot differ in whether the filter came back**, which is why only one of them
     // carries the flag. The approval path dies before `configureFilter` runs, so the filter is still
     // off; the reboot path runs it — deliberately, since this binary is the only way a device is put
@@ -507,6 +553,29 @@ export function installNetFilter(opts: InstallOptions = {}): InstallOutcome {
         detail: hostLogTail() || (run.stderr || '').trim() || `exit ${run.status}`,
         filterLeftDisabled: true,
       }
+  }
+}
+
+/**
+ * Wait for a provider to start enforcing, or give up.
+ *
+ * **Reading the heartbeat rather than asking over `--confirm`**, and the reason is agreement rather
+ * than cost. `doctor ios` answers "is it running" from `isFilterEnforcing`, and two commands
+ * answering one question from two sources eventually answer it differently — the same shape as
+ * comparing a host version against an extension one. It is also a file read, so it cannot change the
+ * Mac, which is not nothing on a path whose neighbours run a binary that once erased a rule when
+ * handed a flag it did not know.
+ *
+ * `Atomics.wait` on a throwaway buffer, not a busy loop: this module is synchronous all the way up to
+ * two commands that are synchronous themselves, and making it async to sleep would mean making
+ * `installNetFilter`, `setUpNetFilter` and `cmdMigrateNetFilter` async for a pause.
+ */
+function waitForEnforcing(deadlineMs: number, since: number): boolean {
+  const until = Date.now() + deadlineMs
+  for (;;) {
+    if (isFilterEnforcing(Date.now(), since)) return true
+    if (Date.now() >= until) return false
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, CONFIRM_POLL_MS)
   }
 }
 

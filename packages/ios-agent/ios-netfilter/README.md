@@ -108,7 +108,7 @@ $B --confirm                    # 실행 중인 provider가 뭘 집행 중인지
 $B --confirm    # {"enforcing":true,"rule":["<udid>",…],"pid":1234}
 ```
 
-**exit 0이 못 하는 말을 하는 유일한 채널이다.** 저장이 받아들여진 것과 실행 중인 provider가 그 룰을
+**exit 0이 못 하는 말을 하는 채널이다. 다른 하나는 provider가 쓰는 상태 파일이고, CLI의 설치 확인과 `tapflow doctor ios`는 그쪽을 읽는다.** 저장이 받아들여진 것과 실행 중인 provider가 그 룰을
 들고 있는 것은 다르고, 그 사이에 확인이 돌아오지 않는다. 왕복은 0.26–0.74ms.
 
 **`enforcing`이 따로 있는 이유**: `rule: []`은 "오프라인 기기가 없다"와 "필터가 정지했다" 둘 다다.

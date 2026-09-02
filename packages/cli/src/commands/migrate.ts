@@ -1,6 +1,6 @@
 import { banner } from '../lib/print.js'
 import { migrateDataDir } from '../lib/migrate-data-dir.js'
-import { installNetFilter, NET_FILTER_APP } from '../lib/net-filter.js'
+import { installNetFilter, CONFIRM_DEADLINE_MS, NET_FILTER_APP } from '../lib/net-filter.js'
 
 // `tapflow migrate data-dir` — one-shot move of a legacy .tapflow-data/ into the unified .tapflow/data/.
 export function cmdMigrateDataDir(): void {
@@ -58,6 +58,28 @@ export function cmdMigrateNetFilter(opts: { ignoreRunningDevices?: boolean } = {
         'iOS network control is available now: tapflow doctor ios',
       ])
       return
+    case 'installed-unconfirmed':
+      // **Not a failure, and not a success either.** The app is in place and the extension is
+      // activated; what could not be confirmed is that a provider came back up and started
+      // enforcing. Saying "available now" here would be the claim this whole check exists to stop
+      // making.
+      banner('error', 'INSTALLED, BUT NOTHING IS FILTERING YET', [
+        `Installed to ${NET_FILTER_APP}, and macOS accepted it — but no filter reported itself`,
+        `as running within ${CONFIRM_DEADLINE_MS / 1000} seconds.`,
+        '',
+        // **The honest half.** Reaching here means the configuration was switched back on and nothing
+        // answered, which is the shape that took this Mac's network down on 2026-09-02. Saying "your
+        // network is unaffected" would be telling someone the symptom in front of them cannot be
+        // happening — and the remedy for it appears nowhere else in this command's output.
+        'It may still be starting. Check first:',
+        '  tapflow doctor ios',
+        '',
+        'If new connections on this Mac have stopped working, take the filter out of the path:',
+        `  ${NET_FILTER_APP}/Contents/MacOS/TapflowNetFilter --off`,
+        'Traffic returns immediately; iOS network control stays off until you run this command again.',
+      ])
+      process.exit(1)
+      break
     case 'already-current':
       banner('success', 'ALREADY UP TO DATE', ['The Mac is already running the filter this tapflow carries.'])
       return

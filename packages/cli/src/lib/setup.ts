@@ -1,5 +1,5 @@
 import { execSync, spawnSync } from 'node:child_process'
-import { installNetFilter, isFilterEnforcing, isNetFilterCurrent, readNetFilterState } from './net-filter.js'
+import { installNetFilter, isFilterEnforcing, isNetFilterCurrent, readNetFilterState, CONFIRM_DEADLINE_MS, NET_FILTER_APP } from './net-filter.js'
 import { existsSync, readFileSync, appendFileSync, readdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -214,6 +214,15 @@ async function setUpNetFilter(): Promise<SetupStepResult> {
         ok: false,
         warn: true,
         detail: 'This tapflow install carries no usable filter app, so iOS network control cannot be set up. Reinstalling tapflow restores it.',
+      }
+    case 'installed-unconfirmed':
+      // Installed, so setup did its job; unverified, so it must not report a clean state. `doctor ios`
+      // asks the same question from the same place, which is why it is the thing to run next.
+      return {
+        label: 'Network filter',
+        ok: false,
+        warn: true,
+        detail: `Installed, but no filter reported itself as running within ${CONFIRM_DEADLINE_MS / 1000} seconds. Check with \`tapflow doctor ios\`; if new connections on this Mac have stopped, run \`${NET_FILTER_APP}/Contents/MacOS/TapflowNetFilter --off\` to take the filter out of the path.`,
       }
     case 'refused-host-unknown':
       // The extension is enforcing and the app it came from is gone, so nothing says whether this
