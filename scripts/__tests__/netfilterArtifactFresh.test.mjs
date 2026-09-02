@@ -4,7 +4,7 @@ import path from 'node:path'
 import { execFileSync } from 'node:child_process'
 import {
   computeRecord, readRecord, collectSources, collectExtSources, collectHostSources, collectAppFiles,
-  extVersionWentBackwards, extVersionToStamp, RECORD,
+  extVersionWentBackwards, extVersionToStamp, RECORD, SHIPPED_APP, EXT_PLIST,
 } from '../lib/netfilter-artifact.mjs'
 
 /**
@@ -125,8 +125,15 @@ describe('the extension version only ever goes up', () => {
     expect(extVersionWentBackwards(null, '100'), 'no previous value is not a decrease').toBe(false)
     expect(extVersionWentBackwards('abc', '100'), 'an unparseable previous was waved through').toBe(true)
     expect(extVersionWentBackwards('100', ''), 'an unparseable current was waved through').toBe(true)
-    // `Number('')` is 0, not NaN — the one input where a finite check reads the wrong way.
+    // **`Number('')` and `Number(' ')` are `0`, not `NaN`** — finite, so a `Number.isFinite` check
+    // accepts them while rejecting `'abc'`, which is what makes the hole look like a working guard.
+    // As a previous value a blank becomes zero, and nothing is lower than zero.
     expect(extVersionWentBackwards('100', ' ')).toBe(true)
+    expect(extVersionWentBackwards('', '100'), 'a blank previous was read as zero').toBe(true)
+    expect(extVersionWentBackwards(' ', '100'), 'a whitespace previous was read as zero').toBe(true)
+    // Absent is not blank: the commit that introduces the field has no previous value, and that is
+    // not a regression.
+    expect(extVersionWentBackwards(undefined, '100')).toBe(false)
   })
 
   const baseline = (() => {
@@ -174,6 +181,34 @@ describe('what build.sh stamps into the extension', () => {
       expect(extVersionToStamp(REPO), 'a changed extension was going to keep its version').toBeNull()
     } finally {
       fs.writeFileSync(victim, original)
+    }
+  })
+
+  it('refuses to reuse a blank version', () => {
+    // A blank one reaches all the way to the plist: `' '` is truthy, so it survives the stamp
+    // helper's `if (v)` and `build.sh`'s `[ -n ... ]` and gets stamped as the version macOS compares.
+    //
+    // **The record has to be moved with the app, or this passes for the wrong reason.** Editing the
+    // shipped bundle changes its hash, and the record-match guard above then returns `null` before
+    // the version is ever read — so the assertion held while the check it names was unreachable.
+    // Caught by mutation: removing that check left this test green.
+    const plist = path.join(REPO, SHIPPED_APP, ...EXT_PLIST)
+    const recordPath = path.join(REPO, RECORD)
+    const originalPlist = fs.readFileSync(plist, 'utf8')
+    const originalRecord = fs.readFileSync(recordPath, 'utf8')
+    try {
+      for (const blank of ['', ' ']) {
+        fs.writeFileSync(plist, originalPlist.replace(
+          /(<key>CFBundleVersion<\/key>\s*<string>)[^<]*(<\/string>)/, `$1${blank}$2`,
+        ))
+        fs.writeFileSync(recordPath, JSON.stringify(
+          { ...JSON.parse(originalRecord), app: computeRecord(REPO).app }, null, 2,
+        ))
+        expect(extVersionToStamp(REPO), `a blank version (${JSON.stringify(blank)}) was going to be stamped`).toBeNull()
+      }
+    } finally {
+      fs.writeFileSync(plist, originalPlist)
+      fs.writeFileSync(recordPath, originalRecord)
     }
   })
 

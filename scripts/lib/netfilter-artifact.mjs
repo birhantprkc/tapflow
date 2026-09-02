@@ -92,6 +92,24 @@ function withoutBuildStamp(rel, bytes) {
   return Buffer.from(bytes.toString('utf8').replace(CFBUNDLEVERSION, '$1$2'), 'utf8')
 }
 
+/**
+ * A build version as a number, or `null` when the string is not one.
+ *
+ * **`Number` is not that predicate, and the difference is the whole reason this exists.**
+ * `Number('')` and `Number(' ')` are `0` — finite, and therefore accepted by a `Number.isFinite`
+ * check that reads as "is this a version". `'abc'` is rejected, so the guard looks like it works.
+ *
+ * A blank version reaches further than it should: `' '` is truthy, so it survives the stamp helper's
+ * `if (v)` and `build.sh`'s `[ -n ... ]`, and lands in `Extension/Info.plist` as the version macOS
+ * compares. And as a *previous* value it becomes `0`, which nothing is lower than, so the regression
+ * check waves every current version through.
+ */
+function versionNumber(v) {
+  if (typeof v !== 'string' || v.trim() === '') return null
+  const n = Number(v)
+  return Number.isFinite(n) ? n : null
+}
+
 /** Read `CFBundleVersion` out of a plist on disk, or null. Regex rather than `plutil`, because this
  *  runs on the CI's Linux where `plutil` does not exist — both plists are XML with exactly one such
  *  key. */
@@ -193,7 +211,7 @@ export function extVersionToStamp(repo) {
   // app the record was written from.
   if (computeRecord(repo).app !== record.app) return null
   const shipped = versionIn(path.join(repo, SHIPPED_APP, ...EXT_PLIST))
-  return Number.isFinite(Number(shipped)) ? shipped : null
+  return versionNumber(shipped) === null ? null : shipped
 }
 
 /**
@@ -205,12 +223,17 @@ export function extVersionToStamp(repo) {
  * previous value lives only in git, so this is asked across commits.
  *
  * Anything unparseable answers `true`: a version nobody can compare is not one this may wave through.
+ * **A blank string is unparseable**, whatever `Number` says about it — the sentence above was already
+ * the intent, and `Number('')` being `0` was quietly making an exception to it.
+ *
+ * Absent is different from blank and stays `false`: a record that has never carried this field is the
+ * ordinary state of the commit that introduces it, not a version that failed to parse.
  */
 export function extVersionWentBackwards(previous, current) {
   if (previous === null || previous === undefined) return false
-  const a = Number(previous)
-  const b = Number(current)
-  if (!Number.isFinite(a) || !Number.isFinite(b)) return true
+  const a = versionNumber(previous)
+  const b = versionNumber(current)
+  if (a === null || b === null) return true
   return b < a
 }
 
