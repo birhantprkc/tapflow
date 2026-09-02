@@ -613,6 +613,22 @@ dead does not fail — measured 3/3, it blocks to the caller's own deadline, bec
 mach name while the process is away. One second: about thirty times a healthy round trip and an
 eighth of the dashboard's request deadline.
 
+**And after a replace that channel is simply gone, so there is a second one.** The retired extension
+sits `[terminated waiting to uninstall on reboot]` still owning the mach name, so the new provider's
+`NSXPCListener.resume()` fails with `Operation not permitted` — silently, because `resume()` returns
+void — and `--confirm` answers `no listener` in 9ms while the filter is enforcing normally and
+publishing a fresh state file. Measured 2026-09-03, on the ordinary upgrade path: every release does
+this. The listener is vended once per process and the provider survives `--off`/`--install` on the
+same pid, so nothing retries it.
+
+Reading that as "not confirmed" is what put `filter-unavailable` in front of a tester whose filter was
+working. `confirmEnforcement` now asks first and **falls back to the provider's state file** when the
+ask fails — the channel `net-filter.ts` already preferred, for its own reason. The fallback answers
+when the published rule matches what was asked for, or when the file was published after the write and
+disagrees; a file that predates the write is not an answer, because that is the ordinary state for
+about a pulse after every toggle. A stale file is never an answer, which is what keeps a dead
+provider's last publication from reading as success.
+
 **And enforcement can stop after the fact**, which no confirmation can cover. Measured: killing the
 provider leaves the kernel passing that simulator's traffic for about 5.8 seconds before launchd has
 it back, 23–27 requests getting through each time. `SimulatorNetwork` watches the provider's state
@@ -668,7 +684,11 @@ one and the next replacement stalled identically; `lsregister -f` changed nothin
 helped — nothing was wrong with the system's state.
 
 Every replacement does still leave the displaced version pending until reboot, so batching changes
-into one build is worth doing regardless. **A self-hoster meets none of this** — they install once
+into one build is worth doing regardless. **And that pending entry is not inert** — it keeps the mach
+service name, so the replacement's `NSXPCListener.resume()` fails and `--confirm` answers `no listener`
+until the Mac restarts (measured 2026-09-03; see the confirmation section above). That is a different
+failure from the stalled activation this section is about, and the guess recorded as wrong up there
+stays wrong: nothing about the pending entry stalls a *replacement*. **A self-hoster meets none of this** — they install once
 per release. A contributor touching `ios-netfilter` meets it the same afternoon, which is why it is
 here rather than only in an issue.
 

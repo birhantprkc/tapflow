@@ -100,7 +100,8 @@ $B --confirm                    # 실행 중인 provider가 뭘 집행 중인지
 | 7 | `--confirm`이 provider에게서 답을 못 받았다 |
 | 8 | 이 빌드가 모르는 인자. 룰은 건드리지 않는다 — 모르는 인자를 무시하고 진행하면 읽기 의도의 호출이 룰을 지운다 |
 
-디바이스가 실제로 오프라인인지는 **1층은 `--confirm`, 2층은 dylib이 남긴 verdict**로 판단한다.
+디바이스가 실제로 오프라인인지는 **1층은 `--confirm`, 답이 없으면 provider의 상태 파일, 2층은
+dylib이 남긴 verdict**로 판단한다. 폴백이 붙은 이유는 아래 "교체 뒤에는 이 채널이 사라진다"에 있다.
 
 ### `--confirm` — 실행 중인 provider에게 직접 묻는다
 
@@ -121,6 +122,25 @@ $B --confirm    # {"enforcing":true,"rule":["<udid>",…],"pid":1234}
 
 **읽기 전용이다.** mach 서비스는 이름만 알면 아무 프로세스나 붙을 수 있고 피어 검증은 아직 없다.
 집행 채널은 `vendorConfiguration` 하나뿐이며, 프로브에 있던 `setRule`은 출시본에 없다.
+
+#### 교체 뒤에는 이 채널이 사라진다 (2026-09-03 실측)
+
+시스템 확장을 교체하면 물러난 쪽이 `[terminated waiting to uninstall on reboot]`로 남아 **mach 이름을
+계속 쥔다.** 그래서 새 provider의 `NSXPCListener.resume()`이 실패한다.
+
+```
+listener failed to activate: xpc_error=[1: Operation not permitted]
+invalidated after a failed init
+```
+
+`resume()`은 `void`라서 아무것도 던지지 않는다. 필터는 정상 집행 중이고 하트비트도 신선한데
+`--confirm`만 9ms 만에 `no listener`로 exit 7을 낸다. `IPCListener`는 프로세스당 한 번만 리스너를
+만들고 provider는 `--off`/`--install`을 거쳐도 같은 pid로 살아남으므로 **재시도가 없다.** 그 프로세스가
+사는 동안 계속 없다.
+
+그래서 `SimulatorNetwork`는 `--confirm`이 실패하면 상태 파일을 읽는다. 그리고 provider는 시작할 때
+자기 이름에 붙어보고 답한 pid가 자기 것인지 확인한 결과를 로그에 남긴다 — 물러난 확장이 대신 답할 수
+있으므로 연결 성공만으로는 판단하지 않는다.
 
 ## provider가 남기는 상태 파일
 

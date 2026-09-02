@@ -124,6 +124,10 @@ private final class Heartbeat {
     /// the provider is enforcing a rule, which is the one thing this file must never say.
     private var stopped = false
     private var lastWrite: CFAbsoluteTime = 0
+    /// The rule as of the last file this object rendered. `nil` until the first one, so the first
+    /// pulse of a provider's life is always due — which is what makes a fresh file appear promptly
+    /// rather than at the idle rate. Written in `renderLocked`, under `lock`, beside `lastWrite`.
+    private var lastPublishedRule: Set<String>?
 
     private var flowsSimulator = 0
     private var flowsHost = 0
@@ -241,7 +245,20 @@ private final class Heartbeat {
     func pulse(rule: Set<String>) {
         lock.lock()
         let now = CFAbsoluteTimeGetCurrent()
-        if now - lastWrite >= Heartbeat.pulseSeconds(enforcing: !rule.isEmpty) - 0.25 {
+        // **A rule this file has not published yet is due whatever the clock says.**
+        //
+        // `note` already forces one on the same edge, and that covers a Mac with traffic — which is
+        // most of them, and is why this was easy to leave out. It is not all of them: `note` runs on
+        // `handleNewFlow`, so a Mac with no connections at all has only this timer, and the threshold
+        // it is about to check is the *idle* rate whenever the new rule is empty. Bringing the last
+        // device back online there published nothing for 4.75 seconds, and the agent's confirmation
+        // reads that silence as the rule not having landed.
+        //
+        // Compared against what was last written rather than taking `RuleWatch`'s edge: that watch is
+        // consume-once and lives on the flow path, so reading it here would race `handleNewFlow` for
+        // the same edge and one of the two would publish nothing.
+        let unpublished = lastPublishedRule != rule
+        if unpublished || now - lastWrite >= Heartbeat.pulseSeconds(enforcing: !rule.isEmpty) - 0.25 {
             lastWrite = now
             publish(renderLocked(rule: rule))
         }
@@ -276,6 +293,7 @@ private final class Heartbeat {
     }
 
     private func renderLocked(rule: Set<String>) -> String {
+        lastPublishedRule = rule
         let avg = walks > 0 ? Double(walkNanos) / Double(walks) / 1000.0 : 0
         // The rule arrives through `vendorConfiguration`, which this provider does not write and
         // cannot constrain. Hand-quoting it made the whole file invalid JSON for any value carrying a
@@ -284,6 +302,12 @@ private final class Heartbeat {
         let rules = (try? JSONSerialization.data(withJSONObject: rule.sorted()))
             .flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
         var json = "{\"at\":\(Int(Date().timeIntervalSince1970))"
+        // **Which provider wrote this.** A replacement leaves two of them briefly alive, both
+        // publishing to this one path, and only one is the session the kernel consults — so a reader
+        // that finds the rule disagreeing cannot otherwise say whose rule it read. `--confirm` has
+        // carried this since #639; the file did not, and the file is what a reader falls back to once
+        // the replacement has taken the XPC listener away.
+        json += ",\"pid\":\(ProcessInfo.processInfo.processIdentifier)"
         json += ",\"pulseSeconds\":\(Int(Heartbeat.pulseSeconds(enforcing: !rule.isEmpty)))"
         json += ",\"rule\":\(rules)"
         json += ",\"flows\":{\"simulator\":\(flowsSimulator),\"host\":\(flowsHost)"
