@@ -1,10 +1,13 @@
 import { describe, it, expect } from 'vitest'
 import fs from 'node:fs'
 import path from 'node:path'
+import { createHash } from 'node:crypto'
+import os from 'node:os'
+import { newestProfile, localProfileHash, localToolchain, shippedProfileName, PROFILE_DIRS } from '../lib/netfilter-local.mjs'
 import { execFileSync } from 'node:child_process'
 import {
   computeRecord, readRecord, collectSources, collectExtSources, collectHostSources, collectAppFiles,
-  extVersionWentBackwards, extVersionToStamp, RECORD, SHIPPED_APP, EXT_PLIST,
+  extVersionWentBackwards, extVersionToStamp, RECORD, SHIPPED_APP, EXT_PLIST, EXT_PROFILE,
 } from '../lib/netfilter-artifact.mjs'
 
 /**
@@ -162,11 +165,189 @@ describe('the extension version only ever goes up', () => {
 })
 
 describe('what build.sh stamps into the extension', () => {
+  /** What a build machine carrying exactly what the committed bundle shipped would report. */
+  const sameMachine = () => ({ profile: computeRecord(REPO).extProfile, toolchain: computeRecord(REPO).extToolchain })
+
   it('reuses the shipped version when the extension inputs are unchanged', () => {
     expect(computeRecord(REPO).extSources, 'the tree and the record disagree — rebuild first')
       .toBe(readRecord(REPO).extSources)
-    expect(extVersionToStamp(REPO), 'an unchanged extension was going to be given a new version')
+    expect(extVersionToStamp(REPO, sameMachine()), 'an unchanged extension was going to be given a new version')
       .toBe(readRecord(REPO).extBundleVersion)
+  })
+
+  // ── the two inputs that are not repo files (#728) ───────────────────────────────────────────
+  //
+  // Both change the shipped extension with nothing under `ios-netfilter/` moving. After #724 that is
+  // no longer a harmless blind spot: a version reused for an extension that changed is a replace
+  // macOS skips **silently**, and every check stays green.
+
+  it('refuses to reuse when the provisioning profile changed', () => {
+    // Renewal is annual, and the profile is the extension's only sealed resource — macOS validates
+    // against it. The renewed one carries a later creation date, so it is the one a build embeds.
+    expect(extVersionToStamp(REPO, { ...sameMachine(), profile: 'a'.repeat(64) }),
+      'a renewed profile was going to ship under the old version').toBeNull()
+  })
+
+  it('refuses to reuse when the toolchain changed', () => {
+    expect(extVersionToStamp(REPO, { ...sameMachine(), toolchain: '99Z999/99Z999' }),
+      'a different Xcode was going to ship under the old version').toBeNull()
+  })
+
+  it('refuses to reuse when it cannot see the machine at all', () => {
+    // **The standing rule of this module**: what it cannot judge gets a fresh version. A probe that
+    // fails — no profile of that name, `xcodebuild` missing — must not read as "nothing changed".
+    expect(extVersionToStamp(REPO, undefined), 'no machine facts was read as unchanged').toBeNull()
+    expect(extVersionToStamp(REPO, { profile: null, toolchain: null })).toBeNull()
+    expect(extVersionToStamp(REPO, { ...sameMachine(), profile: null })).toBeNull()
+    expect(extVersionToStamp(REPO, { ...sameMachine(), toolchain: null })).toBeNull()
+  })
+
+  it('still reuses when only Host/ moved, which is the point of all this', () => {
+    // The guard against over-correcting. Adding inputs is easy to do until nothing is ever reused,
+    // and then #724 bought nothing.
+    const victim = collectHostSources(REPO).find((f) => f.endsWith('.swift'))
+    expect(victim, 'no Swift file in the host half — this test is checking nothing').toBeTruthy()
+    const original = fs.readFileSync(victim, 'utf8')
+    try {
+      fs.writeFileSync(victim, `${original}\n// probe\n`)
+      expect(extVersionToStamp(REPO, sameMachine()), 'a host-only change stopped reusing the version')
+        .toBe(readRecord(REPO).extBundleVersion)
+    } finally {
+      fs.writeFileSync(victim, original)
+    }
+  })
+
+  it('records the profile and toolchain the committed bundle actually carries', () => {
+    // The Linux half. Both live on the maintainer's Mac, but the *shipped* copies are in the bundle,
+    // which is what lets this be checked at all — and what keeps the record machine-independent.
+    const now = computeRecord(REPO)
+    const recorded = readRecord(REPO)
+    expect(now.extProfile).toBe(recorded.extProfile)
+    expect(now.extProfile, 'the extension ships no provisioning profile').toBeTruthy()
+    expect(now.extToolchain).toBe(recorded.extToolchain)
+    expect(now.extToolchain, 'the extension declares no toolchain').toMatch(/^\S+\/\S+$/)
+    // Read straight off the bundle, so a record edited by hand cannot agree with itself.
+    expect(fs.existsSync(path.join(REPO, SHIPPED_APP, ...EXT_PROFILE))).toBe(true)
+  })
+
+  it('picks the newest of several profiles carrying the same name', () => {
+    // Renewal does not replace the old file — this Mac holds two `…Ext DevID` profiles from the same
+    // morning, one of which adds an application-groups entitlement, and the committed bundle carries
+    // the later one. Picking either would look right on a machine with one profile; picking the older
+    // after a renewal is a version reused for an extension that changed, which macOS skips silently.
+    expect(newestProfile([
+      { file: 'old', createdAt: '2026-08-22T09:12:46Z' },
+      { file: 'new', createdAt: '2026-08-22T10:17:20Z' },
+    ])?.file).toBe('new')
+    // Order must not decide it.
+    expect(newestProfile([
+      { file: 'new', createdAt: '2026-08-22T10:17:20Z' },
+      { file: 'old', createdAt: '2026-08-22T09:12:46Z' },
+    ])?.file).toBe('new')
+    expect(newestProfile([])).toBeNull()
+    // A date nobody can read is not evidence of being newest — it must not silence a real renewal.
+    // **Both orders**, because only one of them tells the two implementations apart: reading the
+    // undated one first, a rule that simply overwrites still lands on the dated one by accident.
+    expect(newestProfile([
+      { file: 'unreadable', createdAt: null },
+      { file: 'dated', createdAt: '2020-01-01T00:00:00Z' },
+    ])?.file).toBe('dated')
+    expect(newestProfile([
+      { file: 'dated', createdAt: '2020-01-01T00:00:00Z' },
+      { file: 'unreadable', createdAt: null },
+    ])?.file, 'an unreadable date displaced a real one').toBe('dated')
+    // …but it is still better than nothing when it is all there is.
+    expect(newestProfile([{ file: 'unreadable', createdAt: null }])?.file).toBe('unreadable')
+  })
+
+  it('is exactly the two toolchain fields, and not the build machine OS', () => {
+    // **Deliberate, and the reason this is a chosen pair rather than "the build stamps".**
+    // `BuildMachineOSBuild` sits in the same plist and moves on every macOS point update, so
+    // including it would bump the extension for a software update that changed nothing about the
+    // binary — the cost #724 removed, with a different trigger.
+    //
+    // **Asserted by composition rather than by absence.** `not.toContain(BuildMachineOSBuild)` reads
+    // like the same check and is not: the two values are `25F84` and `25F70` today, but they coincide
+    // whenever the extension is built on the exact macOS release its SDK ships from — and then a
+    // correct implementation fails this test.
+    const plist = fs.readFileSync(path.join(REPO, SHIPPED_APP, ...EXT_PLIST), 'utf8')
+    const at = (key) => plist.match(new RegExp(`<key>${key}</key>\\s*<string>([^<]*)</string>`))?.[1]
+    for (const key of ['DTXcodeBuild', 'DTSDKBuild', 'BuildMachineOSBuild']) {
+      expect(at(key), `the plist no longer carries ${key} — this guard is checking nothing`).toBeTruthy()
+    }
+    expect(computeRecord(REPO).extToolchain).toBe(`${at('DTXcodeBuild')}/${at('DTSDKBuild')}`)
+  })
+
+  it('looks in both places macOS keeps profiles', () => {
+    // **Inspection, because on this Mac the two are indistinguishable by behaviour**: Xcode 16 moved
+    // downloads to the `Developer/Xcode/UserData` directory, which exists here and is empty while all
+    // five profiles sit in the legacy one. Dropping either from the list changes nothing observable
+    // today and everything at the next renewal — the new profile lands in one directory, the
+    // superseded copy stays in the other, and a search that sees only the old one finds a match and
+    // reuses the version for an extension that changed.
+    expect(PROFILE_DIRS.some((d) => d.endsWith('Developer/Xcode/UserData/Provisioning Profiles')),
+      'the Xcode 16+ profile directory is not searched').toBe(true)
+    expect(PROFILE_DIRS.some((d) => d.endsWith('MobileDevice/Provisioning Profiles')),
+      'the legacy profile directory is not searched').toBe(true)
+  })
+
+  it('finds a profile in whichever directory it sits in', () => {
+    // The behavioural half, with the loop's directories injected. The committed bundle carries a real
+    // CMS-signed profile, so this exercises `security cms -D` and the name match rather than a double.
+    const src = path.join(REPO, SHIPPED_APP, ...EXT_PROFILE)
+    const name = shippedProfileName(src)
+    expect(name, 'the shipped extension does not say which profile signed it').toBeTruthy()
+    const expected = createHash('sha256').update(fs.readFileSync(src)).digest('hex')
+
+    for (const position of [0, 1]) {
+      const dirs = [fs.mkdtempSync(path.join(os.tmpdir(), 'tf-a-')), fs.mkdtempSync(path.join(os.tmpdir(), 'tf-b-'))]
+      try {
+        fs.copyFileSync(src, path.join(dirs[position], 'only.provisionprofile'))
+        expect(localProfileHash(name, dirs), `a profile in directory ${position} was not found`).toBe(expected)
+      } finally {
+        for (const d of dirs) fs.rmSync(d, { recursive: true, force: true })
+      }
+    }
+  })
+
+  it('refuses to reuse when the record carries no profile or toolchain to compare', () => {
+    // **Two nulls compare equal**, so a record that lost these fields would switch the comparison off
+    // rather than fail — the bundle id in the profile path is hardcoded, and the `DT*` keys are
+    // Xcode's, so both sides can go missing together.
+    const recordPath = path.join(REPO, RECORD)
+    const original = fs.readFileSync(recordPath, 'utf8')
+    const record = JSON.parse(original)
+    try {
+      // **Only the field under test goes null, and the machine agrees with the record on the other
+      // one.** Nulling both let the *other* comparison return first, so the test passed with the floor
+      // removed — it never reached the line it was named after. Mutation is what said so.
+      for (const field of ['extProfile', 'extToolchain']) {
+        fs.writeFileSync(recordPath, JSON.stringify({ ...record, [field]: null }, null, 2))
+        const local = { profile: record.extProfile, toolchain: record.extToolchain, [field.slice(3).toLowerCase()]: null }
+        expect(extVersionToStamp(REPO, local),
+          `a record with no ${field} reused a version anyway`).toBeNull()
+      }
+    } finally {
+      fs.writeFileSync(recordPath, original)
+    }
+  })
+
+  it('reads this machine through the probes the build actually uses', () => {
+    // **The only test that runs the production path.** Everything above hands `extVersionToStamp` a
+    // `local` built from the record, so the probes in `netfilter-local.mjs` — the ones that decide
+    // whether a real build reuses anything — were exercised by nothing. A wrong profile directory or
+    // a `security` that will not run answers `null`, which mints a fresh version on **every** build:
+    // #724 reverted, on a path no Linux CI touches, with 743 tests green.
+    //
+    // Only the machine-independent half is asserted as a value. The profile this Mac holds and the
+    // Xcode it has are properties of a maintainer's machine, so those are checked for shape.
+    const name = shippedProfileName(path.join(REPO, SHIPPED_APP, ...EXT_PROFILE))
+    expect(name, 'the shipped extension does not say which profile signed it').toBeTruthy()
+
+    const toolchain = localToolchain()
+    if (toolchain !== null) expect(toolchain).toMatch(/^\S+\/\S+$/)
+    const profile = localProfileHash(name)
+    if (profile !== null) expect(profile).toMatch(/^[0-9a-f]{64}$/)
   })
 
   it('refuses to reuse when an extension source changed', () => {
@@ -178,7 +359,7 @@ describe('what build.sh stamps into the extension', () => {
     const original = fs.readFileSync(victim, 'utf8')
     try {
       fs.writeFileSync(victim, `${original}\n// probe\n`)
-      expect(extVersionToStamp(REPO), 'a changed extension was going to keep its version').toBeNull()
+      expect(extVersionToStamp(REPO, sameMachine()), 'a changed extension was going to keep its version').toBeNull()
     } finally {
       fs.writeFileSync(victim, original)
     }
@@ -204,7 +385,7 @@ describe('what build.sh stamps into the extension', () => {
         fs.writeFileSync(recordPath, JSON.stringify(
           { ...JSON.parse(originalRecord), app: computeRecord(REPO).app }, null, 2,
         ))
-        expect(extVersionToStamp(REPO), `a blank version (${JSON.stringify(blank)}) was going to be stamped`).toBeNull()
+        expect(extVersionToStamp(REPO, sameMachine()), `a blank version (${JSON.stringify(blank)}) was going to be stamped`).toBeNull()
       }
     } finally {
       fs.writeFileSync(plist, originalPlist)
@@ -220,7 +401,7 @@ describe('what build.sh stamps into the extension', () => {
     const original = fs.readFileSync(path.join(REPO, RECORD), 'utf8')
     try {
       fs.writeFileSync(path.join(REPO, RECORD), JSON.stringify({ ...record, app: 'deadbeef' }, null, 2))
-      expect(extVersionToStamp(REPO), 'it reused a version from an app the record does not describe').toBeNull()
+      expect(extVersionToStamp(REPO, sameMachine()), 'it reused a version from an app the record does not describe').toBeNull()
     } finally {
       fs.writeFileSync(path.join(REPO, RECORD), original)
     }

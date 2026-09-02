@@ -22,9 +22,11 @@ BUILD_VERSION="$(date +%s)"
 # extension that *did* change is a replace macOS skips SILENTLY, leaving users on the old provider
 # with every check green. See project.yml.
 #
-# **Only an empty answer takes the fallback.** Under `set -e` any non-zero exit from the helper ends
-# the build, which is deliberate — a machine where node cannot run this cannot run the record step
-# either, and stopping is better than shipping a build whose version nobody chose.
+# **The helper always exits 0 and answers on stdout, so an empty answer is the only fallback path.**
+# It catches its own failures deliberately: a probe that cannot run is doubt, and doubt mints a fresh
+# version here rather than stopping a release. It says which on stderr — a silent probe failure and a
+# real change produce the same stdout, so without that line this mechanism can stop working with no
+# symptom but replaces coming back.
 #
 # `FORCE_EXT_BUMP=1` is the escape hatch for what the helper cannot see: the sysext embeds a
 # provisioning profile and a Developer ID signature that live on this Mac, not in the repo. Renewing

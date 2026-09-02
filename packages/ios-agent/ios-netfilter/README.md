@@ -191,7 +191,8 @@ log show --last 5m --debug --predicate 'process == "sysextd"' | grep -i conflict
 둘 다 도움이 될 수 없었다.
 
 교체마다 이전 버전이 재부팅까지 대기 상태로 남는 건 사실이므로, 편집마다 빌드하지 말고 묶는 편이
-낫다. 자가호스터는 릴리스당 한 번 설치하므로 이걸 만나지 않는다 — `ios-netfilter`를 건드리는 기여자가
+낫다. #724 이후로는 `Host/`만 고친 빌드가 교체를 일으키지 않으므로 이 조언은 확장을 건드리는 편집에만
+해당한다. 자가호스터는 릴리스당 한 번 설치하므로 이걸 만나지 않는다 — `ios-netfilter`를 건드리는 기여자가
 만난다.
 
 `build.sh` 헤더에 one-time 셋업(App ID + NE capability, notarytool 자격증명)이 있다.
@@ -199,8 +200,38 @@ log show --last 5m --debug --predicate 'process == "sysextd"' | grep -i conflict
 **★설치할 때 두 가지를 반드시 지킨다** — 둘 다 어기면 증상이 같다(새 빌드인데 옛 코드가 조용히 돈다):
 
 1. **`CFBundleVersion`을 올린다.** 버전이 같으면 activation이 `result 0`을 돌려주면서도 번들 교체를
-   조용히 건너뛴다. `build.sh`가 매 빌드 유니크 버전을 주입한다(xcodegen이 버전을 리터럴로 박아
-   build setting override가 안 먹으므로 generate 후 `plutil` 필수).
+   조용히 건너뛴다. xcodegen이 버전을 리터럴로 박아 build setting override가 안 먹으므로 generate 후
+   `plutil`이 필수다.
+
+   **호스트와 확장이 각각 다른 규칙을 따른다**(#724). 호스트 앱은 매 빌드 새 epoch을 받는다. 확장은
+   자기 입력이 안 바뀌었으면 **버전을 유지한다** — 그래야 `Host/`만 고친 릴리스가 사용자 맥의
+   provider를 교체하지 않는다. 교체는 맥의 모든 새 연결을 그 사이 멈추게 하므로 공짜가 아니다.
+
+   확장 입력은 열거된 넷이다 — `Extension/`, `Shared/`, `project.yml`, `build.sh`. 여기에 프로비저닝
+   프로파일과 툴체인(`DTXcodeBuild`/`DTSDKBuild`)이 더해진다(#728). "`Host/`가 아니면 전부"가 아니다:
+   `README.md`·`shipped.json`·`TapflowNetFilter.xcodeproj/`는 입력이 아니다. `project.pbxproj`는
+   xcodegen이 매번 새 식별자로 다시 쓰기 때문에 의도적으로 제외돼 있다.
+
+   `Extension/`이나 `Shared/`를 고쳤다면 버전은 자동으로 오른다. `Host/`만 고쳤다면 안 오른다.
+   **그것이 의도한 동작이다** — 확장 바이너리가 같으므로 교체할 것이 없다.
+
+   **`ios-netfilter/` 최상위에 파일을 새로 놓는다면 그것만으로는 입력이 되지 않는다.** 확장 바이너리를
+   바꾸는 파일이라면 `scripts/lib/netfilter-artifact.mjs`의 `EXT_SOURCE_FILES`에 이름을 추가해야 한다.
+
+   서명 주체가 바뀌는 경우는 프로파일이 잡는다. 확장 프로파일 안에 `TeamIdentifier`와
+   `DeveloperCertificates`가 들어 있어서, 팀을 옮기거나 Developer ID를 교체하면 프로파일이 재발급되고
+   바이트가 달라진다. 호스트 쪽 서명이 바뀌는 것은 확장 번들을 건드리지 않는다 — 중첩 서명은 한
+   방향이라 호스트가 확장을 봉인하지 그 반대가 아니고, 호스트 앱은 어차피 매 릴리스 교체된다.
+
+   그래도 판정이 못 보는 것이 남을 수 있다. 레포에도 프로파일에도 툴체인에도 안 나타나는 변화라면
+   강제한다.
+
+   ```bash
+   FORCE_EXT_BUMP=1 ./build.sh
+   ```
+
+   판정 자체는 `scripts/netfilter-stamp-version.mjs`가 하고, 답을 못 내면 새 버전을 만든다. 불필요한
+   교체는 몇 초를 쓰지만, 바뀐 확장에 버전을 재사용하면 macOS가 교체를 조용히 건너뛰기 때문이다.
 2. **컨테이너 앱을 먼저 죽인다.** 이미 실행 중인 앱에 `open`/exec을 하면 `main`을 다시 안 타므로
    `OSSystemExtensionRequest` 자체가 발생하지 않는다.
    ```bash
@@ -209,6 +240,12 @@ log show --last 5m --debug --predicate 'process == "sysextd"' | grep -i conflict
 
 확인 세 가지: `systemextensionsctl list`의 활성 버전이 방금 빌드한 값인가, provider pid가 바뀌었나,
 `/tmp/tapflow-netfilter-host.log` 마지막 줄 시각이 방금인가.
+
+**단, 확장 버전을 재사용한 빌드에서는 앞의 둘이 안 바뀌는 것이 정상이다.** `Host/`만 고쳤다면 macOS가
+activation을 건너뛰므로 활성 버전도 provider pid도 그대로다. 위 ★ 항목의 "새 빌드인데 옛 코드가 조용히
+돈다"와 증상이 같지만 원인이 반대다 — 확장을 안 고쳤으니 돌아야 할 옛 코드가 곧 새 코드다. 확장을
+고쳤는데도 둘이 안 바뀌었다면 그때가 진짜 문제다. `build.sh` 출력의 `(extension …)` 값이 직전 빌드와
+같은지부터 본다.
 
 앱은 `/Applications`에 있어야 activation `code=3`을 피한다. `ditto`로 복사한다(서명 보존).
 
