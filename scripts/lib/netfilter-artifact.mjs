@@ -20,9 +20,10 @@ import { hashFiles, walk } from './artifact-hash.mjs'
  * What it does **not** claim, and the list is worth reading before trusting this:
  *
  * - that the committed binary was built from the committed sources — nothing here can say that;
- * - anything about **how it was signed**. A Developer-ID-signed, notarized bundle and an ad-hoc one
- *   satisfy this identically, and ad-hoc is the thing that does not load. Recording the signing
- *   authority would need `codesign`, which is macOS-only while this runs on the CI's Linux.
+ * - the signing **authority** — who signed it. That would need `codesign`, which is macOS-only while
+ *   this runs on the CI's Linux. What it does now record is the extension's embedded provisioning
+ *   profile (#728), which is a file in the bundle and readable anywhere; an ad-hoc bundle carries none
+ *   and no longer satisfies this identically, but a Developer ID other than ours would.
  *
  * It says the two trees were recorded together and that neither has changed since. `project.pbxproj`
  * is deliberately not an input: `xcodegen` rewrites it on every build with fresh identifiers, so
@@ -264,6 +265,10 @@ export function extVersionToStamp(repo, local) {
   // The caller reads them — those probes are macOS-only and this module runs on the CI's Linux — and
   // **no answer means a fresh version**, which is this module's standing rule for anything it cannot
   // judge. Getting it wrong the other way is a replace macOS skips without a word.
+  // **A comparison whose two sides are `null` passes, so the record needs a floor of its own.** The
+  // bundle-id in `EXT_PROFILE` is hardcoded and the `DT*` keys are Xcode's; move the extension or drop
+  // the keys and both sides answer `null`, at which point the check disappears without an error.
+  if (record.extProfile == null || record.extToolchain == null) return null
   if (!local || local.profile !== record.extProfile) return null
   if (local.toolchain !== record.extToolchain) return null
   const shipped = versionIn(path.join(repo, SHIPPED_APP, ...EXT_PLIST))

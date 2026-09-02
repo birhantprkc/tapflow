@@ -16,9 +16,23 @@ import path from 'node:path'
  * mechanism is built to fail in.
  */
 
-/** Where macOS keeps downloaded provisioning profiles. Not `~/Library/Developer/Xcode/UserData/…`,
- *  which is empty on this Mac — measured. */
-const PROFILE_DIR = path.join(os.homedir(), 'Library', 'MobileDevice', 'Provisioning Profiles')
+/**
+ * Where macOS keeps downloaded provisioning profiles. **Both places, and the second one is the point.**
+ *
+ * Xcode 16 moved downloads to `Developer/Xcode/UserData/…` and leaves whatever is already in the
+ * legacy directory alone. On this Mac the new one exists and is empty while all five profiles sit in
+ * the old one — which is exactly the arrangement that makes reading only one of them dangerous: a
+ * renewed profile lands in the new directory, the superseded copy stays in the old, and a search that
+ * sees only the old finds a match and reuses the version for an extension that changed.
+ *
+ * That failure is worse than the one this file exists to fix, because it arrives after a maintainer
+ * has stopped reaching for `FORCE_EXT_BUMP=1`. Reading both can only add candidates, and an extra
+ * candidate costs a replace nobody needed.
+ */
+export const PROFILE_DIRS = [
+  path.join(os.homedir(), 'Library', 'Developer', 'Xcode', 'UserData', 'Provisioning Profiles'),
+  path.join(os.homedir(), 'Library', 'MobileDevice', 'Provisioning Profiles'),
+]
 
 function decode(file) {
   try {
@@ -46,20 +60,22 @@ const dateOf = (xml, key) => xml.match(new RegExp(`<key>${key}</key>\\s*<date>([
  * Renewal moves the creation date forward, so the renewed profile is the one compared, which is the
  * case this exists for.
  */
-export function localProfileHash(name) {
-  let entries
-  try {
-    entries = fs.readdirSync(PROFILE_DIR)
-  } catch {
-    return null
-  }
+export function localProfileHash(name, dirs = PROFILE_DIRS) {
   const candidates = []
-  for (const entry of entries) {
-    if (!entry.endsWith('.provisionprofile')) continue
-    const file = path.join(PROFILE_DIR, entry)
-    const xml = decode(file)
-    if (!xml || stringOf(xml, 'Name') !== name) continue
-    candidates.push({ file, createdAt: dateOf(xml, 'CreationDate') })
+  for (const dir of dirs) {
+    let entries
+    try {
+      entries = fs.readdirSync(dir)
+    } catch {
+      continue
+    }
+    for (const entry of entries) {
+      if (!entry.endsWith('.provisionprofile')) continue
+      const file = path.join(dir, entry)
+      const xml = decode(file)
+      if (!xml || stringOf(xml, 'Name') !== name) continue
+      candidates.push({ file, createdAt: dateOf(xml, 'CreationDate') })
+    }
   }
   const best = newestProfile(candidates)
   return best === null ? null : createHash('sha256').update(fs.readFileSync(best.file)).digest('hex')

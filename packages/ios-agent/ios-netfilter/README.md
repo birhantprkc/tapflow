@@ -191,7 +191,8 @@ log show --last 5m --debug --predicate 'process == "sysextd"' | grep -i conflict
 둘 다 도움이 될 수 없었다.
 
 교체마다 이전 버전이 재부팅까지 대기 상태로 남는 건 사실이므로, 편집마다 빌드하지 말고 묶는 편이
-낫다. 자가호스터는 릴리스당 한 번 설치하므로 이걸 만나지 않는다 — `ios-netfilter`를 건드리는 기여자가
+낫다. #724 이후로는 `Host/`만 고친 빌드가 교체를 일으키지 않으므로 이 조언은 확장을 건드리는 편집에만
+해당한다. 자가호스터는 릴리스당 한 번 설치하므로 이걸 만나지 않는다 — `ios-netfilter`를 건드리는 기여자가
 만난다.
 
 `build.sh` 헤더에 one-time 셋업(App ID + NE capability, notarytool 자격증명)이 있다.
@@ -206,9 +207,16 @@ log show --last 5m --debug --predicate 'process == "sysextd"' | grep -i conflict
    자기 입력이 안 바뀌었으면 **버전을 유지한다** — 그래야 `Host/`만 고친 릴리스가 사용자 맥의
    provider를 교체하지 않는다. 교체는 맥의 모든 새 연결을 그 사이 멈추게 하므로 공짜가 아니다.
 
-   확장 입력은 `Host/`를 뺀 레포 파일 전부에, 프로비저닝 프로파일과 툴체인(`DTXcodeBuild`/`DTSDKBuild`)을
-   더한 것이다(#728). `Extension/`이나 `Shared/`를 고쳤다면 버전은 자동으로 오른다. `Host/`만 고쳤다면
-   안 오르고, **그것이 의도한 동작이다** — 확장 바이너리가 같으므로 교체할 것이 없다.
+   확장 입력은 열거된 넷이다 — `Extension/`, `Shared/`, `project.yml`, `build.sh`. 여기에 프로비저닝
+   프로파일과 툴체인(`DTXcodeBuild`/`DTSDKBuild`)이 더해진다(#728). "`Host/`가 아니면 전부"가 아니다:
+   `README.md`·`shipped.json`·`TapflowNetFilter.xcodeproj/`는 입력이 아니다. `project.pbxproj`는
+   xcodegen이 매번 새 식별자로 다시 쓰기 때문에 의도적으로 제외돼 있다.
+
+   `Extension/`이나 `Shared/`를 고쳤다면 버전은 자동으로 오른다. `Host/`만 고쳤다면 안 오른다.
+   **그것이 의도한 동작이다** — 확장 바이너리가 같으므로 교체할 것이 없다.
+
+   **`ios-netfilter/` 최상위에 파일을 새로 놓는다면 그것만으로는 입력이 되지 않는다.** 확장 바이너리를
+   바꾸는 파일이라면 `scripts/lib/netfilter-artifact.mjs`의 `EXT_SOURCE_FILES`에 이름을 추가해야 한다.
 
    판정이 못 보는 것이 남는다. 팀 ID 변경처럼 레포에도 프로파일에도 툴체인에도 안 나타나는 변화가
    그렇다. 그럴 때는 강제한다.
@@ -227,6 +235,12 @@ log show --last 5m --debug --predicate 'process == "sysextd"' | grep -i conflict
 
 확인 세 가지: `systemextensionsctl list`의 활성 버전이 방금 빌드한 값인가, provider pid가 바뀌었나,
 `/tmp/tapflow-netfilter-host.log` 마지막 줄 시각이 방금인가.
+
+**단, 확장 버전을 재사용한 빌드에서는 앞의 둘이 안 바뀌는 것이 정상이다.** `Host/`만 고쳤다면 macOS가
+activation을 건너뛰므로 활성 버전도 provider pid도 그대로다. 위 ★ 항목의 "새 빌드인데 옛 코드가 조용히
+돈다"와 증상이 같지만 원인이 반대다 — 확장을 안 고쳤으니 돌아야 할 옛 코드가 곧 새 코드다. 확장을
+고쳤는데도 둘이 안 바뀌었다면 그때가 진짜 문제다. `build.sh` 출력의 `(extension …)` 값이 직전 빌드와
+같은지부터 본다.
 
 앱은 `/Applications`에 있어야 activation `code=3`을 피한다. `ditto`로 복사한다(서명 보존).
 
