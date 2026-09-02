@@ -270,14 +270,17 @@ What the extension can and cannot see is in [Network Control](/guide/network-con
 
 ## iOS: the Mac lost its network while the filter was being replaced {#network-lost-on-replace}
 
-The filter is a content filter, so **every new connection on the Mac waits for it to decide**, not
-only the simulator's. Replacing the extension stops the process that decides while the configuration
-is still switched on, and new connections then wait for an answer nobody will give. Connections
+The filter decides on **every new connection the Mac makes**, not only the simulator's. When it stops
+while it is still switched on, macOS does not let traffic through unchecked. It blocks all of it,
+which is the safe choice for a filter and a sudden one for you. Replacing the extension stops the
+filter for a moment, so the replacement is where this happens.
+
+The failures are immediate rather than slow: **`No route to host`**, not a long wait. Connections
 already open keep working, which is why some things carry on while a browser stops.
 
-`tapflow migrate net-filter` switches the filter off before it activates the replacement, so this
-should not happen. If it does, the command says the filter is switched off rather than leaving you to
-work it out — your network is fine in that state and only iOS network control is missing.
+`tapflow migrate net-filter` switches the filter off before it touches the extension, so this should
+not happen. If it does, the command says the filter is switched off rather than leaving you to work it
+out — your network is fine in that state and only iOS network control is missing.
 
 **Getting the network back does not need a restart.**
 

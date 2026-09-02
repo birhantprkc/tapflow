@@ -392,12 +392,16 @@ tapflow migrate net-filter --ignore-running-devices
 That replaces it anyway. The flag belongs to `net-filter`; `tapflow migrate data-dir` rejects it
 rather than ignoring it.
 
-**The replace switches the filter off before activating, then back on.** A content filter sits in
-front of every new connection on the Mac, not only the simulator's, so replacing the process that
-answers for them while the configuration is still switched on leaves those connections waiting for an
-answer nobody will give. Taking the filter out of the path first means that state never happens. The
-copy into `/Applications` happens before that and disturbs nothing — macOS runs the extension from
-its own directory, which is why it goes on filtering for an app you deleted.
+**The replace switches the filter off first, then back on.** A content filter sits in front of every
+new connection on the Mac, not only the simulator's, and when it stops while it is still switched on
+macOS blocks all of them rather than letting anything through unchecked. New connections fail
+immediately with `No route to host`. Taking the filter out of the path first means that state never
+happens.
+
+It goes off **before the app is copied into `/Applications`**, not only before the extension is
+activated, because both steps stop the filter: copying the app makes macOS restart the filter session
+on its own timing. It goes off again after the copy, from the binary that was just copied, which is
+the one that gates the activation.
 
 If the command fails partway it says whether the filter was left off. The Mac's network works in that
 state and iOS network control does not; running the command again turns it back on.

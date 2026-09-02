@@ -464,6 +464,42 @@ export function installNetFilter(opts: InstallOptions = {}): InstallOutcome {
   const busy = opts.ignoreRunningDevices ? [] : busyDevices()
   if (busy.length > 0) return { status: 'refused-devices-busy', busy }
 
+  // **Switch the filter off before the copy as well, and do it with the binary this package carries.**
+  //
+  // `ditto` into `/Applications` makes macOS post an installed-apps change, and `nesessionmanager`
+  // restarts every filter session on it. That restart is not free: a `filterSockets` session going
+  // down arms a kernel-wide `applyIPDefaultDrop: IP Drop-All`, which is why the failure looks like an
+  // instant `No route to host` rather than a hang.
+  //
+  // Measured 2026-09-03, with the disable happening after the copy: `configuration is now disabled` at
+  // 00:23:01.965 and `Handling installed apps change` at 00:23:02.034. **69 milliseconds.** The
+  // restart landed on a session that was already disabled and cost two probes out of 468. On
+  // 2026-09-02, with no disable anywhere in this path, the same notification landed on an *enabled*
+  // session, armed Drop-All twice, and the plugin was disposed with nothing restarting it: 2m34s with
+  // no network on the Mac, ended by a reboot.
+  //
+  // 69ms is a race won, not a margin. The notification trails the copy by about 130ms and the copy is
+  // the slow part, so a slower disk or a larger bundle reorders them and the 2026-09-02 shape is back.
+  // Disabling first removes the race rather than winning it.
+  //
+  // **From `shipped`, and that is the whole reason this is safe now when it was not before.** The
+  // recorded objection to disabling first was that it meant asking whatever binary happened to be
+  // installed, and a build older than the flag does not refuse it — every unrecognised argument fell
+  // through to `.configure`, which writes `isEnabled = true`, so "switch off" switched it on and
+  // answered 0. The binary here is the one this package ships and always understands the flag.
+  // Measured 2026-09-03: run from the package directory it disabled the **existing** configuration
+  // (same `NEFilterManager` UUID, session `disconnected — Configuration was disabled`) rather than
+  // creating a second one, and the heartbeat file went away. `/Applications` is required for
+  // *system-extension activation*, not for `NEFilterManager`.
+  //
+  // Best effort on purpose: it is an early disable, and `off` below is the gate that must hold.
+  // Nothing here can distinguish "already off" from "could not ask", and both are fine to continue on.
+  restoreExecutableBits(shipped)
+  const preOff = spawnSync(join(shipped, 'Contents', 'MacOS', 'TapflowNetFilter'), ['--off'], {
+    encoding: 'utf8', timeout: OFF_TIMEOUT_MS,
+  })
+  const preOffTook = preOff?.status === 0
+
   const copy = spawnSync('/usr/bin/ditto', [shipped, NET_FILTER_APP], {
     encoding: 'utf8', timeout: COPY_TIMEOUT_MS,
   })
@@ -472,7 +508,10 @@ export function installNetFilter(opts: InstallOptions = {}): InstallOutcome {
       status: 'failed',
       code: copy?.status ?? -1,
       detail: (copy?.stderr || 'ditto failed').trim(),
-      filterLeftDisabled: false,
+      // **Reports the disable above, because by now it may have happened.** Answering a flat `false`
+      // here would tell someone their network is unaffected while their filter is switched off, and
+      // that sentence is what `migrate` and `setup` print from this flag.
+      filterLeftDisabled: preOffTook,
     }
   }
 
@@ -481,26 +520,39 @@ export function installNetFilter(opts: InstallOptions = {}): InstallOutcome {
   // **Take the filter out of the flow path before activating, and do it with the binary just copied
   // in.**
   //
-  // A content filter is `filterSockets`, so every new flow on the Mac waits for a verdict from the
-  // provider. Activating a replacement kills that provider while the configuration stays enabled, and
-  // new connections then wait for a verdict nobody will give: measured 2026-09-02, the Mac's own
-  // traffic timed out and only a restart brought it back. Disabling first means that state never
-  // exists. What is left is the window while the filter comes back up, measured the same day across
-  // ~300 probes: about four seconds of raised latency (10-30ms to 200-400ms) and **no failures**,
-  // because the kernel passes traffic a provider has not applied settings for yet.
+  // **macOS fails a filter session closed, and that is the mechanism — not flows queueing for an
+  // absent provider.** When a `filterSockets` session goes down, `nesessionmanager` arms a
+  // kernel-wide drop: `applyIPDefaultDrop: IP Drop-All enabled <Last>`, `Persistent IP Drop-All level
+  // <5>`. So the symptom is an instant `No route to host` on every new connection, in 1–2ms, rather
+  // than the hang the shape of the problem suggests — worth knowing before reading a bug report about
+  // it, because someone looking for stuck sockets will not find any.
   //
-  // **After the copy, not before it, and that ordering is the whole of two separate defects.**
-  // `ditto` writes `/Applications`; the running provider executes out of `/Library/SystemExtensions`,
-  // which is why macOS goes on filtering for an app someone deleted (`doctor` has a check for exactly
-  // that state). So the copy cannot disturb anything, and only the activation can.
+  // Reconstructed from the unified log for 2026-09-02: the replace stopped the plugin at 14:01:56
+  // with nothing restarting it, the armed drop stayed armed, and the Mac had no network for 2m34s
+  // until a restart (`nesessionmanager` pid 381 → 403 at 14:04:30). Disabling first means the session
+  // is already down when the activation touches it, and a disabled configuration takes the drop back
+  // down with it.
   //
-  // Disabling first instead meant asking whatever binary happened to be installed. That is wrong in
-  // both directions. A build older than the flag does not refuse it — every unrecognised argument fell
-  // through to `.configure`, which writes `isEnabled = true` — so the request to switch the filter off
-  // switched it on and answered 0. And when the app had been deleted there was no binary to ask at
-  // all, while the extension it belonged to was still activated and enforcing, so the replace went
-  // ahead with the filter up. Asking the binary this package shipped removes both: it is the one that
-  // understands the flag, and it is there because the line above put it there.
+  // What is left is the window while the filter comes back up, measured across ~300 probes: about
+  // four seconds of raised latency (10-30ms to 200-400ms) and **no failures**, because the kernel
+  // passes traffic a provider has not applied settings for yet. Measured again through a real
+  // extension replace on 2026-09-03: 2 failed probes out of 468, and the whole command took 2.8s.
+  //
+  // **This is the second disable, and it is the one that gates the activation.** The first ran before
+  // the copy, from `shipped`, against the installed-apps notification `ditto` triggers; see there for
+  // why that one is best-effort and this one is not.
+  //
+  // Both exist because they answer different things. That one is about a *restart* macOS performs on
+  // its own timing, so it has to be earlier than an event nothing here controls. This one is about the
+  // *activation* on the line below, which is ours, so it can be immediately before it — and it must be
+  // the last word, because the window between here and `--install` is the one thing this function is
+  // ordering. The earlier call may also have found nothing to do: a Mac with no filter installed yet
+  // has no configuration to switch off, and the copy is what makes the rest of this possible.
+  //
+  // Asking the binary the copy just landed keeps working the way it always did — it is the one that
+  // understands the flag, and it is there because `ditto` put it there. A build older than the flag
+  // does not refuse it (every unrecognised argument fell through to `.configure`, which writes
+  // `isEnabled = true`), which is why neither call asks whatever happened to be installed already.
   //
   // `--install` turns it back on by itself: with no `--add`/`--remove` it takes `clearAll`, and
   // `configureFilter` ends with `isEnabled = true`. So there is no re-enable step to forget.
@@ -516,7 +568,9 @@ export function installNetFilter(opts: InstallOptions = {}): InstallOutcome {
       code: off?.status ?? -1,
       detail: hostLogTail() || (off?.stderr || '').trim()
         || 'could not switch the filter off before replacing it',
-      filterLeftDisabled: false,
+      // The earlier call may have already taken it off, and if it did, saying otherwise here is the
+      // same false reassurance as on the `ditto` failure above.
+      filterLeftDisabled: preOffTook,
     }
   }
 
