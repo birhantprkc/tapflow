@@ -11,7 +11,8 @@ import { execFileSync, execSync, spawnSync } from 'node:child_process'
 import { accessSync, chmodSync, existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { confirm } from '@clack/prompts'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { createRequire } from 'node:module'
 import { installNetFilter, readNetFilterState, extensionBundle, isFilterEnforcing, NET_FILTER_APP } from '../../lib/net-filter.js'
 import { runDoctorChecks } from '../../lib/doctor.js'
 import { runSetupIos } from '../../lib/setup.js'
@@ -34,19 +35,37 @@ function setTTY(v: boolean | undefined) {
   Object.defineProperty(process.stdout, 'isTTY', { value: v, configurable: true })
 }
 
+/**
+ * Where `shippedAppPath()` lands, resolved the way the module resolves it.
+ *
+ * Not mocked and not hardcoded: `node:fs` is mocked here but module resolution is not, so this is the
+ * same answer `installNetFilter` gets. It matters because the disable that runs *before* the copy asks
+ * this binary, and a fixture that only knew about `/Applications` could not observe anything about it.
+ */
+const SHIPPED_APP = join(
+  dirname(createRequire(import.meta.url).resolve('@tapflowio/ios-agent/package.json')), 'bin', 'TapflowNetFilter.app',
+)
+
 /** A bundle shaped like the real one: an executable under `Contents/MacOS`, and one more inside the
  *  nested system extension. */
-function bundleOnDisk() {
-  const tree: Record<string, string[]> = {
-    [NET_FILTER_APP]: ['Contents'],
-    [`${NET_FILTER_APP}/Contents`]: ['MacOS', 'Library', 'Info.plist'],
-    [`${NET_FILTER_APP}/Contents/MacOS`]: ['TapflowNetFilter'],
-    [`${NET_FILTER_APP}/Contents/Library`]: ['SystemExtensions'],
-    [`${NET_FILTER_APP}/Contents/Library/SystemExtensions`]: ['dev.tapflow.netfilter.ext.systemextension'],
-    [`${NET_FILTER_APP}/Contents/Library/SystemExtensions/dev.tapflow.netfilter.ext.systemextension`]: ['Contents'],
-    [`${NET_FILTER_APP}/Contents/Library/SystemExtensions/dev.tapflow.netfilter.ext.systemextension/Contents`]: ['MacOS'],
-    [`${NET_FILTER_APP}/Contents/Library/SystemExtensions/dev.tapflow.netfilter.ext.systemextension/Contents/MacOS`]: ['dev.tapflow.netfilter.ext'],
+function bundleTree(root: string): Record<string, string[]> {
+  const ext = `${root}/Contents/Library/SystemExtensions/dev.tapflow.netfilter.ext.systemextension`
+  return {
+    [root]: ['Contents'],
+    [`${root}/Contents`]: ['MacOS', 'Library', 'Info.plist'],
+    [`${root}/Contents/MacOS`]: ['TapflowNetFilter'],
+    [`${root}/Contents/Library`]: ['SystemExtensions'],
+    [`${root}/Contents/Library/SystemExtensions`]: ['dev.tapflow.netfilter.ext.systemextension'],
+    [ext]: ['Contents'],
+    [`${ext}/Contents`]: ['MacOS'],
+    [`${ext}/Contents/MacOS`]: ['dev.tapflow.netfilter.ext'],
   }
+}
+
+/** **Both bundles, because both are executed.** The copy's destination has always been walked; the
+ *  package's own copy is walked too since the disable before the copy runs from it. */
+function bundleOnDisk() {
+  const tree: Record<string, string[]> = { ...bundleTree(NET_FILTER_APP), ...bundleTree(SHIPPED_APP) }
   mockReaddirSync.mockImplementation((d) => (tree[String(d)] ?? []) as never)
   mockStatSync.mockImplementation((p) => ({ isDirectory: () => String(p) in tree }) as never)
 }
@@ -330,17 +349,129 @@ describe('net filter — installing', () => {
   // measured on 2026-09-02 the Mac's own traffic then timed out until a restart. Disabling first
   // means that state never exists.
 
-  it('switches the filter off after the copy and before the activation', () => {
+  it('switches the filter off before the copy and again before the activation', () => {
     machine({ installed: OLDER, activated: OLDER })
     expect(installNetFilter()).toEqual({ status: 'installed' })
-    // **Order, not presence.** Both spawns exist whichever way round they go, so counting them cannot
-    // tell the working sequence from the broken one.
+    // **Order, not presence.** All four spawns exist whichever way round they go, so counting them
+    // cannot tell the working sequence from the broken one.
     //
-    // The copy comes first on purpose: `ditto` writes `/Applications` while the running provider
-    // executes out of `/Library/SystemExtensions`, so it disturbs nothing — and putting the disable
-    // after it means the binary being asked is the one this package shipped rather than whatever was
-    // already installed.
-    expect(spawnOrder()).toEqual(['ditto', '--off', '--install'])
+    // **Two disables, because two different things restart the filter session.** The copy itself does:
+    // `ditto` into `/Applications` makes macOS post an installed-apps change and `nesessionmanager`
+    // restarts every filter session on it, on its own timing — measured 2026-09-03, 69ms after the
+    // disable that used to follow the copy, and on 2026-09-02 that same notification landed on an
+    // enabled session and took the Mac's network down for 2m34s. So one disable has to be earlier than
+    // an event nothing here controls. The activation restarts it too, and that one is ours, so the
+    // second disable sits immediately before it and is the gate.
+    expect(spawnOrder()).toEqual(['--off', 'ditto', '--off', '--install'])
+  })
+
+  it('asks the shipped binary for the disable that runs before the copy', () => {
+    // **Which binary, not just which order** — and this is the whole reason the earlier disable is
+    // safe now when the same idea was rejected before. Asking `/Applications` means asking whatever
+    // happened to be installed, and a build older than the flag does not refuse it: every
+    // unrecognised argument fell through to `.configure`, which writes `isEnabled = true`, so the
+    // request to switch the filter off switched it on and answered 0. The binary this package ships
+    // always understands it.
+    //
+    // Measured 2026-09-03: run from the package directory it disabled the **existing** configuration
+    // — same `NEFilterManager` UUID, session `disconnected — Configuration was disabled` — rather
+    // than creating a second one. `/Applications` is required for system-extension activation, not
+    // for `NEFilterManager`.
+    machine({ installed: OLDER, activated: OLDER })
+    bundleOnDisk()
+    expect(installNetFilter()).toEqual({ status: 'installed' })
+
+    const offs = hostCalls('--off').map((c) => String(c[0]))
+    expect(offs).toHaveLength(2)
+    // **Executable, not just named.** A tarball need not carry file modes and pnpm's does not — which
+    // is the whole reason `restoreExecutableBits` exists — so the package's own binary arrives at
+    // `rw-r--r--` and `spawnSync` answers `status: null` for it. This call is best-effort by design, so
+    // nothing downstream would report that: the disable would silently not happen and the ordering the
+    // rest of this test asserts would be decoration.
+    expect(mockChmodSync.mock.calls.map((c) => String(c[0])),
+      'the binary the pre-copy disable runs was never made executable').toContain(offs[0])
+    expect(offs[0], 'the pre-copy disable named a path that is not the host binary')
+      .toBe(`${SHIPPED_APP}/Contents/MacOS/TapflowNetFilter`)
+    expect(offs[0], 'the pre-copy disable asked the installed binary, which may not know the flag')
+      .not.toMatch(new RegExp(`^${NET_FILTER_APP}`))
+    expect(offs[0], 'the pre-copy disable did not ask a TapflowNetFilter at all').toContain('TapflowNetFilter.app')
+    expect(offs[1], 'the pre-activation disable must ask the binary the copy just landed')
+      .toMatch(new RegExp(`^${NET_FILTER_APP}`))
+  })
+
+  it('does not claim the network is unaffected when the copy fails after the filter went off', () => {
+    // `filterLeftDisabled` is what `migrate` and `setup` print "your network is unaffected" from. The
+    // earlier disable may already have taken by the time `ditto` fails, and answering a flat `false`
+    // here would tell someone their filter is up while it is switched off — the same false
+    // reassurance #732 removed from the unconfirmed banner, reintroduced one branch over.
+    machine({ installed: OLDER, activated: OLDER })
+    mockSpawnSync.mockImplementation((cmd, args) => {
+      if (String(cmd) === '/usr/bin/ditto') return { status: 1, stdout: '', stderr: 'ditto: no space' } as never
+      if ((args as string[] | undefined)?.includes('--off')) return { status: 0, stdout: '', stderr: '' } as never
+      return { status: 0, stdout: '', stderr: '' } as never
+    })
+
+    expect(installNetFilter()).toEqual({
+      status: 'failed', code: 1, detail: 'ditto: no space', filterLeftDisabled: true,
+    })
+  })
+
+  it('says the filter is off when the pre-copy disable took and the second one did not', () => {
+    // **The twin of the `ditto` case above, and the one that was left unobserved.** The existing
+    // failure test makes *every* `--off` fail, so `false` and `preOffTook` are the same value in it —
+    // the branch reads as covered while nothing distinguishes them. Here the package's own binary
+    // succeeds (it always understands the flag) and the copied one does not, which is the ordinary
+    // shape of a save that gets refused.
+    machine({ installed: OLDER, activated: OLDER })
+    mockSpawnSync.mockImplementation((cmd, args) => {
+      if (String(cmd) === '/usr/bin/ditto') return { status: 0, stdout: '', stderr: '' } as never
+      if ((args as string[] | undefined)?.includes('--off')) {
+        return String(cmd).startsWith(NET_FILTER_APP)
+          ? { status: 3, stdout: '', stderr: 'save refused' } as never
+          : { status: 0, stdout: '', stderr: '' } as never
+      }
+      return { status: 0, stdout: '', stderr: '' } as never
+    })
+
+    expect(installNetFilter()).toMatchObject({ status: 'failed', code: 3, filterLeftDisabled: true })
+  })
+
+  it('does not say a filter was switched off when there was none to switch off', () => {
+    // `--off` treats an absent configuration as a success on purpose, so its exit code alone answers
+    // "yes" on a Mac that never had a filter. `filterLeftDisabled` is what both commands print *"the
+    // filter is switched off"* from, and saying that to someone whose first install failed is a wrong
+    // diagnosis dressed as a remedy.
+    machine({ installed: null, activated: null, filterRunning: false })
+    mockSpawnSync.mockImplementation((cmd) => (String(cmd) === '/usr/bin/ditto'
+      ? { status: 1, stdout: '', stderr: 'ditto: no space' } as never
+      : { status: 0, stdout: '', stderr: '' } as never))
+
+    expect(installNetFilter()).toEqual({
+      status: 'failed', code: 1, detail: 'ditto: no space', filterLeftDisabled: false,
+    })
+  })
+
+  it('does not explain a failed disable with a line the earlier one wrote', () => {
+    // The host appends to a single log, so once two runs share it "the last line" stops meaning "this
+    // run". With the pre-copy disable now always writing one, a second disable that dies before
+    // logging anything would otherwise be reported to the operator as `filter disabled` — a success
+    // line offered as the cause of a failure.
+    machine({ installed: OLDER, activated: OLDER })
+    mockReadFileSync.mockImplementation((p) => (String(p) === FILTER_STATE_FILE
+      ? JSON.stringify({ at: Math.floor(Date.now() / 1000), pulseSeconds: 5, rule: [] }) as never
+      : 'host launched\nfilter disabled' as never))
+    mockSpawnSync.mockImplementation((cmd, args) => {
+      if (String(cmd) === '/usr/bin/ditto') return { status: 0, stdout: '', stderr: '' } as never
+      if ((args as string[] | undefined)?.includes('--off') && String(cmd).startsWith(NET_FILTER_APP)) {
+        return { status: 3, stdout: '', stderr: '' } as never
+      }
+      return { status: 0, stdout: '', stderr: '' } as never
+    })
+
+    const outcome = installNetFilter()
+    expect(outcome).toMatchObject({ status: 'failed', code: 3 })
+    expect((outcome as { detail: string }).detail, 'a success line was offered as the failure reason')
+      .toBe('could not switch the filter off before replacing it')
   })
 
   it('refuses when the app is gone and an extension is still enforcing', () => {
@@ -401,7 +532,7 @@ describe('net filter — installing', () => {
     // `--install` can legitimately sit on a macOS approval dialog; none of the three may sit forever.
     machine({ installed: OLDER, activated: OLDER })
     expect(installNetFilter()).toMatchObject({ status: 'installed' })
-    expect(spawnOrder()).toEqual(['ditto', '--off', '--install'])
+    expect(spawnOrder()).toEqual(['--off', 'ditto', '--off', '--install'])
     for (const [cmd, args, opts] of mockSpawnSync.mock.calls) {
       const what = String((args as string[] | undefined)?.[0] ?? cmd)
       expect((opts as { timeout?: number } | undefined)?.timeout, `${what} can hang forever`)
@@ -467,16 +598,22 @@ describe('net filter — installing', () => {
     // appearing. Left at the current second it would also be waiting for the clock to tick, and the
     // elapsed assertion below would be measuring that rather than the sleep.
     machine({ installed: OLDER, activated: OLDER, heartbeatAgeSeconds: -2 })
+    // **One look happens before the loop.** The disable that runs before the copy asks whether a filter
+    // was running at all, so the heartbeat is read once outside the confirmation — and this threshold
+    // has to skip it or the loop gets credited with a look it did not make and sleeps one time fewer.
+    // Coupled to that count on purpose: another read added ahead of the loop should fail here rather
+    // than quietly shorten what this test measures.
+    const BEFORE_LOOP = 1
     let looks = 0
     mockExistsSync.mockImplementation((p) => {
       const q = String(p)
-      if (q === FILTER_STATE_FILE) return ++looks > 2
+      if (q === FILTER_STATE_FILE) return ++looks > BEFORE_LOOP + 2
       if (q.startsWith(NET_FILTER_APP) || q.includes('TapflowNetFilter.app')) return true
       return q === '/Applications/Xcode.app'
     })
     const began = Date.now()
     expect(installNetFilter({ confirmDeadlineMs: 8_000 })).toEqual({ status: 'installed' })
-    expect(looks, 'it answered on the first look').toBeGreaterThan(2)
+    expect(looks, 'it answered on the first look').toBeGreaterThan(BEFORE_LOOP + 2)
     // **Elapsed, not just the count.** Counting alone passes with `CONFIRM_POLL_MS` at zero or the
     // sleep deleted, which turns a thirty-second wait into millions of `existsSync` calls.
     expect(Date.now() - began, 'it spun instead of sleeping between looks').toBeGreaterThanOrEqual(2 * 400)
@@ -640,7 +777,7 @@ describe('net filter — installing', () => {
   it('replaces anyway when the caller says to', () => {
     machine({ installed: OLDER, activated: OLDER, booted: ['iPhone 17'], relayUp: true })
     expect(installNetFilter({ ignoreRunningDevices: true })).toEqual({ status: 'installed' })
-    expect(spawnOrder()).toEqual(['ditto', '--off', '--install'])
+    expect(spawnOrder()).toEqual(['--off', 'ditto', '--off', '--install'])
   })
 
   it('does not refuse for a device that is present but not booted', () => {

@@ -61,6 +61,9 @@ export interface SimulatorNetworkOptions {
   /** How often liveness is checked. Overridable so a test does not have to spend seconds of wall
    *  clock proving that a stale file is noticed; the threshold itself comes from the file. */
   livenessIntervalMs?: number
+  /** How long the state-file fallback waits for the provider to publish. Same reason as the interval
+   *  above: proving that a file which never catches up is refused should not cost three seconds. */
+  filterConfirmDeadlineMs?: number
 }
 
 const DEFAULT_HOST_BINARY = '/Applications/TapflowNetFilter.app/Contents/MacOS/TapflowNetFilter'
@@ -90,6 +93,30 @@ const FILTER_HOST_TIMEOUT_MS = 15_000
  * kernel that was not enforcing. `serialize` has the sequences.
  */
 const FILTER_CONFIRM_TIMEOUT_MS = 1_000
+
+/**
+ * How long the **file** fallback gets, once the ask above has already failed.
+ *
+ * Only reached when the XPC channel is gone, and after a system-extension replace it is: the retired
+ * extension sits `[terminated waiting to uninstall on reboot]` holding the mach name, the new
+ * provider's `NSXPCListener.resume()` fails with `Operation not permitted`, and `--confirm` answers
+ * `no listener` in 9ms while the filter is genuinely enforcing. Measured 2026-09-03. The listener is
+ * vended once per process and the provider survives `--off`/`--install`, so that failure lasts as
+ * long as the provider does.
+ *
+ * Three seconds is three of the provider's enforcing pulses, the same tolerance `checkLivenessLocked`
+ * gives a rule change that has not been published yet. It covers the forced publish a rule change
+ * triggers (one 1s tick plus the timer's 250ms leeway).
+ *
+ * **What it does not cover, on purpose**: a provider old enough to lack that forced publish, going
+ * back *online* on a Mac with no traffic at all — that direction waits out `pulseSeconds(false)`,
+ * 4.75s. Sizing this past that would hold the operation queue for six seconds on every failed
+ * toggle. The case is no worse than it is today, where the same Mac has no answer at all.
+ */
+const FILTER_FILE_CONFIRM_DEADLINE_MS = 3_000
+
+/** Cheap enough to be indistinguishable from the file's own write, and coarse enough not to spin. */
+const FILTER_FILE_POLL_MS = 100
 
 /** Where the provider writes what it is enforcing. Both are tried: the first is where it lands on a
  *  healthy Mac, the second is the fallback it uses when that directory cannot be written. */
@@ -152,6 +179,15 @@ interface FilterStateFile {
   at: number
   pulseSeconds: number
   rule: string[]
+  /**
+   * Which provider wrote this, when the provider is new enough to say.
+   *
+   * **Absent is the ordinary answer during a rollout**, so nothing may treat its absence as a bad
+   * file. It matters in one window: a replace leaves two providers briefly alive, both publishing to
+   * the same path, and only one of them is the session the kernel consults. Without it a log saying
+   * the rule disagreed cannot name which provider it read.
+   */
+  pid?: number
   /**
    * Flows the provider dropped, per device (#654) — **evidence, and only in one direction.**
    *
@@ -245,6 +281,7 @@ export class SimulatorNetwork {
    *  cheaper than a test that says otherwise. */
   private disposed = false
   private readonly stateFiles: string[]
+  private readonly confirmDeadlineMs: number
   private enforcementLost: (udid: string) => void
   private readonly livenessIntervalMs: number
 
@@ -257,6 +294,7 @@ export class SimulatorNetwork {
     this.verdictDir = opts.verdictDir ?? '/tmp'
     this.dylib = opts.nethookDylib ?? NETHOOK_DYLIB
     this.stateFiles = opts.filterStateFiles ?? FILTER_STATE_FILES
+    this.confirmDeadlineMs = opts.filterConfirmDeadlineMs ?? FILTER_FILE_CONFIRM_DEADLINE_MS
     this.enforcementLost = opts.onEnforcementLost ?? (() => { /* nobody listening */ })
     this.livenessIntervalMs = opts.livenessIntervalMs ?? LIVENESS_INTERVAL_MS
   }
@@ -494,28 +532,63 @@ export class SimulatorNetwork {
    * confirmation agree with a rule its own request had not asked for, and the success path then
    * applied layers 2 and 3 for the wrong direction.
    *
-   * A mismatch is logged **with what was actually read**. Two agents writing the same rule cannot be
-   * told apart afterwards from a log that only records what each one expected — each is internally
-   * consistent and one of them is stale.
+   * A mismatch is logged **with what was actually read**, and with the channel it was read from.
+   * Two agents writing the same rule cannot be told apart afterwards from a log that only records
+   * what each one expected — each is internally consistent and one of them is stale.
    */
   private async applyAndConfirm(udid: string, wanted: boolean): Promise<boolean> {
+    // **Read before the write, and read the file's own clock.** The fallback below needs to tell a
+    // publication that answers this write from one that predates it, and the file stamps whole
+    // seconds — so a baseline taken from `Date.now()` here would land in the same second as the
+    // provider's reply about nine times in ten and reject the very answer it was waiting for.
+    const before = this.readFilterState()?.at ?? 0
     if (!await this.runFilterHost(wanted ? { add: [udid] } : { remove: [udid] })) return false
-    const seen = await this.confirmEnforcement()
+    const seen = await this.confirmEnforcement(udid, wanted, before)
     if (!seen) return false
     if (!seen.enforcing) return false
     if (seen.rule.includes(udid) !== wanted) {
       console.warn(
         `[network] filter rule disagrees for ${udid}: wanted ${wanted ? 'offline' : 'online'}, ` +
-        `provider ${seen.pid} holds [${seen.rule.join(',')}]`,
+        `provider ${seen.pid} holds [${seen.rule.join(',')}] (read over ${seen.from})`,
       )
       return false
     }
     return true
   }
 
-  /** Ask the running provider what it is enforcing. `undefined` for every way of not finding out —
-   *  the remedy is the same whether the filter is absent, disabled, or restarting. */
-  private async confirmEnforcement(): Promise<{ enforcing: boolean; rule: string[]; pid: number } | undefined> {
+  /**
+   * What the filter is enforcing — **asked first, and read from the file when the asking is gone.**
+   *
+   * `--confirm` is the fast and precise channel: 0.26–0.74ms, and it answers from the process the
+   * kernel is actually consulting. It stays the primary for exactly that reason, so the healthy Mac
+   * this class runs on most of the time is untouched by any of this.
+   *
+   * **But it disappears after every system-extension replace, and stays gone.** The retired extension
+   * sits `[terminated waiting to uninstall on reboot]` still owning the mach name, so the new
+   * provider's `NSXPCListener.resume()` fails with `Operation not permitted` — silently, because
+   * `resume()` returns void. `--confirm` then answers `no listener` in 9ms while the filter is
+   * genuinely enforcing and publishing a fresh state file. Measured 2026-09-03; the provider survives
+   * `--off`/`--install` on the same pid, so the listener is never re-vended and the loss lasts as long
+   * as the provider does.
+   *
+   * Taking that as "not confirmed" is what put `filter-unavailable` in front of a tester whose filter
+   * was working, on every Mac that had upgraded. The CLI reached the same conclusion earlier and for a
+   * different reason (`net-filter.ts`: a stale binary turns a flag it does not know into a rule
+   * write); this is the agent following it.
+   *
+   * `undefined` for every way of not finding out — the remedy is the same whether the filter is
+   * absent, disabled, or restarting.
+   */
+  private async confirmEnforcement(
+    udid: string, wanted: boolean, since: number,
+  ): Promise<{ enforcing: boolean; rule: string[]; pid: number; from: 'xpc' | 'file' } | undefined> {
+    const asked = await this.askProvider()
+    if (asked) return asked
+    return await this.readConfirmation(udid, wanted, since)
+  }
+
+  /** The XPC channel. Its own failures are all the same answer, so none of them are distinguished. */
+  private async askProvider(): Promise<{ enforcing: boolean; rule: string[]; pid: number; from: 'xpc' } | undefined> {
     if (!existsSync(this.hostBinary)) return undefined
     try {
       const { stdout } = await execFileAsync(this.hostBinary, ['--confirm'], {
@@ -527,10 +600,49 @@ export class SimulatorNetwork {
         enforcing: parsed.enforcing,
         rule: parsed.rule.filter((r): r is string => typeof r === 'string'),
         pid: typeof parsed.pid === 'number' ? parsed.pid : -1,
+        from: 'xpc',
       }
     } catch {
       // A timeout lands here as well as a refusal, and they are the same answer: not confirmed.
       return undefined
+    }
+  }
+
+  /**
+   * The file channel, polled until it answers or the deadline passes.
+   *
+   * **Three outcomes, and the middle one is the reason this is a loop rather than a read.** This runs
+   * immediately after a rule write, so the ordinary state for up to a pulse is a file that is fresh,
+   * correct, and about the *previous* rule — `checkLivenessLocked` says the same thing about the same
+   * window, and reading it as a disagreement would fire on every toggle.
+   *
+   * - The rule matches what was asked for: answered, whenever it was published.
+   * - It does not match and was published *after* the baseline: the provider has spoken and it
+   *   disagrees. That is a real mismatch and is returned so the caller can log it.
+   * - It does not match and was published at or before the baseline: it has not published since the
+   *   write. Wait.
+   *
+   * A stale file is never any of the three: a provider that died left it there, so it is skipped
+   * rather than believed, and `Heartbeat.remove()` means absence is what a *stopped* filter leaves.
+   */
+  private async readConfirmation(
+    udid: string, wanted: boolean, since: number,
+  ): Promise<{ enforcing: boolean; rule: string[]; pid: number; from: 'file' } | undefined> {
+    const until = Date.now() + this.confirmDeadlineMs
+    for (;;) {
+      const file = this.readFilterState()
+      const now = Math.floor(Date.now() / 1000)
+      // `file.at <= now` first, and it is not redundant: a timestamp from the future makes the
+      // subtraction negative and passes any threshold, so a clock that moved backwards would let a
+      // dead provider's frozen file read as perfect for as long as the skew lasted.
+      // `checkLivenessLocked` refuses the same reading for the same reason; this is its twin and
+      // had drifted from it.
+      if (file && file.at <= now && now - file.at <= 3 * Math.max(file.pulseSeconds, 1)) {
+        const answered = file.rule.includes(udid) === wanted || file.at > since
+        if (answered) return { enforcing: true, rule: file.rule, pid: file.pid ?? -1, from: 'file' }
+      }
+      if (Date.now() >= until) return undefined
+      await new Promise((resolve) => setTimeout(resolve, FILTER_FILE_POLL_MS))
     }
   }
 
@@ -851,6 +963,8 @@ export class SimulatorNetwork {
           // report "not enforcing" for a filter doing its job, which is the exact failure the rest of
           // this file exists to prevent. A malformed one is discarded the same way, entry by entry.
           droppedByDevice: numbersIn(raw.droppedByDevice),
+          // Same rule as the field above it: a provider that does not publish this is not a bad file.
+          pid: typeof raw.pid === 'number' ? raw.pid : undefined,
         }
       } catch {
         continue

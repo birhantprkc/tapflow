@@ -265,7 +265,7 @@ pnpm dev:down          # stops relay / agents / vite for THIS checkout
 `concurrently -k` cleans up on a normal exit, not when the terminal goes away or the machine sleeps.
 
 ### Changesets
-A PR that changes published source needs a changeset. The CI `changeset` job fails without one, and it is a required status check on the `protect-main` ruleset, so that failure blocks the merge. Note that the job is *skipped* for bot PRs, and a skipped required check counts as passing — the gate is deliberately not applied to them. Opt out only by writing the reason in the PR body, on its own line:
+A PR that changes published source needs a changeset. The CI `changeset` job fails without one, and it is a required status check on the `protect-main` ruleset, so that failure blocks the merge. **The same job also demands an entry in the root `CHANGELOG.md`** under `## [Unreleased]`, in one of the sections CONTRIBUTING lists — the per-package changelogs are generated and cannot be forgotten, the root one is hand-written and is what a self-hoster reads to decide whether to upgrade. A changeset with no changelog entry fails the job, which reads as "no changeset" and sends you looking in the wrong place; #733 lost a CI cycle to exactly that. Opt out only for a change nobody can observe, with `<!-- changelog: internal — reason -->` in the changeset. Note that the job is *skipped* for bot PRs, and a skipped required check counts as passing — the gate is deliberately not applied to them. Opt out only by writing the reason in the PR body, on its own line:
 ```
 <!-- no-changeset: comment-only follow-up to #123 -->
 ```
