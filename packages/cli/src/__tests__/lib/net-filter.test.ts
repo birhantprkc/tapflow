@@ -12,7 +12,7 @@ import { accessSync, chmodSync, existsSync, readFileSync, readdirSync, statSync 
 import { createServer } from 'node:net'
 import { confirm } from '@clack/prompts'
 import { join } from 'node:path'
-import { installNetFilter, readNetFilterState, NET_FILTER_APP } from '../../lib/net-filter.js'
+import { installNetFilter, readNetFilterState, extensionBundle, NET_FILTER_APP } from '../../lib/net-filter.js'
 import { runDoctorChecks } from '../../lib/doctor.js'
 import { runSetupIos } from '../../lib/setup.js'
 
@@ -109,6 +109,10 @@ const listing = (version: string | null, state = '[activated enabled]') =>
  */
 function machine(opts: {
   shipped?: string | null; installed?: string | null; activated?: string | null; activatedState?: string
+  /** The **extension** version the package carries. Defaults to the host version, which is what every
+   *  build produced before the two were allowed to differ — so a test only names it when that is the
+   *  thing under test. */
+  shippedExt?: string | null
   /** Is a provider pulsing? Defaults to yes — a Mac whose versions all match is normally enforcing,
    *  and the interesting case is the one that is not. */
   filterRunning?: boolean
@@ -119,6 +123,7 @@ function machine(opts: {
 }) {
   const {
     shipped = SHIPPED, installed = SHIPPED, activated = SHIPPED, activatedState,
+    shippedExt = shipped,
     filterRunning = true, booted = [], relayUp = false,
   } = opts
   mockReadFileSync.mockImplementation((p) => {
@@ -150,7 +155,11 @@ function machine(opts: {
     }
     if (String(cmd).endsWith('/defaults')) {
       const path = String((args as string[])[1] ?? '')
-      const v = path.startsWith(NET_FILTER_APP) ? installed : shipped
+      // Three plists now, and which one is being asked for is in the path: the app in
+      // `/Applications`, the app in the package, and the system extension nested inside that.
+      const v = path.startsWith(NET_FILTER_APP) ? installed
+        : path.includes('SystemExtensions') ? shippedExt
+          : shipped
       if (v === null) throw new Error('no such plist')
       return `${v}\n` as never
     }
@@ -187,14 +196,16 @@ describe('net filter — reading what the Mac has', () => {
     // `--install` answers "needs a reboot" and leaves the new app in /Applications while the kernel
     // keeps running the old provider. Comparing files would call that healthy.
     machine({ installed: SHIPPED, activated: OLDER })
-    expect(readNetFilterState()).toEqual({ shipped: SHIPPED, installed: SHIPPED, activated: OLDER })
+    expect(readNetFilterState()).toEqual({
+      shippedHost: SHIPPED, installedHost: SHIPPED, shippedExt: SHIPPED, activatedExt: OLDER,
+    })
   })
 
   it('does not count an extension that is listed but not activated', () => {
     // A replaced extension stays in the list as `terminated waiting to uninstall on reboot`, which is
     // exactly the state a check that only grepped for the bundle id would read as healthy.
     machine({ activated: OLDER, activatedState: '[terminated waiting to uninstall on reboot]' })
-    expect(readNetFilterState().activated).toBeNull()
+    expect(readNetFilterState().activatedExt).toBeNull()
   })
 
   it('says nothing rather than guessing when the command cannot run', () => {
@@ -207,7 +218,7 @@ describe('net filter — reading what the Mac has', () => {
       if (String(cmd).endsWith('/systemextensionsctl')) throw new Error('not found')
       return `${SHIPPED}\n` as never
     })
-    expect(readNetFilterState().activated).toBeNull()
+    expect(readNetFilterState().activatedExt).toBeNull()
     expect(mockExecFileSync.mock.calls.some((c) => String(c[0]).endsWith('/systemextensionsctl'))).toBe(true)
   })
 
@@ -326,15 +337,21 @@ describe('net filter — installing', () => {
     expect(spawnOrder()).toEqual(['ditto', '--off', '--install'])
   })
 
-  it('switches the filter off even when the app was deleted from /Applications', () => {
-    // macOS keeps running an extension whose container app is gone, and `doctor` has a check for that
-    // state. Deciding the disable from the *installed* binary meant there was nothing to ask here, so
-    // the activation went ahead against a filter that was still up — the one thing the sequence
-    // exists to prevent, in the one state where nobody would look for it.
+  it('refuses when the app is gone and an extension is still enforcing', () => {
+    // macOS keeps an extension activated when its container app is deleted, and the agent's whole
+    // layer-1 path is that binary. The extension version used to stand in for the host's; now it only
+    // gives a lower bound, because a host-only build moves one and not the other. So this Mac may be
+    // running a newer host than this checkout carries and nothing here can tell.
     machine({ installed: null, activated: OLDER })
+    expect(installNetFilter()).toEqual({ status: 'refused-host-unknown', activated: OLDER })
+    expect(mockSpawnSync, 'it replaced an install it could not judge').not.toHaveBeenCalled()
+  })
+
+  it('still installs on a Mac with no filter at all', () => {
+    // The other side of the refusal above, and the reason it is conditioned on an activated extension
+    // rather than on the missing app: a clean Mac has neither, and must not be refused.
+    machine({ installed: null, activated: null })
     expect(installNetFilter()).toEqual({ status: 'installed' })
-    expect(hostCalls('--off'), 'it replaced an enforcing filter without switching it off').toHaveLength(1)
-    expect(spawnOrder()).toEqual(['ditto', '--off', '--install'])
   })
 
   it('stops before activating when the disable did not take', () => {
@@ -427,6 +444,86 @@ describe('net filter — installing', () => {
       : '' as never))
     // A provider that died leaves its last file behind; only the clock says so.
     expect(installNetFilter()).toMatchObject({ status: 'installed' })
+  })
+
+  // ── the host and the extension are two versions now (#724) ──────────────────────────────────
+  //
+  // `build.sh` stamped one number into both, so comparing a host version against an extension one was
+  // invisible rather than harmless. Once a host-only rebuild leaves them different, every comparison
+  // that crosses has to be found.
+
+  it('points at a plist that is actually in the committed bundle', async () => {
+    // **Against the real filesystem, because the mocks cannot see this.** They match paths by
+    // substring, so a path with `Contents/Contents` in it satisfies every one of them — and the first
+    // version of this shipped exactly that, reading `null` on every real Mac. Null there means "this
+    // package carries no filter", so both commands refused with *reinstall tapflow*, which could not
+    // fix it, and 328 tests stayed green.
+    const { existsSync: realExists } = await vi.importActual<typeof import('node:fs')>('node:fs')
+    const app = join(process.cwd(), 'node_modules', '@tapflowio', 'ios-agent', 'bin', 'TapflowNetFilter.app')
+    const root = realExists(app)
+      ? app
+      : join(process.cwd(), '..', 'ios-agent', 'bin', 'TapflowNetFilter.app')
+    expect(realExists(root), `no shipped app to check against at ${root}`).toBe(true)
+    // The exact thing `bundleVersion` will `defaults read`.
+    expect(
+      realExists(join(extensionBundle(root), 'Contents', 'Info.plist')),
+      'the extension bundle path does not resolve to a plist in the shipped app',
+    ).toBe(true)
+  })
+
+  it('is not current when only the app in /Applications is behind', () => {
+    // The shape a host-only release produces, and the one the split exists to make ordinary. The
+    // extension macOS runs is already ours; the binary the agent executes is not.
+    machine({ installed: OLDER, activated: SHIPPED, shippedExt: SHIPPED })
+    expect(installNetFilter()).toEqual({ status: 'installed' })
+    expect(dittoCalls(), 'a stale host binary was left in place').toHaveLength(1)
+  })
+
+  it('is not current when only the extension is behind', () => {
+    machine({ installed: SHIPPED, activated: OLDER, shippedExt: SHIPPED })
+    expect(installNetFilter()).toEqual({ status: 'installed' })
+  })
+
+  it('is current only when both agree', () => {
+    machine({ installed: SHIPPED, activated: SHIPPED, shippedExt: SHIPPED })
+    expect(installNetFilter()).toEqual({ status: 'already-current' })
+    expect(dittoCalls()).toHaveLength(0)
+  })
+
+  it('does not read a host version as if it were an extension version', () => {
+    // **The crossing this whole change is about.** Host `NEWER`, extension `OLDER`: comparing the
+    // host against `shippedExt` would call the Mac newer and refuse, and comparing the extension
+    // against `shippedHost` would call it older and install over a newer host. Neither is a judgement
+    // anyone made — they are two different measurements put on one scale.
+    machine({ installed: NEWER, activated: OLDER, shippedExt: SHIPPED })
+    expect(installNetFilter()).toEqual({ status: 'refused-downgrade', installed: NEWER, shipped: SHIPPED })
+
+    vi.resetAllMocks(); hostExits(0)
+    machine({ installed: OLDER, activated: NEWER, shippedExt: SHIPPED })
+    expect(installNetFilter()).toEqual({ status: 'refused-downgrade', installed: NEWER, shipped: SHIPPED })
+  })
+
+  it('judges the Mac\'s extension against the extension this package carries', () => {
+    // **The fixture that had to exist for any of this to be testable.** Every case above happens to
+    // ship a host and an extension at the same version, which is what every build produced before the
+    // split — and on that fixture a guard comparing the Mac's extension against our *host* version is
+    // indistinguishable from a correct one.
+    //
+    // A host-only release is the first thing to carry two different numbers: host `NEWER`, extension
+    // `SHIPPED`. A Mac running extension `NEWER` is then newer than us and must be refused, and only
+    // the extension-against-extension comparison can say so.
+    machine({ shipped: NEWER, shippedExt: SHIPPED, installed: NEWER, activated: NEWER })
+    expect(installNetFilter()).toEqual({ status: 'refused-downgrade', installed: NEWER, shipped: SHIPPED })
+    expect(dittoCalls(), 'it installed over an extension newer than its own').toHaveLength(0)
+  })
+
+  it('judges the app on disk against the app this package carries', () => {
+    // The mirror. Package host `SHIPPED`, extension `OLDER`; the Mac's app is `NEWER`. Comparing the
+    // installed host against our *extension* version would read the Mac as older and replace a newer
+    // binary the agent on this Mac depends on.
+    machine({ shipped: SHIPPED, shippedExt: OLDER, installed: NEWER, activated: OLDER })
+    expect(installNetFilter()).toEqual({ status: 'refused-downgrade', installed: NEWER, shipped: SHIPPED })
+    expect(dittoCalls()).toHaveLength(0)
   })
 
   // ── devices in use ──────────────────────────────────────────────────────────────────────────
@@ -550,6 +647,33 @@ describe('doctor — what it says about the filter', () => {
     // Both are true at once, and they want different actions. Neither replaces the other.
     expect(version.ok).toBe(false)
     expect(version.detail).toMatch(/Restart the Mac/)
+  })
+
+  it('names the app, not the extension, when the Mac is set up by a newer tapflow', async () => {
+    // A host-only release moves one number and not the other, so this branch fires with the extension
+    // versions equal. Reporting the extension pair printed the same number twice as the evidence they
+    // differed, and never named the thing that was actually newer.
+    machine({ installed: NEWER, activated: SHIPPED, shippedExt: SHIPPED })
+    const [, version] = await netFilterChecks()
+    expect(version.ok).toBe(false)
+    expect(version.detail).toMatch(/newer tapflow/)
+    expect(version.detail, 'it named the extension for a host mismatch').toContain('/Applications')
+    expect(version.detail).toContain(NEWER)
+    expect(version.detail, 'it printed the same version twice as proof of a difference')
+      .not.toMatch(new RegExp(`extension ${SHIPPED} and this one carries ${SHIPPED}`))
+  })
+
+  it('names the app, not the extension, when only the host is behind', async () => {
+    // The release shape the split makes common. macOS skips the activation because the extension did
+    // not change, so nothing is interrupted — but the agent runs the binary in `/Applications`, and an
+    // older one meets flags it does not understand. Reporting this as healthy is how #723 happened.
+    machine({ installed: OLDER, activated: SHIPPED, shippedExt: SHIPPED })
+    const [check, version] = await netFilterChecks()
+    expect(check.ok, 'the filter itself is fine here').toBe(true)
+    expect(version.ok, 'doctor called a stale host binary healthy').toBe(false)
+    expect(version.detail).toMatch(/\/Applications/)
+    expect(version.detail).toMatch(/tapflow migrate net-filter/)
+    expect(version.detail, 'it blamed the extension for a host problem').not.toMatch(/Waiting for a restart/)
   })
 
   it('warns when every version matches and nothing is enforcing', async () => {

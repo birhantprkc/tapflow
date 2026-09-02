@@ -1,7 +1,9 @@
 {
-  "sources": "a88ed09135c7e66b07236b7d0cfbb3febdad768911bf0f7bc7584f41b3059ece",
+  "extSources": "d2eb10bac2bc6731521ccc944c7728921f48dc4aed4d2805e280dab8a70845a7",
+  "hostSources": "6d9b854b7a41ecdf0fd920b4817831cb12f873dad093952f0b92b87e4aa2131c",
   "sourceFileCount": 11,
-  "app": "8d1b27bd77cb4c9f25fea5e804f3a7eddb805cdf233d78e20635829b1fdde6fc",
+  "app": "b71d7039fadb16fee7e010c14d927d164cafe52148a3912088e78010bd3f72b7",
   "appFileCount": 10,
-  "bundleVersion": "1787846299"
+  "hostBundleVersion": "1788336153",
+  "extBundleVersion": "1788336153"
 }

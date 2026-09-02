@@ -1,6 +1,11 @@
 import { describe, it, expect } from 'vitest'
+import fs from 'node:fs'
 import path from 'node:path'
-import { computeRecord, readRecord, collectSources, collectAppFiles } from '../lib/netfilter-artifact.mjs'
+import { execFileSync } from 'node:child_process'
+import {
+  computeRecord, readRecord, collectSources, collectExtSources, collectHostSources, collectAppFiles,
+  extVersionWentBackwards, extVersionToStamp, RECORD, SHIPPED_APP, EXT_PLIST,
+} from '../lib/netfilter-artifact.mjs'
 
 /**
  * The network-filter extension is the one artifact in this repo that a contributor cannot rebuild:
@@ -19,6 +24,11 @@ const REPO = path.resolve(import.meta.dirname, '../..')
 // that certifies its own absence.
 const MIN_SOURCE_FILES = 8
 const MIN_APP_FILES = 6
+// **Per half, because the combined floor cannot see a migration between them.** Three files could
+// move from the extension's side to the host's and the total would not move — and from then on those
+// files would stop bumping the extension's version, permanently and quietly.
+const MIN_EXT_SOURCE_FILES = 6
+const MIN_HOST_SOURCE_FILES = 2
 
 describe('the shipped network filter matches what it was recorded against', () => {
   it('has a record at all', () => {
@@ -28,22 +38,38 @@ describe('the shipped network filter matches what it was recorded against', () =
     ).not.toBeNull()
   })
 
+  it('is a record this build of the guard understands', () => {
+    // **Read this one first when the three below fail together.** The record gained separate hashes
+    // and versions for the extension and the host (#724), and `build.sh` writes it. A record without
+    // them is not corrupt — it is a record from before that change, and the remedy is the same one
+    // the whole file exists to ask for: rebuild.
+    expect(
+      readRecord(REPO).extSources,
+      'shipped.json predates the extension/host version split.\n'
+      + '  A contributor cannot fix this: the app is Developer-ID signed and notarized on a\n'
+      + '  maintainer\'s Mac. A maintainer runs ios-netfilter/build.sh, which rebuilds, installs\n'
+      + '  into the package and rewrites this record in one step.',
+    ).toBeTypeOf('string')
+  })
+
   it('sees enough files to be checking anything', () => {
     expect(collectSources(REPO).length, 'the source glob matched almost nothing').toBeGreaterThanOrEqual(MIN_SOURCE_FILES)
     expect(collectAppFiles(REPO).length, 'the app bundle looks empty').toBeGreaterThanOrEqual(MIN_APP_FILES)
+    expect(collectExtSources(REPO).length, 'the extension half matched almost nothing').toBeGreaterThanOrEqual(MIN_EXT_SOURCE_FILES)
+    expect(collectHostSources(REPO).length, 'the host half matched almost nothing').toBeGreaterThanOrEqual(MIN_HOST_SOURCE_FILES)
   })
 
   it('still matches the sources it was built from', () => {
     const now = computeRecord(REPO)
     const recorded = readRecord(REPO)
     expect(
-      now.sources,
+      `${now.extSources}/${now.hostSources}`,
       'The extension sources changed since the shipped app was built.\n'
       + '  A contributor cannot fix this: the app is Developer-ID signed and notarized on a\n'
       + '  maintainer\'s Mac, because ad-hoc signing does not load. Say on the PR that the\n'
       + '  extension needs rebuilding, and a maintainer runs ios-netfilter/build.sh — which\n'
       + '  rebuilds, installs into the package, and rewrites this record in one step.',
-    ).toBe(recorded.sources)
+    ).toBe(`${recorded.extSources}/${recorded.hostSources}`)
   })
 
   it('is the same app that was recorded', () => {
@@ -54,12 +80,178 @@ describe('the shipped network filter matches what it was recorded against', () =
     expect(now.app, 'the committed app is not the one in the record — re-run build.sh').toBe(readRecord(REPO).app)
   })
 
-  it('carries the build version the app declares', () => {
+  it('carries both build versions the app declares', () => {
     // `CFBundleVersion` is what activation compares. A rebuild that does not raise it is replaced
     // silently by macOS — the README marks that with a star — and the CLI's version check would then
     // compare two identical numbers across different binaries.
+    //
+    // **Both, because they are now allowed to differ.** The host's rises on every build; the
+    // extension's rises only when the extension's own inputs changed, and it is the extension's that
+    // decides whether macOS replaces anything.
     const now = computeRecord(REPO)
-    expect(now.bundleVersion).toBe(readRecord(REPO).bundleVersion)
-    expect(now.bundleVersion, 'the app declares no build version').toBeTruthy()
+    const recorded = readRecord(REPO)
+    expect(now.hostBundleVersion).toBe(recorded.hostBundleVersion)
+    expect(now.hostBundleVersion, 'the app declares no build version').toBeTruthy()
+    expect(now.extBundleVersion).toBe(recorded.extBundleVersion)
+    expect(now.extBundleVersion, 'the system extension declares no build version').toBeTruthy()
+  })
+
+  it('never declares an extension newer than the app carrying it', () => {
+    // They come out of one build, and the extension's is either that build's number or an older one
+    // it kept. Newer means somebody edited a plist by hand.
+    const { hostBundleVersion: host, extBundleVersion: ext } = computeRecord(REPO)
+    expect(Number.isFinite(Number(host)), `host version is not a number: ${host}`).toBe(true)
+    expect(Number.isFinite(Number(ext)), `extension version is not a number: ${ext}`).toBe(true)
+    expect(Number(ext), 'the extension claims to be newer than the app it ships in').toBeLessThanOrEqual(Number(host))
+  })
+})
+
+/**
+ * **The failure a single commit cannot show.**
+ *
+ * The extension's version is reused rather than minted, so its previous value lives in git and
+ * nowhere else. A bad merge or a revert can hand the next build a lower number, and macOS then skips
+ * the replace **silently and permanently** — every later extension fix stops reaching that Mac while
+ * `doctor` reports three green checks. Every assertion above is satisfied by such a commit, because
+ * within it the record and the artifact agree perfectly.
+ */
+describe('the extension version only ever goes up', () => {
+  // The comparison is tested whether or not the ref is reachable. A guard that can only run in CI is
+  // one nobody sees fail until it matters.
+  it('refuses a decrease, and anything it cannot compare', () => {
+    expect(extVersionWentBackwards('100', '101')).toBe(false)
+    expect(extVersionWentBackwards('100', '100')).toBe(false)
+    expect(extVersionWentBackwards('101', '100'), 'a decrease was allowed through').toBe(true)
+    expect(extVersionWentBackwards(null, '100'), 'no previous value is not a decrease').toBe(false)
+    expect(extVersionWentBackwards('abc', '100'), 'an unparseable previous was waved through').toBe(true)
+    expect(extVersionWentBackwards('100', ''), 'an unparseable current was waved through').toBe(true)
+    // **`Number('')` and `Number(' ')` are `0`, not `NaN`** — finite, so a `Number.isFinite` check
+    // accepts them while rejecting `'abc'`, which is what makes the hole look like a working guard.
+    // As a previous value a blank becomes zero, and nothing is lower than zero.
+    expect(extVersionWentBackwards('100', ' ')).toBe(true)
+    expect(extVersionWentBackwards('', '100'), 'a blank previous was read as zero').toBe(true)
+    expect(extVersionWentBackwards(' ', '100'), 'a whitespace previous was read as zero').toBe(true)
+    // Absent is not blank: the commit that introduces the field has no previous value, and that is
+    // not a regression.
+    expect(extVersionWentBackwards(undefined, '100')).toBe(false)
+  })
+
+  const baseline = (() => {
+    for (const ref of ['origin/main', 'main']) {
+      try {
+        const raw = execFileSync('git', ['show', `${ref}:${RECORD}`], {
+          cwd: REPO, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+        })
+        return JSON.parse(raw)
+      } catch { /* ref not fetched, or the file did not exist there yet */ }
+    }
+    return null
+  })()
+
+  // Named so a skip is legible in the output rather than looking like a pass. CI checks out with
+  // `fetch-depth: 0`, so this runs there; a shallow clone is the case that skips.
+  it.skipIf(baseline === null)('is not lower than the one on main', () => {
+    const now = computeRecord(REPO)
+    expect(
+      extVersionWentBackwards(baseline.extBundleVersion, now.extBundleVersion),
+      `the extension version went from ${baseline.extBundleVersion} to ${now.extBundleVersion}.\n`
+      + '  macOS compares these and skips the replace when the new one is not higher — silently,\n'
+      + '  and for good. Rebuild rather than resolving shipped.json by hand.',
+    ).toBe(false)
+  })
+})
+
+describe('what build.sh stamps into the extension', () => {
+  it('reuses the shipped version when the extension inputs are unchanged', () => {
+    expect(computeRecord(REPO).extSources, 'the tree and the record disagree — rebuild first')
+      .toBe(readRecord(REPO).extSources)
+    expect(extVersionToStamp(REPO), 'an unchanged extension was going to be given a new version')
+      .toBe(readRecord(REPO).extBundleVersion)
+  })
+
+  it('refuses to reuse when an extension source changed', () => {
+    // **Driven rather than waited for.** Both halves of this rule used to sit behind an `if` on a
+    // condition the committed tree does not satisfy, so only the reuse branch ever ran — the half
+    // that prevents a silent skip was executed by nothing, in a test named after it.
+    const victim = collectExtSources(REPO).find((f) => f.endsWith('.swift'))
+    expect(victim, 'no Swift file in the extension half — this test is checking nothing').toBeTruthy()
+    const original = fs.readFileSync(victim, 'utf8')
+    try {
+      fs.writeFileSync(victim, `${original}\n// probe\n`)
+      expect(extVersionToStamp(REPO), 'a changed extension was going to keep its version').toBeNull()
+    } finally {
+      fs.writeFileSync(victim, original)
+    }
+  })
+
+  it('refuses to reuse a blank version', () => {
+    // A blank one reaches all the way to the plist: `' '` is truthy, so it survives the stamp
+    // helper's `if (v)` and `build.sh`'s `[ -n ... ]` and gets stamped as the version macOS compares.
+    //
+    // **The record has to be moved with the app, or this passes for the wrong reason.** Editing the
+    // shipped bundle changes its hash, and the record-match guard above then returns `null` before
+    // the version is ever read — so the assertion held while the check it names was unreachable.
+    // Caught by mutation: removing that check left this test green.
+    const plist = path.join(REPO, SHIPPED_APP, ...EXT_PLIST)
+    const recordPath = path.join(REPO, RECORD)
+    const originalPlist = fs.readFileSync(plist, 'utf8')
+    const originalRecord = fs.readFileSync(recordPath, 'utf8')
+    try {
+      for (const blank of ['', ' ']) {
+        fs.writeFileSync(plist, originalPlist.replace(
+          /(<key>CFBundleVersion<\/key>\s*<string>)[^<]*(<\/string>)/, `$1${blank}$2`,
+        ))
+        fs.writeFileSync(recordPath, JSON.stringify(
+          { ...JSON.parse(originalRecord), app: computeRecord(REPO).app }, null, 2,
+        ))
+        expect(extVersionToStamp(REPO), `a blank version (${JSON.stringify(blank)}) was going to be stamped`).toBeNull()
+      }
+    } finally {
+      fs.writeFileSync(plist, originalPlist)
+      fs.writeFileSync(recordPath, originalRecord)
+    }
+  })
+
+  it('refuses to reuse when the record and the shipped app describe different builds', () => {
+    // The decision comes from the record and the version comes from the app, so a tree holding one
+    // from each — the ordinary result of resolving a binary conflict — would stamp a number belonging
+    // to neither, and the record written afterwards would be perfectly self-consistent.
+    const record = readRecord(REPO)
+    const original = fs.readFileSync(path.join(REPO, RECORD), 'utf8')
+    try {
+      fs.writeFileSync(path.join(REPO, RECORD), JSON.stringify({ ...record, app: 'deadbeef' }, null, 2))
+      expect(extVersionToStamp(REPO), 'it reused a version from an app the record does not describe').toBeNull()
+    } finally {
+      fs.writeFileSync(path.join(REPO, RECORD), original)
+    }
+  })
+
+  it('ignores the build stamp when deciding whether the extension changed', () => {
+    // The whole mechanism rests on this. `build.sh` writes `CFBundleVersion` into
+    // `Extension/Info.plist` on every run, so hashing it raw asks whether the extension changed by
+    // reading back the number the last build wrote — always different, always a bump, and the split
+    // would be inert with nothing failing to say so.
+    const files = collectExtSources(REPO)
+    const plists = files.filter((f) => f.endsWith('Info.plist'))
+    expect(plists.length, 'the extension inputs no longer include a plist — this guard is checking nothing').toBeGreaterThan(0)
+    const before = computeRecord(REPO).extSources
+    const original = new Map(plists.map((f) => [f, fs.readFileSync(f, 'utf8')]))
+    try {
+      for (const [f, text] of original) {
+        fs.writeFileSync(f, text.replace(/(<key>CFBundleVersion<\/key>\s*<string>)[^<]*(<\/string>)/, '$19999999999$2'))
+      }
+      expect(computeRecord(REPO).extSources, 'the build stamp leaks into the extension hash').toBe(before)
+
+      // **And the rest of the plist still counts**, which is the direction the assertion above cannot
+      // reach. Widening the normalizer until it blanked the whole file would satisfy it and satisfy
+      // the record comparison too, because both sides normalize identically — while
+      // `NEProviderClasses` and the mach service name silently left the extension's identity.
+      for (const [f, text] of original) {
+        fs.writeFileSync(f, text.replace('<key>CFBundleVersion</key>', '<key>TapflowProbeKey</key>'))
+      }
+      expect(computeRecord(REPO).extSources, 'the normalizer blanks more of the plist than the stamp').not.toBe(before)
+    } finally {
+      for (const [f, text] of original) fs.writeFileSync(f, text)
+    }
   })
 })

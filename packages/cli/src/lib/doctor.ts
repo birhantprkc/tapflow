@@ -3,7 +3,7 @@ import { accessSync, constants, existsSync, readdirSync, readFileSync } from 'no
 import { createServer } from 'node:net'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { isFilterEnforcing, isNewer, readNetFilterState, shippedHookPath } from './net-filter.js'
+import { isFilterEnforcing, isNetFilterCurrent, isNewer, readNetFilterState, shippedHookPath } from './net-filter.js'
 
 /**
  * How long any one probe may take before `doctor` treats it as unanswerable.
@@ -86,7 +86,10 @@ function buildIosChecks(isMac: boolean): DoctorCheck[] {
 function buildNetFilterChecks(): DoctorCheck[] {
   const s = readNetFilterState()
 
-  if (s.shipped === null) {
+  // **Both halves of "the package carries a filter".** The extension version comes from a plist
+  // nested inside the same bundle, so a bundle that is there but damaged answers `null` for one and
+  // not the other — and every comparison below would then be against nothing.
+  if (s.shippedHost === null || s.shippedExt === null) {
     return [{
       label: 'Network filter',
       ok: false,
@@ -94,16 +97,16 @@ function buildNetFilterChecks(): DoctorCheck[] {
       detail: 'This tapflow install carries no usable filter app, so iOS network control cannot be set up. Reinstalling tapflow restores it.',
     }]
   }
-  if (s.installed === null) {
+  if (s.installedHost === null) {
     // **Activated but no app on disk is not "not installed".** macOS keeps running an extension whose
     // container app has been deleted, so saying it is missing sends someone to reinstall — from an
     // older checkout, that replaces a filter that is working.
-    if (s.activated !== null) {
+    if (s.activatedExt !== null) {
       return [{
         label: 'Network filter',
         ok: false,
         warn: true,
-        detail: `Running ${s.activated}, but the app it came from is gone from /Applications. Reinstall it from the tapflow whose version matches, or restart the Mac to clear it.`,
+        detail: `Running ${s.activatedExt}, but the app it came from is gone from /Applications. Reinstall it from the tapflow whose version matches, or clear it with: systemextensionsctl uninstall 6FBS3QP893 dev.tapflow.netfilter.ext`,
       }]
     }
     return [{
@@ -113,7 +116,7 @@ function buildNetFilterChecks(): DoctorCheck[] {
       detail: 'Not installed. Run `tapflow setup ios` on a new machine, or `tapflow migrate net-filter` if tapflow was set up before this feature existed.',
     }]
   }
-  if (s.activated === null) {
+  if (s.activatedExt === null) {
     return [{
       label: 'Network filter',
       ok: false,
@@ -141,34 +144,64 @@ function buildNetFilterChecks(): DoctorCheck[] {
         warn: true,
         detail: 'Installed and approved, but switched off — nothing is filtering, so iOS network control does not work. Run: tapflow migrate net-filter',
       }
-  if (s.activated === s.shipped) {
+  // **The same condition the installer uses, not a second one shaped like it** (#724). Deciding this
+  // on the extension alone would report a Mac whose `/Applications` app is stale as fully healthy —
+  // and that app is the agent's own layer-1 path, so an older one meets flags it does not understand
+  // and, on a build old enough, clears the rule instead of refusing. Green while that is true is the
+  // worst answer available.
+  if (isNetFilterCurrent(s)) {
     return [running, { label: 'Network filter version', ok: true }]
   }
-  // Running something, but not this. Three ways that happens and they want different sentences.
-  if (s.installed === s.shipped) {
+  // Running something, but not this. Several ways that happens and they want different sentences.
+  //
+  // `isNewer`, not a second `Number() >`: that one answered `false` for a version neither side could
+  // parse, while the installer's guard answers `true` and refuses. The two disagreeing sent the user
+  // to a `migrate net-filter` that would refuse the moment they ran it.
+  //
+  // **The sentence names the pair that actually triggered**, which needs saying because the two
+  // disjuncts are now different measurements. Reporting the extension pair for a host mismatch prints
+  // two identical numbers as the evidence they differ — and under this scheme the host disjunct is
+  // the one that fires most often, since a host-only release moves that number alone.
+  const newerExt = isNewer(s.activatedExt, s.shippedExt)
+  const newerHost = s.installedHost !== null && isNewer(s.installedHost, s.shippedHost)
+  if (newerExt || newerHost) {
     return [running, {
       label: 'Network filter version',
       ok: false,
       warn: true,
-      detail: `Waiting for a restart: ${s.shipped} is installed but the Mac is still running ${s.activated}. Restart the Mac to finish.`,
+      detail: newerExt
+        ? `This Mac is set up for a newer tapflow — it runs extension ${s.activatedExt} and this one carries ${s.shippedExt}. Upgrade this checkout rather than reinstalling the filter.`
+        : `This Mac is set up for a newer tapflow — the app in /Applications is ${s.installedHost} and this one carries ${s.shippedHost}. Upgrade this checkout rather than reinstalling the filter.`,
     }]
   }
-  // `isNewer`, not a second `Number() >` here: that one answered `false` for a version neither side
-  // could parse, while the installer's guard answers `true` and refuses. The two disagreeing sent the
-  // user to a `migrate net-filter` that would refuse the moment they ran it.
-  if (isNewer(s.activated, s.shipped)) {
+  // The app on disk is this build's and the extension running is not: macOS finishes a replacement
+  // only on restart. **Decided from the host version alone**, because both plists come out of one
+  // build and the host's is unique per build — so a matching host version already says the extension
+  // beside it is this build's too, without reading a third plist for it.
+  if (s.installedHost === s.shippedHost) {
     return [running, {
       label: 'Network filter version',
       ok: false,
       warn: true,
-      detail: `This Mac is set up for a newer tapflow — it runs ${s.activated} and this one carries ${s.shipped}. Upgrade this checkout rather than reinstalling the filter.`,
+      detail: `Waiting for a restart: ${s.shippedExt} is installed but the Mac is still running ${s.activatedExt}. Restart the Mac to finish.`,
+    }]
+  }
+  // The extension is already this build's and only the app is behind — the ordinary shape of a
+  // release that changed nothing but the host. macOS will skip the activation, so this costs a copy
+  // and no interruption, but it has to happen: the agent runs that binary.
+  if (s.activatedExt === s.shippedExt) {
+    return [running, {
+      label: 'Network filter version',
+      ok: false,
+      warn: true,
+      detail: `The app in /Applications is ${s.installedHost} and this tapflow carries ${s.shippedHost}. The agent runs that binary. Run \`tapflow migrate net-filter\` to update it.`,
     }]
   }
   return [running, {
     label: 'Network filter version',
     ok: false,
     warn: true,
-    detail: `The Mac runs ${s.activated} and this tapflow carries ${s.shipped}. Run \`tapflow migrate net-filter\` to update it.`,
+    detail: `The Mac runs extension ${s.activatedExt} and this tapflow carries ${s.shippedExt}. Run \`tapflow migrate net-filter\` to update it.`,
   }]
 }
 
