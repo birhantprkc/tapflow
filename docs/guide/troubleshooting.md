@@ -278,9 +278,13 @@ filter for a moment, so the replacement is where this happens.
 The failures are immediate rather than slow: **`No route to host`**, not a long wait. Connections
 already open keep working, which is why some things carry on while a browser stops.
 
-`tapflow migrate net-filter` switches the filter off before it touches the extension, so this should
-not happen. If it does, the command says the filter is switched off rather than leaving you to work it
-out — your network is fine in that state and only iOS network control is missing.
+`tapflow migrate net-filter` switches the filter off twice on the way through: once before it copies
+the new app in, and once before it activates. The second is a gate — rather than activate over a filter
+it could not switch off, the command stops and tells you. The first is best effort, so on a Mac where
+it does not take you are back to the narrow window this section describes rather than clear of it.
+
+When the command does stop, it says whether the filter was left switched off. Your network works in
+that state and only iOS network control is missing.
 
 **Getting the network back does not need a restart.**
 

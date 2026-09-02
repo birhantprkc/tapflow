@@ -128,7 +128,7 @@ $B --confirm    # {"enforcing":true,"rule":["<udid>",…],"pid":1234}
 시스템 확장을 교체하면 물러난 쪽이 `[terminated waiting to uninstall on reboot]`로 남아 **mach 이름을
 계속 쥔다.** 그래서 새 provider의 `NSXPCListener.resume()`이 실패한다.
 
-```
+```text
 listener failed to activate: xpc_error=[1: Operation not permitted]
 invalidated after a failed init
 ```
