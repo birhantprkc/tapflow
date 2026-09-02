@@ -397,4 +397,10 @@ its own directory, which is why it goes on filtering for an app you deleted.
 If the command fails partway it says whether the filter was left off. The Mac's network works in that
 state and iOS network control does not; running the command again turns it back on.
 
+**It waits for the filter to report itself running before saying it worked.** macOS answers "not
+refused" rather than "working" when an extension is installed — the configuration reaches the filter
+afterwards, with nothing coming back — so the command watches for up to thirty seconds and leaves as
+soon as a filter appears. When none does it says that instead of claiming success. Your network is
+unaffected either way, because a filter that is not running blocks nothing.
+
 Run `tapflow doctor ios` afterwards to confirm what the Mac ended up with.

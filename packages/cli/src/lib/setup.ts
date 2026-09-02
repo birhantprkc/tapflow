@@ -215,6 +215,15 @@ async function setUpNetFilter(): Promise<SetupStepResult> {
         warn: true,
         detail: 'This tapflow install carries no usable filter app, so iOS network control cannot be set up. Reinstalling tapflow restores it.',
       }
+    case 'installed-unconfirmed':
+      // Installed, so setup did its job; unverified, so it must not report a clean state. `doctor ios`
+      // asks the same question from the same place, which is why it is the thing to run next.
+      return {
+        label: 'Network filter',
+        ok: false,
+        warn: true,
+        detail: 'Installed, but no filter reported itself as running within 30 seconds — iOS network control may not work yet. Check with: tapflow doctor ios',
+      }
     case 'refused-host-unknown':
       // The extension is enforcing and the app it came from is gone, so nothing says whether this
       // Mac's host binary is newer than the one here. Setup does not guess: it would be replacing a

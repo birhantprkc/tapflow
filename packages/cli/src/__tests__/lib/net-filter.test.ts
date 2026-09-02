@@ -403,6 +403,55 @@ describe('net filter — installing', () => {
     }
   })
 
+  // ── did the filter actually come back? (#725) ───────────────────────────────────────────────
+  //
+  // The host's exit 0 means the preference save was not refused, which is smaller than "it works" —
+  // `Host/main.swift` says so itself. The framework hands the configuration to the provider
+  // afterwards with nothing coming back, and by then this routine has switched the filter off on the
+  // strength of that report.
+
+  it('reports installed when a filter reports itself running', () => {
+    machine({ installed: OLDER, activated: OLDER })
+    expect(installNetFilter({ confirmDeadlineMs: 0 })).toEqual({ status: 'installed' })
+  })
+
+  it('reports it could not confirm when nothing starts enforcing', () => {
+    // **Not a failure.** The app is in place and the extension is activated; what is unknown is
+    // whether anything is filtering. Reporting `installed` here is the claim this check exists to
+    // stop making, and it is the claim the banner turns into "available now".
+    machine({ installed: OLDER, activated: OLDER, filterRunning: false })
+    expect(installNetFilter({ confirmDeadlineMs: 0 })).toEqual({ status: 'installed-unconfirmed' })
+  })
+
+  it('waits rather than deciding on the first look', () => {
+    // A provider launched fresh takes seconds to apply its settings — 5.8 measured, one run in five
+    // 21.3 — so asking once and answering would report failure on almost every real replace.
+    machine({ installed: OLDER, activated: OLDER })
+    let looks = 0
+    mockExistsSync.mockImplementation((p) => {
+      const q = String(p)
+      if (q === FILTER_STATE_FILE) return ++looks > 2
+      if (q.startsWith(NET_FILTER_APP) || q.includes('TapflowNetFilter.app')) return true
+      return q === '/Applications/Xcode.app'
+    })
+    expect(installNetFilter({ confirmDeadlineMs: 5_000 })).toEqual({ status: 'installed' })
+    expect(looks, 'it answered on the first look').toBeGreaterThan(2)
+  })
+
+  it('does not wait on the paths where there is nothing to confirm', () => {
+    // Approval dies before the filter is re-enabled, and the reboot path leaves the previous provider
+    // enforcing until the restart. Neither banner claims the filter is working, and spending the
+    // deadline before telling someone to reboot is a cost with no answer at the end of it.
+    for (const [code, status] of [[4, 'needs-approval'], [5, 'needs-reboot']] as const) {
+      vi.resetAllMocks()
+      machine({ installed: OLDER, activated: OLDER, filterRunning: false })
+      hostExits(code)
+      const began = Date.now()
+      expect(installNetFilter({ confirmDeadlineMs: 5_000 }), `exit ${code}`).toMatchObject({ status })
+      expect(Date.now() - began, `exit ${code} spent the confirmation deadline`).toBeLessThan(2_000)
+    }
+  })
+
   // ── a filter that was switched off and never turned back on ─────────────────────────────────
 
   it('reinstalls when the versions all match but nothing is enforcing', () => {
@@ -411,7 +460,10 @@ describe('net filter — installing', () => {
     // `[activated enabled]` — that is the system extension, not `NEFilterManager.isEnabled` — so a
     // version-only check calls this Mac current and the condition becomes permanent.
     machine({ filterRunning: false })
-    expect(installNetFilter()).toEqual({ status: 'installed' })
+    // `installed-unconfirmed` rather than `installed`: nothing was enforcing before the run and the
+    // fixture keeps it that way, so the confirmation at the end correctly finds nothing. The zero
+    // deadline asks once — a real run would spend thirty seconds proving the same thing.
+    expect(installNetFilter({ confirmDeadlineMs: 0 })).toEqual({ status: 'installed-unconfirmed' })
     expect(dittoCalls(), 'it declined to restore a filter that was switched off').toHaveLength(1)
   })
 
@@ -443,7 +495,7 @@ describe('net filter — installing', () => {
       ? JSON.stringify({ at: Math.floor(Date.now() / 1000) - 16, pulseSeconds: 5 }) as never
       : '' as never))
     // A provider that died leaves its last file behind; only the clock says so.
-    expect(installNetFilter()).toMatchObject({ status: 'installed' })
+    expect(installNetFilter({ confirmDeadlineMs: 0 })).toMatchObject({ status: 'installed-unconfirmed' })
   })
 
   // ── the host and the extension are two versions now (#724) ──────────────────────────────────

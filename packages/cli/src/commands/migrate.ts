@@ -58,6 +58,22 @@ export function cmdMigrateNetFilter(opts: { ignoreRunningDevices?: boolean } = {
         'iOS network control is available now: tapflow doctor ios',
       ])
       return
+    case 'installed-unconfirmed':
+      // **Not a failure, and not a success either.** The app is in place and the extension is
+      // activated; what could not be confirmed is that a provider came back up and started
+      // enforcing. Saying "available now" here would be the claim this whole check exists to stop
+      // making.
+      banner('error', 'INSTALLED, BUT NOTHING IS FILTERING YET', [
+        `Installed to ${NET_FILTER_APP}, and macOS accepted it — but no filter reported itself`,
+        'as running within 30 seconds, so iOS network control may not work yet.',
+        '',
+        'Your network is unaffected either way: a filter that is not running blocks nothing.',
+        '',
+        'Check whether it caught up on its own, and what to do if not:',
+        '  tapflow doctor ios',
+      ])
+      process.exit(1)
+      break
     case 'already-current':
       banner('success', 'ALREADY UP TO DATE', ['The Mac is already running the filter this tapflow carries.'])
       return
