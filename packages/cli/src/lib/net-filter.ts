@@ -26,18 +26,36 @@ const EXT_BUNDLE_ID = 'dev.tapflow.netfilter.ext'
  *  against a loaded machine, short against `doctor`'s promise to answer. */
 const PROBE_TIMEOUT_MS = 10_000
 
+/**
+ * **Two versions, not one, and the names say which is which** (#724).
+ *
+ * `build.sh` used to stamp one number into the host app and the system extension alike, so a rebuild
+ * that changed nothing but the host still bumped the extension and macOS replaced a provider for no
+ * reason — three of the six filter rebuilds so far. They are now allowed to differ, and the moment
+ * they do, comparing one against the other stops being harmless.
+ *
+ * It was not harmless before either, only invisible: `isNetFilterCurrent` compared the *host* app's
+ * version against the *extension* macOS is running, and they only ever agreed because one number was
+ * written into both. Fields called `shipped` and `installed` gave nothing away about which kind of
+ * version they held, which is why the names carry it now.
+ */
 export interface NetFilterState {
-  /** The version this CLI's `@tapflowio/ios-agent` carries, or null when the package has no app. */
-  shipped: string | null
-  /** The version in `/Applications`, or null when nothing is installed there. */
-  installed: string | null
-  /** The version macOS reports as `[activated enabled]`, or null when none is. */
-  activated: string | null
+  /** Host app version this CLI's `@tapflowio/ios-agent` carries, or null when the package has no app. */
+  shippedHost: string | null
+  /** Host app version in `/Applications`, or null when nothing is installed there. */
+  installedHost: string | null
+  /** System extension version the package carries. */
+  shippedExt: string | null
+  /** System extension version macOS reports as `[activated enabled]`, or null when none is. */
+  activatedExt: string | null
 }
 
 /** Read `CFBundleVersion` from an app bundle. `null` for absent or unreadable — a bundle that cannot
  *  be read is not a version, and guessing one here would be the claim this whole feature avoids. */
 export function bundleVersion(appPath: string): string | null {
+  // `appPath` is a bundle root — the app, or the system extension nested inside it. Both keep their
+  // plist at `Contents/Info.plist`, which is what lets one reader serve the two versions this module
+  // now has to tell apart.
   const plist = join(appPath, 'Contents', 'Info.plist')
   if (!existsSync(plist)) return null
   try {
@@ -161,15 +179,31 @@ export function isNewer(candidate: string, than: string): boolean {
  * would come to disagree about whether there was anything to consent to.
  */
 export function isNetFilterCurrent(s: NetFilterState): boolean {
-  return s.shipped !== null && s.installed === s.shipped && s.activated === s.shipped
+  return s.shippedHost !== null && s.installedHost === s.shippedHost
+    && s.shippedExt !== null && s.activatedExt === s.shippedExt
 }
+
+/**
+ * Where the extension's own plist sits inside the app bundle.
+ *
+ * **`installedExt` is deliberately not read**, and that is a decision rather than an omission: the
+ * two plists come out of one build and the host version is unique per build, so `installedHost`
+ * matching already says the bundle is this build's — extension included. Reading a third plist would
+ * buy a derivable value at the price of another 10-second probe and another way to answer `null`,
+ * where "could not read it" and "it is not there" are the same answer.
+ */
+const EXT_PLIST = [
+  'Contents', 'Library', 'SystemExtensions',
+  'dev.tapflow.netfilter.ext.systemextension', 'Contents', 'Info.plist',
+]
 
 export function readNetFilterState(): NetFilterState {
   const shipped = shippedAppPath()
   return {
-    shipped: shipped ? bundleVersion(shipped) : null,
-    installed: bundleVersion(NET_FILTER_APP),
-    activated: activatedVersion(),
+    shippedHost: shipped ? bundleVersion(shipped) : null,
+    installedHost: bundleVersion(NET_FILTER_APP),
+    shippedExt: shipped ? bundleVersion(join(shipped, ...EXT_PLIST.slice(0, -1))) : null,
+    activatedExt: activatedVersion(),
   }
 }
 
@@ -296,6 +330,7 @@ export type InstallOutcome =
   | { status: 'not-macos' }
   | { status: 'no-artifact' }
   | { status: 'refused-downgrade'; installed: string; shipped: string }
+  | { status: 'refused-host-unknown'; activated: string }
   | { status: 'refused-devices-busy'; busy: string[] }
   | { status: 'failed'; code: number; detail: string; filterLeftDisabled: boolean }
 
@@ -332,33 +367,48 @@ export function installNetFilter(opts: InstallOptions = {}): InstallOutcome {
   const shipped = shippedAppPath()
   if (!shipped) return { status: 'no-artifact' }
 
-  const shippedVersion = bundleVersion(shipped)
-  const installedVersion = bundleVersion(NET_FILTER_APP)
-  const activated = activatedVersion()
+  const state = readNetFilterState()
+  const { shippedHost, installedHost, shippedExt, activatedExt } = state
   // **An unreadable version refuses too.** Under `if (shippedVersion)` the whole guard below was
   // skipped whenever the shipped app would not say what it was, so the one artifact no comparison can
   // judge was the one that installed unconditionally — over a newer filter that was working.
-  if (!shippedVersion) return { status: 'no-artifact' }
+  if (!shippedHost || !shippedExt) return { status: 'no-artifact' }
   // **Current *and* running.** The version check alone answers a different question than the one the
   // caller is asking, and the gap between them is a state this function creates: interrupt the
   // sequence below between `--off` and `--install` and the Mac has the right app, the right activated
   // extension, and no filter. Returning `already-current` there makes the condition permanent, because
   // the only thing that would turn it back on is the run that just declined to do anything.
-  if (isNetFilterCurrent({ shipped: shippedVersion, installed: installedVersion, activated })
-      && isFilterEnforcing()) {
+  if (isNetFilterCurrent(state) && isFilterEnforcing()) {
     return { status: 'already-current' }
   }
   // **A downgrade is refused rather than performed.** `/Applications` holds one copy for the whole
   // Mac while the version each checkout judges it by comes from its own `node_modules`, so an older
   // checkout running this would replace the app a newer agent depends on and break it.
   //
-  // **What is protected is what the Mac is running, not the file on disk.** Reading the app alone
-  // left the guard skipped entirely whenever it was absent — and an app deleted from
-  // `/Applications` leaves the extension activated and enforcing, which is exactly when an older
-  // checkout would walk in and replace it.
-  const current = installedVersion ?? activated
-  if (current && isNewer(current, shippedVersion)) {
-    return { status: 'refused-downgrade', installed: current, shipped: shippedVersion }
+  // **Each kind against its own kind.** This used to fall back to the activated *extension* version
+  // when the app was gone, which worked only because one number was written into both. Once they are
+  // allowed to differ, that comparison is between two things that were never the same measurement.
+  if (installedHost && isNewer(installedHost, shippedHost)) {
+    return { status: 'refused-downgrade', installed: installedHost, shipped: shippedHost }
+  }
+  if (activatedExt && isNewer(activatedExt, shippedExt)) {
+    return { status: 'refused-downgrade', installed: activatedExt, shipped: shippedExt }
+  }
+
+  // **What is protected is what the Mac is running, not the file on disk**, and with the app gone
+  // there is no longer anything that says what that is.
+  //
+  // macOS keeps an extension activated and enforcing when its container app is deleted, and the
+  // agent's whole layer-1 path is the binary in `/Applications`. The extension's version used to
+  // stand in for the host's; now it only gives a lower bound, because a host-only build moves one and
+  // not the other. So this Mac may be running a *newer* host than this checkout carries and nothing
+  // here can tell.
+  //
+  // Refusing costs a repair that would usually have been fine. Guessing costs a working install,
+  // silently, for whoever set it up — and `doctor` already answers this state with the same two
+  // remedies rather than offering to reinstall.
+  if (installedHost === null && activatedExt !== null) {
+    return { status: 'refused-host-unknown', activated: activatedExt }
   }
 
   // **Refused rather than forced, and it belongs here rather than in either command.** Both `setup

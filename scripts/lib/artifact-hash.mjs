@@ -28,13 +28,22 @@ export function walk(dir, out = []) {
   return out
 }
 
-/** Path + bytes, in a stable order. Path is hashed too: moving a file changes the build. */
-export function hashFiles(root, files) {
+/**
+ * Path + bytes, in a stable order. Path is hashed too: moving a file changes the build.
+ *
+ * `normalize(relativePath, bytes)` is optional and exists for one shape: a file the build **writes
+ * into on every run**. Hashing such a file raw asks "did this input change" by reading back what the
+ * build itself last wrote, which is always true and makes any decision resting on it silently inert.
+ * The caller decides what to blank, because only the caller knows which bytes are its own output.
+ */
+export function hashFiles(root, files, normalize) {
   const h = createHash('sha256')
   for (const f of files) {
-    h.update(path.relative(root, f).split(path.sep).join('/'))
+    const rel = path.relative(root, f).split(path.sep).join('/')
+    h.update(rel)
     h.update('\0')
-    h.update(fs.readFileSync(f))
+    const bytes = fs.readFileSync(f)
+    h.update(normalize ? normalize(rel, bytes) : bytes)
     h.update('\0')
   }
   return h.digest('hex')

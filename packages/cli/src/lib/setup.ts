@@ -215,6 +215,16 @@ async function setUpNetFilter(): Promise<SetupStepResult> {
         warn: true,
         detail: 'This tapflow install carries no usable filter app, so iOS network control cannot be set up. Reinstalling tapflow restores it.',
       }
+    case 'refused-host-unknown':
+      // The extension is enforcing and the app it came from is gone, so nothing says whether this
+      // Mac's host binary is newer than the one here. Setup does not guess: it would be replacing a
+      // working install for someone who is not at this keyboard.
+      return {
+        label: 'Network filter',
+        ok: false,
+        warn: true,
+        detail: `Left alone — extension ${outcome.activated} is running but /Applications/TapflowNetFilter.app is gone, so tapflow cannot tell whether this Mac's filter is newer than this one. Reinstall from the tapflow whose version matches, or clear it: systemextensionsctl uninstall 6FBS3QP893 dev.tapflow.netfilter.ext`,
+      }
     case 'refused-downgrade':
       // Not a failure of this machine: it is set up for a newer tapflow than this one.
       return {
