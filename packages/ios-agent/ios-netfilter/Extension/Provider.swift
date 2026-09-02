@@ -124,9 +124,16 @@ private final class Heartbeat {
     /// the provider is enforcing a rule, which is the one thing this file must never say.
     private var stopped = false
     private var lastWrite: CFAbsoluteTime = 0
-    /// The rule as of the last file this object rendered. `nil` until the first one, so the first
-    /// pulse of a provider's life is always due — which is what makes a fresh file appear promptly
-    /// rather than at the idle rate. Written in `renderLocked`, under `lock`, beside `lastWrite`.
+    /// The rule as of the last file this object rendered.
+    ///
+    /// `nil` until the first one **and again after every `resume()`**, so the first pulse of a filter's
+    /// life is always due — which is what makes a fresh file appear promptly rather than at the idle
+    /// rate. The reset matters because this object is process-wide and a filter can stop and start
+    /// again inside it; see `resume()`.
+    ///
+    /// **Records what was rendered, which is one step short of what was published**: `publish` can
+    /// still drop the write when a stop lands while it is queued. That direction is harmless — a
+    /// dropped write means the filter is stopping, and `remove()` is what follows it.
     private var lastPublishedRule: Set<String>?
 
     private var flowsSimulator = 0
@@ -274,7 +281,22 @@ private final class Heartbeat {
     /// answering `handleNewFlow` with no state file on disk, which is exactly the "enforcing while the
     /// agent reads absence" that this file exists to make impossible.
     func resume() {
-        lock.lock(); stopped = false; lock.unlock()
+        lock.lock()
+        stopped = false
+        // **The publication history goes with the file, and forgetting one without the other is the
+        // same bug this method already exists to fix.** `remove()` deleted the file; `lastPublishedRule`
+        // and `lastWrite` still describe it. A restart that lands on an unchanged rule — which is every
+        // restart `nesessionmanager` performs for an installed-apps change, so every `ditto` into
+        // `/Applications` — would then find nothing due: the rule matches what was last rendered, and
+        // the elapsed check is measured from a write that no longer exists on disk. At the idle rate
+        // that is 4.75 seconds of a provider enforcing while the agent reads absence, which is the one
+        // thing this file must never say.
+        //
+        // `lastWrite` as well as the rule: keeping it would leave the *first* pulse after a resume
+        // subject to a threshold measured against the previous life of the filter.
+        lastPublishedRule = nil
+        lastWrite = 0
+        lock.unlock()
     }
 
     /// Absence is the signal a stopped filter should leave behind.

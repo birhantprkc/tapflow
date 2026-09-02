@@ -632,7 +632,12 @@ export class SimulatorNetwork {
     for (;;) {
       const file = this.readFilterState()
       const now = Math.floor(Date.now() / 1000)
-      if (file && now - file.at <= 3 * Math.max(file.pulseSeconds, 1)) {
+      // `file.at <= now` first, and it is not redundant: a timestamp from the future makes the
+      // subtraction negative and passes any threshold, so a clock that moved backwards would let a
+      // dead provider's frozen file read as perfect for as long as the skew lasted.
+      // `checkLivenessLocked` refuses the same reading for the same reason; this is its twin and
+      // had drifted from it.
+      if (file && file.at <= now && now - file.at <= 3 * Math.max(file.pulseSeconds, 1)) {
         const answered = file.rule.includes(udid) === wanted || file.at > since
         if (answered) return { enforcing: true, rule: file.rule, pid: file.pid ?? -1, from: 'file' }
       }

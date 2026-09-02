@@ -48,6 +48,10 @@ function fakeHostBinary(dir: string, log: string, sleepMs = 0, failNth = 0): str
     + `  [ -e "${dir}/NO_CONFIRM" ] && exit 7\n`
     + `  [ -e "${dir}/CONFIRM_HANG" ] && sleep 5\n`
     + `  if [ -e "${dir}/NOT_ENFORCING" ]; then printf '{"enforcing":false,"rule":[],"pid":1}\\n'; exit 0; fi\n`
+    // Enforcing, and holding something other than what the caller just wrote — the one shape that
+    // reaches the mismatch branch *through XPC*. Without it only the file channel ever disagrees,
+    // so the channel name in that warning could be wrong for the path 99% of traffic takes.
+    + `  [ -e "${dir}/CONFIRM_EMPTY" ] && { printf '{"enforcing":true,"rule":[],"pid":7}\\n'; exit 0; }\n`
     + `  R=$(cat "${dir}/rule" 2>/dev/null || echo "")\n`
     + `  printf '{"enforcing":true,"rule":%s,"pid":1}\\n' "$(echo "$R" | ${ruleToJson})"\n`
     + `  exit 0\n`
@@ -845,7 +849,9 @@ describe('SimulatorNetwork', () => {
       armed()
       writeFileSync(join(dir, 'NO_CONFIRM'), '')
       writeFileSync(join(dir, 'NO_STATE'), '')
-      const net = make()
+      // Short, because this test is about the verdict rather than the wait; the wait itself is
+      // covered above, against the real default.
+      const net = make(undefined, 200)
 
       await expect(net.setOffline(UDID, true)).resolves.toEqual({
         offline: false, available: false, reason: 'filter-unavailable',
@@ -881,7 +887,11 @@ describe('SimulatorNetwork', () => {
       writeFileSync(join(dir, 'NO_STATE'), '')
       const at = Math.floor(Date.now() / 1000)
       writeFileSync(join(dir, 'state.json'), JSON.stringify({ at, pid: 1, pulseSeconds: 1, rule: [] }))
-      const net = make(undefined, 2_000)
+      // **The production deadline on purpose, and it is the only test that uses it.** Every other case
+      // here injects its own, which left `FILTER_FILE_CONFIRM_DEADLINE_MS` observed by nothing —
+      // measured: cutting it to 1ms, which turns the documented loop back into a single read, passed
+      // all 83 tests. The good file lands at 600ms, so any default under about 700ms fails this.
+      const net = make()
 
       const began = Date.now()
       const settling = net.setOffline(UDID, true)
@@ -906,8 +916,12 @@ describe('SimulatorNetwork', () => {
       armed()
       writeFileSync(join(dir, 'NO_CONFIRM'), '')
       writeFileSync(join(dir, 'NO_STATE'), '')
+      // **Four seconds, not sixty.** The bound under test is `3 * pulseSeconds`, so a file an order of
+      // magnitude past it leaves every wider bound passing too — measured: `3 *` widened to `20 *` was
+      // green. Four is one second past the real threshold and still refused, and the measured hazard it
+      // stands for is a provider gone for about 5.8s while the kernel passes that device's traffic.
       writeFileSync(join(dir, 'state.json'), JSON.stringify({
-        at: Math.floor(Date.now() / 1000) - 60, pid: 1, pulseSeconds: 1, rule: [UDID],
+        at: Math.floor(Date.now() / 1000) - 4, pid: 1, pulseSeconds: 1, rule: [UDID],
       }))
       const net = make(undefined, 200)
 
@@ -915,6 +929,46 @@ describe('SimulatorNetwork', () => {
         offline: false, available: false, reason: 'filter-unavailable',
       })
       nothingApplied()
+    })
+
+    it('refuses a file dated in the future, however well it agrees', async () => {
+      // **The dangerous direction of a clock that moved backwards**, and the reason the freshness test
+      // is two comparisons rather than one: `now - at` goes negative and passes any threshold, so a
+      // provider that died before an NTP correction or a VM restore leaves a frozen file that reads as
+      // perfect for as long as the skew lasts. `checkLivenessLocked` refuses the same reading and says
+      // so; this channel is its twin and has to agree.
+      armed()
+      writeFileSync(join(dir, 'NO_CONFIRM'), '')
+      writeFileSync(join(dir, 'NO_STATE'), '')
+      writeFileSync(join(dir, 'state.json'), JSON.stringify({
+        at: Math.floor(Date.now() / 1000) + 600, pid: 1, pulseSeconds: 1, rule: [UDID],
+      }))
+      const net = make(undefined, 200)
+
+      await expect(net.setOffline(UDID, true)).resolves.toEqual({
+        offline: false, available: false, reason: 'filter-unavailable',
+      })
+      nothingApplied()
+    })
+
+    it('names the channel as xpc when the provider itself disagrees', async () => {
+      // **The twin of the file case below, and the one the diagnostic field is mostly for.** XPC is the
+      // channel almost every confirmation takes, so a `from` that is only ever asserted on the fallback
+      // can be wrong exactly where it matters — measured: labelling the XPC answer `'file'` passed all
+      // 83 tests. The state file here is fresh and correct; it is not consulted, because the ask
+      // answered.
+      armed()
+      writeFileSync(join(dir, 'CONFIRM_EMPTY'), '')
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      const net = make()
+
+      await expect(net.setOffline(UDID, true)).resolves.toEqual({
+        offline: false, available: false, reason: 'filter-unavailable',
+      })
+      const said = warn.mock.calls.flat().join(' ')
+      warn.mockRestore()
+      expect(said, 'the disagreement did not name the provider that answered').toContain('provider 7')
+      expect(said, 'an answer from XPC was reported as coming from the file').toContain('read over xpc')
     })
 
     it('names the provider and the channel when the published rule disagrees', async () => {
@@ -1024,7 +1078,9 @@ describe('SimulatorNetwork', () => {
       armed()
       writeFileSync(join(dir, 'NO_CONFIRM'), '')
       writeFileSync(join(dir, 'NO_STATE'), '')
-      const net = make()
+      // Short, because this test is about the verdict rather than the wait; the wait itself is
+      // covered above, against the real default.
+      const net = make(undefined, 200)
       await net.setOffline(UDID, true)
 
       expect(net.state(UDID)).toEqual({ offline: false, available: false, reason: 'filter-unavailable' })
@@ -1520,7 +1576,9 @@ describe('SimulatorNetwork', () => {
       armed()
       writeFileSync(join(dir, 'NO_CONFIRM'), '')
       writeFileSync(join(dir, 'NO_STATE'), '')
-      const net = make()
+      // Short, because this test is about the verdict rather than the wait; the wait itself is
+      // covered above, against the real default.
+      const net = make(undefined, 200)
       await net.setOffline(UDID, true)
       expect(net.state(UDID).available).toBe(false)
 

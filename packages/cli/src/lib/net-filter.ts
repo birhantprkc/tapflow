@@ -495,10 +495,16 @@ export function installNetFilter(opts: InstallOptions = {}): InstallOutcome {
   // Best effort on purpose: it is an early disable, and `off` below is the gate that must hold.
   // Nothing here can distinguish "already off" from "could not ask", and both are fine to continue on.
   restoreExecutableBits(shipped)
+  const wasEnforcing = isFilterEnforcing()
   const preOff = spawnSync(join(shipped, 'Contents', 'MacOS', 'TapflowNetFilter'), ['--off'], {
     encoding: 'utf8', timeout: OFF_TIMEOUT_MS,
   })
-  const preOffTook = preOff?.status === 0
+  // **Exit 0 is not "a filter was switched off".** `--off` treats an absent configuration as a
+  // success on purpose (`Host/main.swift`: "Nothing to turn off is a success, not a failure"), so
+  // on a Mac that never had a filter this would answer yes — and `filterLeftDisabled` is what both
+  // commands print *"the filter is switched off"* from. Telling someone that about a filter they
+  // never had is a smaller lie than the one this flag exists to stop, and still a wrong diagnosis.
+  const preOffTook = wasEnforcing && preOff?.status === 0
 
   const copy = spawnSync('/usr/bin/ditto', [shipped, NET_FILTER_APP], {
     encoding: 'utf8', timeout: COPY_TIMEOUT_MS,
@@ -556,6 +562,9 @@ export function installNetFilter(opts: InstallOptions = {}): InstallOutcome {
   //
   // `--install` turns it back on by itself: with no `--add`/`--remove` it takes `clearAll`, and
   // `configureFilter` ends with `isEnabled = true`. So there is no re-enable step to forget.
+  // Snapshotted so the failure below cannot be explained by a line the *earlier* disable wrote. The
+  // host appends to one log, so once two runs share it, "the last line" stops meaning "this run".
+  const logBeforeOff = hostLogTail()
   const off = spawnSync(join(NET_FILTER_APP, 'Contents', 'MacOS', 'TapflowNetFilter'), ['--off'], {
     encoding: 'utf8', timeout: OFF_TIMEOUT_MS,
   })
@@ -566,7 +575,7 @@ export function installNetFilter(opts: InstallOptions = {}): InstallOutcome {
     return {
       status: 'failed',
       code: off?.status ?? -1,
-      detail: hostLogTail() || (off?.stderr || '').trim()
+      detail: (hostLogTail() === logBeforeOff ? '' : hostLogTail()) || (off?.stderr || '').trim()
         || 'could not switch the filter off before replacing it',
       // The earlier call may have already taken it off, and if it did, saying otherwise here is the
       // same false reassurance as on the `ditto` failure above.
