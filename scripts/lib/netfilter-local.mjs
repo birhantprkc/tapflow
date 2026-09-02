@@ -34,15 +34,35 @@ export const PROFILE_DIRS = [
   path.join(os.homedir(), 'Library', 'MobileDevice', 'Provisioning Profiles'),
 ]
 
+/**
+ * The XML plist inside a `.provisionprofile`.
+ *
+ * **Read out of the file rather than through `security cms -D`**, which is the obvious way and makes
+ * this whole module macOS-only — so the tests that exercise it could only run on a maintainer's Mac,
+ * and CI ran none of the code that decides whether a build reuses a version.
+ *
+ * A `.provisionprofile` is CMS-signed, and the plist is the *content* being signed: it sits in the
+ * clear, ahead of the certificate blob. Measured on the committed profile — `<?xml` at byte 62,
+ * `</plist>` at 8984. Taking the first pair is therefore taking the content rather than something
+ * that happens to look like it further in.
+ *
+ * `latin1` so byte offsets survive: the surrounding DER is not valid UTF-8, and decoding it as UTF-8
+ * would replace bytes and move everything after them.
+ *
+ * **What is given up is verification.** `security` checks the CMS signature and this does not. That
+ * costs nothing here: the values read are a name and a date, used only to choose which local file to
+ * hash, and the hash is over the raw bytes either way.
+ */
 function decode(file) {
+  let raw
   try {
-    // A `.provisionprofile` is CMS-signed; `security cms -D` unwraps it to an XML plist.
-    return execFileSync('/usr/bin/security', ['cms', '-D', '-i', file], {
-      encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 10_000,
-    })
+    raw = fs.readFileSync(file).toString('latin1')
   } catch {
     return null
   }
+  const start = raw.indexOf('<?xml')
+  const end = raw.indexOf('</plist>', start)
+  return start < 0 || end < 0 ? null : raw.slice(start, end + '</plist>'.length)
 }
 
 const stringOf = (xml, key) => xml.match(new RegExp(`<key>${key}</key>\\s*<string>([^<]*)</string>`))?.[1] ?? null

@@ -218,8 +218,13 @@ log show --last 5m --debug --predicate 'process == "sysextd"' | grep -i conflict
    **`ios-netfilter/` 최상위에 파일을 새로 놓는다면 그것만으로는 입력이 되지 않는다.** 확장 바이너리를
    바꾸는 파일이라면 `scripts/lib/netfilter-artifact.mjs`의 `EXT_SOURCE_FILES`에 이름을 추가해야 한다.
 
-   판정이 못 보는 것이 남는다. 팀 ID 변경처럼 레포에도 프로파일에도 툴체인에도 안 나타나는 변화가
-   그렇다. 그럴 때는 강제한다.
+   서명 주체가 바뀌는 경우는 프로파일이 잡는다. 확장 프로파일 안에 `TeamIdentifier`와
+   `DeveloperCertificates`가 들어 있어서, 팀을 옮기거나 Developer ID를 교체하면 프로파일이 재발급되고
+   바이트가 달라진다. 호스트 쪽 서명이 바뀌는 것은 확장 번들을 건드리지 않는다 — 중첩 서명은 한
+   방향이라 호스트가 확장을 봉인하지 그 반대가 아니고, 호스트 앱은 어차피 매 릴리스 교체된다.
+
+   그래도 판정이 못 보는 것이 남을 수 있다. 레포에도 프로파일에도 툴체인에도 안 나타나는 변화라면
+   강제한다.
 
    ```bash
    FORCE_EXT_BUMP=1 ./build.sh

@@ -69,10 +69,12 @@ const HOST_SOURCE_FILES = []
  * not harmless now, which is why `build.sh` takes `FORCE_EXT_BUMP=1` and why detecting it
  * automatically is tracked separately.
  *
- * The same limit covers `Host/`'s own signing surface: the sysext is nested inside the host app and
- * validated against it, so a host entitlement change alters the context an unchanged extension runs
- * in. `Host/` cannot simply be added — `Host/Info.plist` carries the per-build stamp — so the
- * field-level line is a decision of its own.
+ * **`Host/`'s signing surface is a decision rather than a gap.** Nesting is one-way — the host seals
+ * the extension's four files and the extension seals only its own profile — so re-signing the host
+ * leaves the extension bundle byte-identical, and there is nothing to re-activate. The host app is
+ * replaced on every release anyway, because its version rises on every build. What would matter is a
+ * change of signing *identity*, and that reissues the extension's own provisioning profile:
+ * `TeamIdentifier` and `DeveloperCertificates` are inside it, so the comparison below sees it.
  */
 const CFBUNDLEVERSION = /(<key>CFBundleVersion<\/key>\s*<string>)[^<]*(<\/string>)/
 
