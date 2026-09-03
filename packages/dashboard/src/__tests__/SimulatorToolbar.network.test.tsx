@@ -26,6 +26,10 @@ const control = (over: Partial<NetworkControl> = {}): NetworkControl =>
 const networkButton = () =>
   screen.queryByRole('button', { name: /(device (offline|online|network)|^Retry: )/ })
 
+/** The region the button points at: the record button carries its own `status` beside this one. */
+const networkStatus = () =>
+  document.getElementById(networkButton()!.getAttribute('aria-describedby')!)!
+
 /** What the button is called in a given position — read from the render, not restated here. */
 function networkButtonName(position: NetworkControl['position']) {
   const { unmount } = toolbar(control({ position }))
@@ -114,7 +118,7 @@ describe('SimulatorToolbar — network control', () => {
     // something to say, fails here.
     const said = (position: NetworkControl['position'], pending = false) => {
       const { unmount } = toolbar(control({ position, pending }))
-      const text = screen.getByRole('status').textContent
+      const text = networkStatus().textContent
       unmount()
       return text
     }
@@ -419,7 +423,7 @@ describe('SimulatorToolbar — network control', () => {
       toolbar(awaiting())
       // "tapflow can no longer change it" was wrong twice here: nothing had been armed, so there was
       // no "no longer", and clicking does change the device.
-      const said = screen.getByRole('status').textContent ?? ''
+      const said = networkStatus().textContent ?? ''
       expect(said).toContain('Launch an app')
       expect(said).not.toContain('no longer')
     })
