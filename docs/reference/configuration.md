@@ -82,11 +82,9 @@ If the relay runs behind a same-host reverse proxy (nginx, Caddy) and `TAPFLOW_T
 For proxied or tunneled deployments, also set a public URL (`tunnel.publicUrl` or `relay.url`). Otherwise the CORS/CSRF allowlist is loopback-only and the dashboard's cross-origin requests can be blocked.
 :::
 
-## The first Admin account on a container install
+## Create the first Admin account in a container (`TAPFLOW_ADMIN_EMAIL`)
 
-`POST /api/v1/auth/init` only answers a local client — the check that stops a stranger claiming a public instance before you set a password. A container is always behind its bridge gateway, so it fails that check, which is why `docker compose up` ended at a login screen nobody could get past. The image is relay-only and carries no CLI to run `tapflow admin init` with either.
-
-Set both variables and the relay creates that first Admin while it boots.
+Set both variables and the relay creates the first Admin account while it starts — the path for a Docker install, where neither the browser onboarding nor `tapflow admin init` can reach.
 
 ```yaml
 services:
@@ -97,26 +95,32 @@ services:
       - TAPFLOW_ADMIN_PASSWORD=change-this-password
 ```
 
-Four things about how it behaves:
+The `/setup` page only answers a request from loopback — the check that stops a stranger claiming a public instance first. A container reaches the relay through its bridge gateway, so it fails that check, and the relay-only image carries no CLI to run `tapflow admin init` with either.
 
-- **Set both or neither.** One without the other stops the relay starting.
-- **The password is at least 8 characters.** A shorter one also stops it starting.
-- **A bootstrap that was asked for and failed stops the relay.** That only happens on an install with no owner, where serving anyway would leave it claimable by anything that reaches loopback — and where there is no working service to lose, because nobody can log in either.
-- **It does nothing once an install has an owner.** Your account is never replaced, and restarts do not repeat it.
+How it behaves:
 
-Nothing changes if you do not set them.
+- Set both variables together. One without the other stops the relay starting.
+- The password must be at least 8 characters.
+- It does nothing on an install that already has an owner. Your account is never replaced, and restarts do not repeat it.
+- If you asked for an account and it could not be created, the relay does not start. An ownerless relay is claimable by anything that reaches loopback, so stopping is safer than serving.
 
-## `chmod 600` an `.env` you write by hand
+Leave both unset and nothing changes.
 
-`tapflow init` creates `<dataDir>/.env` with mode 0600. The published image is relay-only and has no CLI, so a container operator writes that file themselves, under their own umask — and the bootstrap above asks them to put a plaintext password in it.
+### Keeping the password in `.env`
 
-The relay checks the mode at startup and warns when other users can read it:
+Writing the password to `.tapflow/data/.env` instead of your compose file keeps it out of both the image definition and your shell history, inside the volume you already mount. Narrow the permissions on a file you create yourself.
+
+```sh
+chmod 600 .tapflow/data/.env
+```
+
+`tapflow init` creates that file with mode 0600, but the relay-only image has no CLI — so a container operator writes it under their own umask. The relay checks the mode at startup and warns when other users can read it.
 
 ```
 .tapflow/data/.env is readable by other users (mode 644). Run: chmod 600 .tapflow/data/.env
 ```
 
-It is a warning rather than a refusal. Keeping the file inside the volume you already mount takes the password out of both your compose file and your shell history.
+It is a warning rather than a refusal.
 
 ## Streaming tuning (agent)
 
