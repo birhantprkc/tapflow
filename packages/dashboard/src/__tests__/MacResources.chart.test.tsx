@@ -71,10 +71,17 @@ describe('the chart does not draw time that has not arrived', () => {
   //
   // Measured on the geometry, not the labels: the newest sample is at `now`, so it belongs at the plot's
   // right edge, and under the old window it stopped short of it by the size of the gap.
-  const RIGHT_EDGE = 600 - 40 - 24 - 16 // width - MARGIN.left - MARGIN.right - INSET
+  const INSET = 16
+  const RIGHT_EDGE = 600 - 40 - 24 - INSET // width - MARGIN.left - MARGIN.right - INSET
+  const STEP: Record<string, number> = { '1h': 600_000, '6h': 3_600_000, '24h': 10_800_000, '7d': 86_400_000 }
 
   // Off every step boundary. On one, `ceil` and `floor` agree and the defect hides.
   const NOW = Date.parse('2026-08-18T02:55:00.000Z') + 61_000
+
+  /** Where a moment in the window lands on the axis — the mapping `scaleTime` is handed. */
+  const xOf = (t: number, span: number) => INSET + ((t - (NOW - span)) / span) * (RIGHT_EDGE - INSET)
+  const tickXs = (c: HTMLElement) =>
+    [...c.querySelectorAll('.visx-axis-bottom text')].map((t) => Number(t.getAttribute('x')))
 
   it.each([
     ['1h', 3_600_000],
@@ -94,12 +101,31 @@ describe('the chart does not draw time that has not arrived', () => {
     expect(drawn.length, 'no path geometry was rendered').toBeGreaterThan(0)
     expect(Math.max(...drawn), 'the newest sample stops short of the edge — the window runs past `now`')
       .toBeCloseTo(RIGHT_EDGE, 3)
+
+    // **The tick arithmetic itself, which the label assertions cannot reach.** Every candidate tick is a
+    // round step, so `tickCount ± 1` changes no label's shape and no format check can see it — measured,
+    // `+ 2` and one fewer each left all 34 tests green. One tick too many puts the first label at
+    // x = -34 with `text-anchor: start`, painted across the y-axis labels: the defect the first block of
+    // this file exists to prevent, arriving through the axis instead of through the series.
+    const tickX = tickXs(container)
+    expect(tickX.length, 'a tick was invented or dropped').toBe(span / STEP[range])
+    expect(Math.min(...tickX), 'a tick fell left of the plot').toBeGreaterThanOrEqual(INSET)
+    expect(Math.max(...tickX), 'a tick fell right of the plot').toBeLessThanOrEqual(RIGHT_EDGE)
+    expect(tickX[tickX.length - 1], 'the newest tick is not the last round step at or before `now`')
+      .toBeCloseTo(xOf(Math.floor(NOW / STEP[range]) * STEP[range], span), 3)
   })
 
-  it('still lands the tick labels on round times, which is what the round-up was for', () => {
+  it('still spaces the ticks a whole step apart, which is what the round-up was for', () => {
     // The other half. Ending the window at `now` must not drag the ticks off the clean step with it —
     // dropping the round-up and letting the ticks fall where the window ends would trade this defect for
     // an axis reading 14:03, 14:13, 14:23.
+    //
+    // **Measured on the geometry, not on the digits.** `lastTick` is round in UTC and `formatTick` renders
+    // local hours, so clean labels hold only where the offset is a whole multiple of the step. Asserting
+    // the digits made this file red on an unmodified checkout in Asia/Kathmandu and Pacific/Chatham — a
+    // 45-minute zone reads 07:45, 07:55 — with nothing to say the cause was the machine's clock rather
+    // than the code. Even spacing and a round anchor are the same claim about the code and no claim at
+    // all about the reader's timezone.
     const data = Array.from({ length: 12 }, (_, i) => ({
       time: new Date(NOW - (11 - i) * (3_600_000 / 11)).toISOString(),
       cpu: 20,
@@ -108,12 +134,15 @@ describe('the chart does not draw time that has not arrived', () => {
     const { container } = render(
       <AreaChartInner width={600} height={220} data={data} dataKey="cpu" hex="#60a5fa" range="1h" now={NOW} label="CPU %" />,
     )
-    // The 1h step is 10 minutes, so every label ends in a zero minute under any whole-ten-minute offset.
-    const clock = [...container.querySelectorAll('text')]
-      .map((t) => t.textContent ?? '')
-      .filter((t) => /^\d{2}:\d{2}$/.test(t))
-    expect(clock.length, 'no time labels were rendered').toBeGreaterThan(1)
-    expect(clock.filter((t) => !t.endsWith('0'))).toEqual([])
+    const tickX = tickXs(container)
+    expect(tickX.length, 'no time labels were rendered').toBeGreaterThan(1)
+    // One step of window, in pixels. Every gap is this, so no tick sits at an arbitrary offset.
+    const perStep = (STEP['1h'] / 3_600_000) * (RIGHT_EDGE - INSET)
+    for (const [i, x] of tickX.slice(1).entries()) {
+      expect(x - tickX[i], 'the ticks are no longer a whole step apart').toBeCloseTo(perStep, 3)
+    }
+    expect(tickX[tickX.length - 1], 'the ticks are evenly spaced but off the round step')
+      .toBeCloseTo(xOf(Math.floor(NOW / STEP['1h']) * STEP['1h'], 3_600_000), 3)
   })
 })
 

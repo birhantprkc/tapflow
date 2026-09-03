@@ -6,6 +6,16 @@ import type { FocusEvent } from 'react';
  * than of a viewer, and because a restart unmounts the viewer under the focus it is about to hand back.
  */
 let lastPointerDown = 0;
+/**
+ * What that press landed on. A press suppresses the ring only for the element it actually placed focus
+ * on — without this, a click anywhere in the document silenced the next 200ms of arrivals, including the
+ * programmatic hand-back after a restart, which is the arrival the ring exists for.
+ *
+ * Weak because the press that matters most is the one on a **restart button**, whose whole subtree is
+ * unmounted before focus comes back; a strong reference here would hold that dead viewer alive until the
+ * next click anywhere.
+ */
+let lastPointerTarget: WeakRef<Node> | null = null;
 /** How many hooks are mounted, so the listener is installed once and removed with the last. */
 let listeners = 0;
 
@@ -16,8 +26,9 @@ let listeners = 0;
  */
 const POINTER_PLACED_MS = 200;
 
-function onPointerDown() {
+function onPointerDown(e: PointerEvent) {
   lastPointerDown = Date.now();
+  lastPointerTarget = e.target instanceof Node ? new WeakRef(e.target) : null;
 }
 
 /**
@@ -50,7 +61,11 @@ export function useFocusArrivalRing() {
   // Only the root itself: focus moving between the controls inside the viewer is their business, and
   // reacting to it here would clear a ring the tester still needs.
   const onFocus = useCallback((e: FocusEvent<HTMLElement>) => {
-    if (e.target === e.currentTarget) setRinged(Date.now() - lastPointerDown > POINTER_PLACED_MS);
+    if (e.target !== e.currentTarget) return;
+    const pressed = lastPointerTarget?.deref();
+    const placedByPointer =
+      Date.now() - lastPointerDown <= POINTER_PLACED_MS && !!pressed && e.currentTarget.contains(pressed);
+    setRinged(!placedByPointer);
   }, []);
   const onBlur = useCallback((e: FocusEvent<HTMLElement>) => {
     if (e.target === e.currentTarget) setRinged(false);
@@ -66,4 +81,5 @@ export function useFocusArrivalRing() {
 /** Test seam: the pointer's last press outlives a render, so a suite must be able to forget it. */
 export function __resetFocusModality() {
   lastPointerDown = 0;
+  lastPointerTarget = null;
 }

@@ -197,6 +197,26 @@ describe('DeviceViewer — reboot wiring', () => {
     const region = screen.getByRole('region', { name: 'Device screen' })
     act(() => { region.focus() })
     expect(region.hasAttribute('data-focus-ring'), 'an unattributed arrival draws no ring').toBe(true)
+    // **The floor the behavioural tests cannot replace.** The attribute and the ring are joined by one
+    // string in three JSX files, and jsdom evaluates no CSS — so every test above stays green if that
+    // string is tidied away and no region ever draws an indicator again.
+    expect(region.className, 'the attribute no longer drives a ring').toMatch(/data-\[focus-ring\]:ring-2/)
+  })
+
+  it('does not ring the whole viewer when focus lands on a control inside it', () => {
+    // **The guard, and the blur, neither of which anything executed.** Measured: dropping the
+    // `e.target === e.currentTarget` checks left 16/16 green, and so did making `onBlur` a no-op.
+    // Without the guard a tester tabbing into the toolbar fires `focusin` on a *child*, it bubbles to
+    // the root, no press is recent, and the ring is drawn around the entire viewer while focus sits on
+    // a 24px button — the original defect back through a different door. Without the blur the ring
+    // survives the move and points at nothing.
+    live()
+    const region = screen.getByRole('region', { name: 'Device screen' })
+    act(() => { region.focus() })
+    expect(region.hasAttribute('data-focus-ring'), 'the ring was never lit, so this asserts nothing').toBe(true)
+
+    act(() => { screen.getByRole('button', { name: 'Restart the device' }).focus() })
+    expect(region.hasAttribute('data-focus-ring'), 'a child’s focus ringed the whole viewer').toBe(false)
   })
 
   it('still rings on the hand-back, across the remount the restart puts in between', async () => {
@@ -222,6 +242,22 @@ describe('DeviceViewer — reboot wiring', () => {
     expect(region.hasAttribute('data-focus-ring'), 'the hand-back arrived with no indicator').toBe(true)
   })
 
+  it('rings on the hand-back from a restart driven by the mouse, which is the ordinary one', async () => {
+    // **The sibling above avoids the pointer; this one is made of it.** `confirmRestart` clicks twice,
+    // and the device comes back well inside the 200ms a press counts for — so the suppression rule is
+    // the only thing standing between the tester and an invisible focus move, on the path they take.
+    live()
+    await confirmRestart()
+    const id = shutdowns()[0].requestId
+    act(() => { deliver!({ type: 'device:shutdown-done', sessionId: 'mine', requestId: id, payload: { deviceId: 'dev-1' } }) })
+    act(() => { deliver!({ type: 'device:booting', sessionId: 'mine' }) })
+    act(() => { deliver!({ type: 'session:chrome', sessionId: 'mine', payload: CHROME }) })
+
+    const region = screen.getByRole('region', { name: 'Device screen' })
+    expect(document.activeElement, 'the hand-back did not land').toBe(region)
+    expect(region.hasAttribute('data-focus-ring'), 'the confirm click suppressed the hand-back’s ring').toBe(true)
+  })
+
   it('does not ring for a tap, nor when the tester then types at the device', () => {
     // Two defects, one after the other. A `tabIndex={-1}` element is out of the tab order and still takes
     // focus from a *mouse* — a click on anything unfocusable inside it lands here — so a plain `:focus`
@@ -231,12 +267,30 @@ describe('DeviceViewer — reboot wiring', () => {
     // Both shipped, and it was the user who saw them, not the suite.
     live()
     const region = screen.getByRole('region', { name: 'Device screen' })
-    fireEvent.pointerDown(window)
+    // On the region, because that is where a tap lands. Pressing `window` instead would say nothing
+    // about the rule: the press has to be *inside the element taking focus* to suppress its ring.
+    fireEvent.pointerDown(region)
     act(() => { region.focus() })
     expect(region.hasAttribute('data-focus-ring'), 'a pointer arrival drew a ring').toBe(false)
 
     fireEvent.keyDown(window, { key: 'a' })
     expect(region.hasAttribute('data-focus-ring'), 'typing at the device lit the ring').toBe(false)
+  })
+
+  it('rings for a hand-back that follows a press somewhere else', () => {
+    // **A press suppresses the ring for what it placed focus on, not for the next 200ms of the whole
+    // document.** Recording only the *time* of the press meant a click anywhere — the page around the
+    // viewer, or the confirm button of the restart dialog, which Radix renders in a portal outside the
+    // region — silenced an arrival landing immediately after it. That is exactly the hand-back a
+    // mouse-driven restart ends with, and the ring is the only thing that reports it.
+    //
+    // The press is put outside the region deliberately: the toolbar and the status card are *inside*
+    // it, so a press on either is one the region can fairly claim.
+    live()
+    const region = screen.getByRole('region', { name: 'Device screen' })
+    fireEvent.pointerDown(document.body)
+    act(() => { region.focus() })
+    expect(region.hasAttribute('data-focus-ring'), 'a press outside the region suppressed its ring').toBe(true)
   })
 
   it('does not take focus when a first boot finishes', () => {

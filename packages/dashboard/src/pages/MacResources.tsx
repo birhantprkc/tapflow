@@ -293,9 +293,10 @@ export function AreaChartInner({
   const minT = maxT - RANGE_MS[range]
   const xScale = scaleTime({ domain: [minT, maxT], range: [INSET, Math.max(INSET, innerW - INSET)] })
   const yScale = scaleLinear({ domain: [0, 100], range: [innerH, INSET] })
-  // Counted down from the last round step at or before `now`, so the labels stay on clean times (23:50)
-  // without the window following them into the future. Ticks span the whole window regardless of where
-  // data exists.
+  // Counted down from the last round step at or before `now`, so the ticks stay on clean times without
+  // the window following them into the future. Ticks span the whole window regardless of where data
+  // exists. **Round in UTC**, which `formatTick` then renders locally — so the labels read 23:50 only
+  // where the offset is a whole multiple of the step, and 07:45 in a 45-minute zone.
   const lastTick = Math.floor(maxT / step) * step
   const tickCount = Math.floor((lastTick - minT) / step) + 1
   const ticks = Array.from({ length: tickCount }, (_, i) => new Date(lastTick - (tickCount - 1 - i) * step))
@@ -371,11 +372,12 @@ export function AreaChartInner({
         }
       >
         <LinearGradient id={gradId} from={hex} to={hex} fromOpacity={0.3} toOpacity={0} fromOffset="5%" toOffset="95%" />
-        {/* **The series is clipped to the plot, and the axis labels live outside it.** `maxT` is rounded
-            *up* to a clean step so the tick times stay round, which pushes the window's start up to one
-            step later than the oldest point the API returned — 10 minutes on the 1h range. `scaleTime`
-            does not clamp, so those points map to a negative x and the area painted straight through the
-            y-axis labels, worst on a series sitting where the labels are (RAM at ~57% covers 50% and 25%).
+        {/* **The series is clipped to the plot, and the axis labels live outside it.** The window runs
+            `now - interval` to `now` on the dashboard's clock, while the relay selects the samples from
+            *its own* — two clocks only ever approximately equal, so a relay running behind returns points
+            older than the window's left edge. `scaleTime` does not clamp, so those points map to a
+            negative x and the area painted straight through the y-axis labels, worst on a series sitting
+            where the labels are (RAM at ~57% covers 50% and 25%).
             Clipping rather than dropping them: a point just off-window still shapes the curve at the edge,
             which is what an off-screen sample should do. */}
         <clipPath id={clipId}>
