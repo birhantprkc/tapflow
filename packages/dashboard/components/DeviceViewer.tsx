@@ -564,9 +564,15 @@ export function DeviceViewer({ sessionId, deviceId, buildId, resetMode, onRecord
   const restartButtonRef = useRef<HTMLButtonElement | null>(null);
   const hadViewer = useRef(false);
   /**
-   * Set when the tester asks for a restart, so focus returns only to a control they used. Declared
-   * above the hook because **the paths that end a restart without a viewer coming back have to
-   * disarm it** — see the two below.
+   * Whether a restart owes focus back to the button that started it.
+   *
+   * **Armed where the restart commits, not where it is asked for.** Asking is `onReboot`, and three
+   * ways of asking never produce a viewer coming back to spend the flag: the relay refuses the
+   * shutdown, the 20s deadline passes, or something else claims the device while the shutdown is
+   * still unanswered — that last one cancels inside `useDeviceReboot` and tells nobody, by design.
+   * A flag left armed is spent by whatever boot happens next, which is the unsolicited recovery this
+   * is gated to ignore. Arming on the shutdown's success instead means none of those three ever arm
+   * it, rather than each of them having to remember to disarm.
    */
   const restoreFocusAfterReboot = useRef(false);
 
@@ -576,15 +582,11 @@ export function DeviceViewer({ sessionId, deviceId, buildId, resetMode, onRecord
   const { pending: rebootPending, reboot } = useDeviceReboot({
     sessionId, deviceId, deviceReady, send,
     handlerRef: rebootHandlerRef,
-    onShutdownComplete: useCallback(() => { sendBoot('app-only'); }, [sendBoot]),
-    // **Disarms the focus restore.** A refused shutdown and the 20s deadline both leave the toolbar
-    // exactly where it was, so no viewer comes back to spend the flag — and a live flag survives
-    // until some later, unrelated boot cycle, where it moves the caret onto a destructive control
-    // nobody pressed.
-    onError: useCallback((message: string) => {
-      restoreFocusAfterReboot.current = false;
-      toast.error(message);
-    }, []),
+    onShutdownComplete: useCallback(() => {
+      restoreFocusAfterReboot.current = true;
+      sendBoot('app-only');
+    }, [sendBoot]),
+    onError: useCallback((message: string) => { toast.error(message); }, []),
   });
 
   /**
@@ -610,11 +612,11 @@ export function DeviceViewer({ sessionId, deviceId, buildId, resetMode, onRecord
    * around the entire viewer on every boot. The restart button is a real control, it is where the
    * tester was, and it carries the browser's own focus ring at the size of a button.
    *
-   * **Only after a restart this component was asked for.** A stream dying on its own clears the
-   * chrome too, and moving the caret onto a destructive control nobody pressed is its own defect — so
-   * the flag is set by `onReboot` rather than inferred from the chrome going away. That also settles
-   * the first boot, where nobody has focused anything and taking focus would be a page grabbing the
-   * caret on load.
+   * **Only after a restart this component sequenced.** A stream dying on its own clears the chrome
+   * too, and moving the caret onto a destructive control nobody pressed is its own defect — so the
+   * flag comes from the restart's own shutdown landing rather than from the chrome going away. That
+   * also settles the first boot, where nobody has focused anything and taking focus would be a page
+   * grabbing the caret on load.
    */
   useEffect(() => {
     const hasViewer = Boolean(iosChrome ?? androidChrome);
@@ -631,17 +633,14 @@ export function DeviceViewer({ sessionId, deviceId, buildId, resetMode, onRecord
     restartButtonRef.current?.focus();
   }, [iosChrome, androidChrome]);
 
-  // The third way a restart ends with no viewer returning: the shutdown succeeded and the boot behind
-  // it did not.
+  // **After the shutdown lands there are still two ways the returning viewer is not this restart's.**
+  // The boot behind it fails, so the device that turns up later was booted by something else; or the
+  // agent goes away mid-boot and the rebind that follows boots the device itself. `session:rebound`
+  // needs no branch of its own — the agent announces its departure first, which is this flag.
   useEffect(() => {
-    if (bootError) restoreFocusAfterReboot.current = false;
-  }, [bootError]);
+    if (bootError || agentAway) restoreFocusAfterReboot.current = false;
+  }, [bootError, agentAway]);
 
-  /** The restart, plus the note that focus is owed back to the button it was pressed from. */
-  const rebootAndReturnFocus = useCallback(() => {
-    restoreFocusAfterReboot.current = true;
-    reboot();
-  }, [reboot]);
 
   const commonProps = {
     sessionId, buildId, send, openUrl, launchApp, connected, joined,
@@ -654,7 +653,7 @@ export function DeviceViewer({ sessionId, deviceId, buildId, resetMode, onRecord
     networkSupported: agentCapabilities.includes('network-control'),
     onRecordingUploaded,
     swKeyboardVisible, swKeyboardPending, onKbdToggle,
-    rebootPending, onReboot: rebootAndReturnFocus,
+    rebootPending, onReboot: reboot,
     restartButtonRef,
   };
 

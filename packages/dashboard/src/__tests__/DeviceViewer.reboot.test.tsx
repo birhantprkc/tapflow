@@ -121,11 +121,11 @@ describe('DeviceViewer — reboot wiring', () => {
   })
 
   it('forgets the owed focus when the restart is refused', async () => {
-    // **The flag is armed by asking for a restart and spent by a viewer coming back — and a refused
-    // shutdown produces the first without the second.** Nothing goes down, the toolbar stays exactly
-    // where it was, and the flag survives. Later, a stream that drops and recovers clears and restores
-    // the chrome on its own, and the caret jumps onto a destructive control nobody pressed: the defect
-    // the sibling test below is named for, reached through a restart that never happened.
+    // **A refused shutdown must never leave focus owed.** Nothing goes down, the toolbar stays exactly
+    // where it was, and no viewer comes back to spend a flag — so a flag armed here survives until
+    // some later boot spends it, jumping the caret onto a destructive control nobody pressed. The
+    // arming sits on the shutdown *landing* rather than on the tester asking, which is what makes this
+    // structural: there is no disarm to forget, because this path never arms.
     live()
     await confirmRestart()
     const id = shutdowns()[0].requestId
@@ -137,6 +137,23 @@ describe('DeviceViewer — reboot wiring', () => {
     act(() => { deliver!({ type: 'device:booting', sessionId: 'mine' }) })
     act(() => { deliver!({ type: 'session:chrome', sessionId: 'mine', payload: CHROME }) })
     expect(document.activeElement, 'a refused restart still moved the caret, one boot later').toBe(document.body)
+  })
+
+  it('forgets the owed focus when the agent goes away mid-restart', async () => {
+    // **After the shutdown lands, the flag is armed and the device is still coming back — so the two
+    // ways somebody else's boot arrives instead have to disarm it.** The agent leaving is one: the
+    // rebind that follows boots the device itself, the chrome returns, and without this the caret
+    // lands on the restart button on the strength of a restart that was overtaken. `useDeviceReboot`
+    // cancels its own wait on the same signal and deliberately tells nobody, so there is no error to
+    // hang this off.
+    live()
+    await confirmRestart()
+    const id = shutdowns()[0].requestId
+    act(() => { deliver!({ type: 'device:shutdown-done', sessionId: 'mine', requestId: id, payload: { deviceId: 'dev-1' } }) })
+    act(() => { deliver!({ type: 'session:agent-away', sessionId: 'mine' }) })
+
+    act(() => { deliver!({ type: 'session:chrome', sessionId: 'mine', payload: CHROME }) })
+    expect(document.activeElement, 'a restart the agent overtook still moved the caret').toBe(document.body)
   })
 
   it('forgets the owed focus when the boot behind the shutdown fails', async () => {
