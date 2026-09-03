@@ -4,6 +4,7 @@ import type { BrowserToRelay, SessionTerminatedReason } from '@tapflowio/protoco
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useRelay } from '@/hooks/useRelay';
 import { usePerfMode } from '@/hooks/usePerfMode';
+import { useFocusArrivalRing } from '@/hooks/useFocusArrivalRing';
 import { IOSViewer } from './device/IOSViewer';
 import { AndroidViewer } from './device/AndroidViewer';
 import { SimulatorInfoCard } from './device/shared/SimulatorInfoCard';
@@ -588,6 +589,7 @@ export function DeviceViewer({ sessionId, deviceId, buildId, resetMode, onRecord
   const bootingRegionRef = useRef<HTMLDivElement | null>(null);
   /** The mounted viewer's own root, so focus can be handed back when the device returns. */
   const viewerRootRef = useRef<HTMLDivElement | null>(null);
+  const { focusProps } = useFocusArrivalRing();
   const hadViewer = useRef(false);
   /** Whether *this* component moved focus, which is the only case it may move it back. */
   const parkedFocus = useRef(false);
@@ -649,17 +651,19 @@ export function DeviceViewer({ sessionId, deviceId, buildId, resetMode, onRecord
     // what is happening: a fixed "starting up" keeps asserting a recovery after a boot that failed,
     // while the card below carries the outcome.
     //
-    // The ring is `focus-visible` rather than plain focus. "No suppression, because `tabIndex={-1}`
-    // means only a deliberate focus can reach it" was the earlier reasoning and it is **false**: such
-    // an element is out of the tab order but still takes focus from a mouse, and a click on anything
-    // unfocusable inside it lands here — so every tap drew a ring around the whole thing.
+    // The ring reports how focus arrived rather than reading `:focus-visible` live. "No suppression,
+    // because `tabIndex={-1}` means only a deliberate focus can reach it" was the earliest reasoning and
+    // it is **false**: such an element is out of the tab order but still takes focus from a mouse, and a
+    // click on anything unfocusable inside it lands here — so every tap drew a ring around the whole
+    // thing. `focus-visible` answered that and brought its own, which `useFocusArrivalRing` explains.
     return (
       <div
         ref={bootingRegionRef}
         tabIndex={-1}
         role="region"
         aria-label="Device screen"
-        className="flex items-start justify-center gap-16 outline-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 rounded-md"
+        {...focusProps}
+        className="flex items-start justify-center gap-16 outline-none rounded-md data-[focus-ring]:ring-2 data-[focus-ring]:ring-ring data-[focus-ring]:ring-offset-2"
       >
         {/* **No `aria-busy` anywhere, and the two shapes below are hidden.** Three attempts put it in
             three places and each was wrong in the same way. On this container it sat above

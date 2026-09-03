@@ -1,23 +1,30 @@
 import { describe, it, expect } from 'vitest'
-import { render, screen, fireEvent } from '@testing-library/react'
+import { render, fireEvent } from '@testing-library/react'
 import { AreaChartInner } from '@/src/pages/MacResources'
 
-// **The series is clipped to the plot, and this is what says so.** The window's right edge is rounded *up*
-// to a clean tick so the times stay round (`ceil(now / step) * step`), which pushes its left edge up to one
-// step later than the oldest sample the relay returns — the API selects from `now - interval`, the chart
-// draws from `ceil(now/step)*step - interval`. On the 1h range that is 10 minutes of points sitting left of
-// the y-axis, and `scaleTime` does not clamp: they map to a negative x and the area painted straight
-// through the tick labels. It showed worst on RAM, which sits at ~57% right where "50%" and "25%" are.
+// **The series is clipped to the plot, and this is what says so.** The window runs `now - interval` to
+// `now`, and the samples inside it are selected by the relay from *its* clock — two clocks that are only
+// ever approximately equal. A relay running behind returns points older than the window's left edge, and
+// `scaleTime` does not clamp: they map to a negative x and the area paints straight through the tick
+// labels. It showed worst on RAM, which sits at ~57% right where "50%" and "25%" are.
+//
+// **This used to rest on the window reaching past the data rather than the other way round.** The right
+// edge was rounded up to a clean tick (`ceil(now / step) * step`), which pushed the left edge a full step
+// later than the oldest sample the relay returns. That round-up is gone — it also put the axis up to a
+// step into the future, which is what the block below measures. The clip is still load-bearing; what
+// reaches past the plot is now the data.
 //
 // Rendered directly rather than through the page: `ParentSize` measures 0 in jsdom, so `ChartCard` renders
 // nothing there and a test of the page would assert against an empty div.
 
 const AT = Date.parse('2026-08-18T02:55:00.000Z')
-const STEP = 600_000 // the 1h range's tick step
 
-/** One sample per minute across the last hour — which starts before the rounded-up window does. */
+/** How far the relay's clock trails the dashboard's — the reason a sample can precede the window. */
+const RELAY_LAG_MS = 5 * 60_000
+
+/** One sample per minute across the relay's last hour, which begins before the dashboard's window does. */
 const series = Array.from({ length: 60 }, (_, i) => {
-  const t = AT - (59 - i) * 60_000
+  const t = AT - RELAY_LAG_MS - (59 - i) * 60_000
   return { time: new Date(t).toISOString(), cpu: 20, mem: 57 }
 })
 
@@ -27,11 +34,8 @@ const xs = (d: string) => [...d.matchAll(/[ML]\s*(-?[\d.]+)/g)].map((m) => Numbe
 describe('the resource chart does not paint over its own axis', () => {
   it('has samples that fall left of the plot — the premise, measured', () => {
     // Without this the test below could pass on a chart that simply has nothing to clip.
-    const maxT = Math.ceil(AT / STEP) * STEP
-    const minT = maxT - 3_600_000
-    const before = series.filter((d) => Date.parse(d.time) < minT)
-    expect(before.length, 'no sample precedes the window — pick an `AT` that is not on a step boundary')
-      .toBeGreaterThan(0)
+    const before = series.filter((d) => Date.parse(d.time) < AT - 3_600_000)
+    expect(before.length, 'no sample precedes the window — raise `RELAY_LAG_MS`').toBeGreaterThan(0)
   })
 
   it('draws the series inside a clip that starts at the axis', () => {
@@ -57,6 +61,59 @@ describe('the resource chart does not paint over its own axis', () => {
     const drawn = paths(container).flatMap(xs)
     expect(drawn.length, 'no path geometry was rendered').toBeGreaterThan(0)
     expect(Math.min(...drawn), 'nothing extends past the axis — the clip is guarding nothing').toBeLessThan(0)
+  })
+})
+
+describe('the chart does not draw time that has not arrived', () => {
+  // `ceil(now / step) * step` ended the window at the *next* round tick, which left up to a full step of
+  // axis in the future — an hour of empty 6h chart, ten hours of empty 7d. No sample can ever land there,
+  // so the band read as missing data rather than as the edge of the window.
+  //
+  // Measured on the geometry, not the labels: the newest sample is at `now`, so it belongs at the plot's
+  // right edge, and under the old window it stopped short of it by the size of the gap.
+  const RIGHT_EDGE = 600 - 40 - 24 - 16 // width - MARGIN.left - MARGIN.right - INSET
+
+  // Off every step boundary. On one, `ceil` and `floor` agree and the defect hides.
+  const NOW = Date.parse('2026-08-18T02:55:00.000Z') + 61_000
+
+  it.each([
+    ['1h', 3_600_000],
+    ['6h', 21_600_000],
+    ['24h', 86_400_000],
+    ['7d', 604_800_000],
+  ] as const)('reaches the right edge with the newest sample on %s', (range, span) => {
+    const data = Array.from({ length: 12 }, (_, i) => ({
+      time: new Date(NOW - (11 - i) * (span / 11)).toISOString(),
+      cpu: 20,
+      mem: 57,
+    }))
+    const { container } = render(
+      <AreaChartInner width={600} height={220} data={data} dataKey="cpu" hex="#60a5fa" range={range} now={NOW} label="CPU %" />,
+    )
+    const drawn = paths(container).flatMap(xs)
+    expect(drawn.length, 'no path geometry was rendered').toBeGreaterThan(0)
+    expect(Math.max(...drawn), 'the newest sample stops short of the edge — the window runs past `now`')
+      .toBeCloseTo(RIGHT_EDGE, 3)
+  })
+
+  it('still lands the tick labels on round times, which is what the round-up was for', () => {
+    // The other half. Ending the window at `now` must not drag the ticks off the clean step with it —
+    // dropping the round-up and letting the ticks fall where the window ends would trade this defect for
+    // an axis reading 14:03, 14:13, 14:23.
+    const data = Array.from({ length: 12 }, (_, i) => ({
+      time: new Date(NOW - (11 - i) * (3_600_000 / 11)).toISOString(),
+      cpu: 20,
+      mem: 57,
+    }))
+    const { container } = render(
+      <AreaChartInner width={600} height={220} data={data} dataKey="cpu" hex="#60a5fa" range="1h" now={NOW} label="CPU %" />,
+    )
+    // The 1h step is 10 minutes, so every label ends in a zero minute under any whole-ten-minute offset.
+    const clock = [...container.querySelectorAll('text')]
+      .map((t) => t.textContent ?? '')
+      .filter((t) => /^\d{2}:\d{2}$/.test(t))
+    expect(clock.length, 'no time labels were rendered').toBeGreaterThan(1)
+    expect(clock.filter((t) => !t.endsWith('0'))).toEqual([])
   })
 })
 

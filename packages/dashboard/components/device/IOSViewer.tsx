@@ -8,6 +8,7 @@ import { Home, Keyboard, Loader2, Play } from 'lucide-react';
 import { useFps } from '@/hooks/useFps';
 import { SimulatorToolbar } from './shared/SimulatorToolbar';
 import { useNetworkControl } from '@/hooks/useNetworkControl';
+import { useFocusArrivalRing } from '@/hooks/useFocusArrivalRing';
 import type { NetworkMessageHandler } from '@/hooks/useNetworkControl';
 import { SimulatorInfoCard } from './shared/SimulatorInfoCard';
 import { DeepLinkDialog } from './DeepLinkDialog';
@@ -76,6 +77,7 @@ export function IOSViewer({
   const containerRef = useRef<HTMLDivElement>(null);
   const screenAreaRef = useRef<HTMLDivElement>(null);
   const { fps, frameCount } = useFps();
+
   const lastFrameRecvAtRef = useRef<number>(0);
   const { recordState, recordCanvasRef, startClientRecording, stopClientRecording } = useClientRecording({ sessionId, buildId, onRecordingUploaded });
   const deviceSeq = useRef(0);
@@ -84,6 +86,7 @@ export function IOSViewer({
   const [canvasReady, setCanvasReady] = useState(false);
   const [isLandscape, setIsLandscape] = useState(false);
   const [keyboardActive, setKeyboardActive] = useState(false);
+  const { focusProps } = useFocusArrivalRing();
   const [flashedButton, setFlashedButton] = useState<string | null>(null);
   const [hoveredButton, setHoveredButton] = useState<string | null>(null);
   const [pinchActive, setPinchActive] = useState(false);
@@ -634,17 +637,19 @@ export function IOSViewer({
   ) : null;
 
   return (
-    // **`focus-visible`, not `focus`** — a `tabIndex={-1}` element is out of the tab order but still
-    // takes focus from a *mouse*, and a click on anything unfocusable inside it lands here. So every
-    // tap on the simulator drew a ring around the whole viewer. `focus-visible` is the browser's own
-    // answer to that: it fires for keyboard and for a programmatic focus that follows one, which is
-    // exactly the restart hand-back this element exists for, and not for a pointer.
+    // **The ring is driven by how focus arrived, not by `:focus-visible`.** A `tabIndex={-1}` element is
+    // out of the tab order but still takes focus from a *mouse* — a click on anything unfocusable inside
+    // it lands here — so a plain `:focus` ring drew itself around the whole viewer on every tap.
+    // `focus-visible` fixed that and brought its own: the browser re-evaluates it on every keystroke, and
+    // this viewer forwards keystrokes to the device from a `window` listener, so typing lit the ring under
+    // a focus a pointer had placed. See `useFocusArrivalRing`.
     <div
       ref={viewerRootRef}
       tabIndex={-1}
       role="region"
       aria-label="Device screen"
-      className="flex items-start justify-center gap-16 outline-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 rounded-md"
+      {...focusProps}
+      className="flex items-start justify-center gap-16 outline-none rounded-md data-[focus-ring]:ring-2 data-[focus-ring]:ring-ring data-[focus-ring]:ring-offset-2"
     >
       <canvas ref={recordCanvasRef} style={{ display: 'none' }} />
 

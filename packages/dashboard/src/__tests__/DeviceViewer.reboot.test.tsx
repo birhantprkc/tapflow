@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, act } from '@testing-library/react'
+import { render, screen, act, fireEvent } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import type { BrowserInbound } from '@/lib/types'
+import { __resetFocusModality } from '@/hooks/useFocusArrivalRing'
 
 // **The wiring, which the hook's suite and the toolbar's suite cannot reach between them** (#628).
 //
@@ -68,7 +69,9 @@ async function confirmRestart() {
 }
 
 describe('DeviceViewer — reboot wiring', () => {
-  beforeEach(() => { send.mockClear(); toast.error.mockClear(); deliver = null })
+  // The focus modality is module scope on purpose — it has to outlive the remount a restart causes —
+  // so it also outlives a test, and a Tab pressed in one would ring the viewer in the next.
+  beforeEach(() => { send.mockClear(); toast.error.mockClear(); deliver = null; __resetFocusModality() })
 
   it('offers the control on a live device', () => {
     live()
@@ -181,16 +184,59 @@ describe('DeviceViewer — reboot wiring', () => {
     }
   })
 
-  it('rings only for a deliberate focus, not for every tap on the device', () => {
-    // **A floor, and jsdom is why**: it evaluates no CSS, so nothing here can watch a ring appear.
-    // What it can hold is that the ring is scoped to `focus-visible`. A `tabIndex={-1}` element is out
-    // of the tab order and still takes focus from a *mouse* — a click on anything unfocusable inside
-    // it lands here — so a plain `:focus` ring drew itself around the whole viewer on every tap. That
-    // shipped, and it was the user who saw it, not the suite.
+  it('rings for a focus no pointer placed', () => {
+    // **The half that used to be untestable.** It read the class list for `focus-visible:ring-2` and said
+    // so: "jsdom evaluates no CSS, so nothing here can watch a ring appear". A className floor cannot
+    // fail when the ring stops appearing altogether, which is the exact shape the sibling test below
+    // needs a control for. The ring is now a state this suite can read.
+    //
+    // The ring is the region's only focus indicator, so drawing it is the default and a pointer is what
+    // takes it away. An arrival with no press behind it — Tab, a hand-back, an assistive technology —
+    // has to be visible whether or not anything can say which of those it was.
     live()
     const region = screen.getByRole('region', { name: 'Device screen' })
-    expect(region.className, 'the ring is not scoped to focus-visible').toContain('focus-visible:ring-2')
-    expect(region.className, 'a pointer focus can still draw an outline').toContain('outline-none')
+    act(() => { region.focus() })
+    expect(region.hasAttribute('data-focus-ring'), 'an unattributed arrival draws no ring').toBe(true)
+  })
+
+  it('still rings on the hand-back, across the remount the restart puts in between', async () => {
+    // **The case the ring exists for.** A restart clears the chrome and the viewer holding the ring goes
+    // with it, so the focus `DeviceViewer` hands back lands on a *fresh* instance. Nothing about that
+    // arrival tells anyone it happened except the ring: it is programmatic, it is not where the tester
+    // was looking, and the region it lands on has `outline-none`.
+    live()
+    // Driven from the keyboard end to end, because `confirmRestart` clicks — and a press seconds earlier
+    // must not still be suppressing the ring by the time the device comes back.
+    send.mockClear()
+    screen.getByRole('button', { name: 'Restart the device' }).focus()
+    await userEvent.keyboard('{Enter}')
+    screen.getByRole('button', { name: 'Restart' }).focus()
+    await userEvent.keyboard('{Enter}')
+    const id = shutdowns()[0].requestId
+    act(() => { deliver!({ type: 'device:shutdown-done', sessionId: 'mine', requestId: id, payload: { deviceId: 'dev-1' } }) })
+    act(() => { deliver!({ type: 'device:booting', sessionId: 'mine' }) })
+    act(() => { deliver!({ type: 'session:chrome', sessionId: 'mine', payload: CHROME }) })
+
+    const region = screen.getByRole('region', { name: 'Device screen' })
+    expect(document.activeElement, 'the hand-back did not land').toBe(region)
+    expect(region.hasAttribute('data-focus-ring'), 'the hand-back arrived with no indicator').toBe(true)
+  })
+
+  it('does not ring for a tap, nor when the tester then types at the device', () => {
+    // Two defects, one after the other. A `tabIndex={-1}` element is out of the tab order and still takes
+    // focus from a *mouse* — a click on anything unfocusable inside it lands here — so a plain `:focus`
+    // ring drew itself around the whole viewer on every tap. `focus-visible` answered that, and then the
+    // browser re-evaluated it on every keystroke: the viewers forward keys to the device from a `window`
+    // listener, so a tester who clicked and then typed lit the ring mid-sentence under a pointer's focus.
+    // Both shipped, and it was the user who saw them, not the suite.
+    live()
+    const region = screen.getByRole('region', { name: 'Device screen' })
+    fireEvent.pointerDown(window)
+    act(() => { region.focus() })
+    expect(region.hasAttribute('data-focus-ring'), 'a pointer arrival drew a ring').toBe(false)
+
+    fireEvent.keyDown(window, { key: 'a' })
+    expect(region.hasAttribute('data-focus-ring'), 'typing at the device lit the ring').toBe(false)
   })
 
   it('does not take focus when a first boot finishes', () => {

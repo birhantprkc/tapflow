@@ -284,14 +284,21 @@ export function AreaChartInner({
   const innerW = width - MARGIN.left - MARGIN.right
   const innerH = height - MARGIN.top - MARGIN.bottom
 
-  // Anchor to "now" rounded up to a clean step, so tick times stay round (e.g. 23:50).
+  // **The window ends at `now`, and the ticks are what get rounded — not the window.** Rounding the edge
+  // up to the next clean step (`ceil(now / step) * step`) kept the tick times round at the cost of up to a
+  // full step of axis that no sample can ever reach: an hour of empty 6h chart, and 63px of 504 on 7d.
+  // Empty because it has not happened yet, which reads as a gap in the data rather than as the edge.
   const step = TICK_STEP_MS[range]
-  const maxT = Math.ceil(now / step) * step
+  const maxT = now
   const minT = maxT - RANGE_MS[range]
   const xScale = scaleTime({ domain: [minT, maxT], range: [INSET, Math.max(INSET, innerW - INSET)] })
   const yScale = scaleLinear({ domain: [0, 100], range: [innerH, INSET] })
-  // Ticks span the whole window regardless of where data exists.
-  const ticks = Array.from({ length: RANGE_MS[range] / step + 1 }, (_, i) => new Date(minT + i * step))
+  // Counted down from the last round step at or before `now`, so the labels stay on clean times (23:50)
+  // without the window following them into the future. Ticks span the whole window regardless of where
+  // data exists.
+  const lastTick = Math.floor(maxT / step) * step
+  const tickCount = Math.floor((lastTick - minT) / step) + 1
+  const ticks = Array.from({ length: tickCount }, (_, i) => new Date(lastTick - (tickCount - 1 - i) * step))
 
   const gradId = `fill-${dataKey}`
   const clipId = `plot-${dataKey}`
