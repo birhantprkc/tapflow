@@ -86,18 +86,7 @@ For proxied or tunneled deployments, also set a public URL (`tunnel.publicUrl` o
 
 Set both variables and the relay creates the first Admin account while it starts — the path for a Docker install, where neither the browser onboarding nor `tapflow admin init` can reach.
 
-```yaml
-services:
-  relay:
-    image: tapflow/tapflow:latest
-    environment:
-      - TAPFLOW_ADMIN_EMAIL=admin@yourteam.com
-      - TAPFLOW_ADMIN_PASSWORD=${TAPFLOW_ADMIN_PASSWORD:?set this before starting}
-```
-
-`${...:?}` makes Compose refuse to start when the value is missing — a literal here would be copied unchanged and become a known password. Compose reads that value from your shell or from the `.env` beside your compose file, which is a different file from the `.tapflow/data/.env` the relay reads.
-
-The `/setup` page only answers a request from loopback — the check that stops a stranger claiming a public instance first. A container reaches the relay through its bridge gateway, so it fails that check, and the relay-only image carries no CLI to run `tapflow admin init` with either.
+Normally you create that first account through the `/setup` page in a browser, and `tapflow admin init` stands in for it on a server with no browser. A container closes both doors: `/setup` only answers a request from loopback — the check that stops a stranger claiming a public instance first — and a container reaches the relay through its bridge gateway, while the relay-only image carries no CLI.
 
 How it behaves:
 
@@ -108,9 +97,31 @@ How it behaves:
 
 Leave both unset and nothing changes.
 
-### Keeping the password in `.env`
+There are two places to keep the values and **they do not combine.** Compose looks for what it interpolates in your shell or in the `.env` beside your compose file. The relay reads `.tapflow/data/.env` inside the volume. Different files.
 
-Writing the password to `.tapflow/data/.env` instead of your compose file keeps it out of both the image definition and your shell history, inside the volume you already mount. Narrow the permissions on a file you create yourself.
+### In your compose file
+
+```yaml
+services:
+  relay:
+    image: tapflow/tapflow:latest
+    environment:
+      - TAPFLOW_ADMIN_EMAIL=admin@yourteam.com
+      - TAPFLOW_ADMIN_PASSWORD=${TAPFLOW_ADMIN_PASSWORD:?set this before starting}
+```
+
+`${...:?}` makes Compose refuse to start when the value is missing — a literal here would be copied unchanged and become a known password. Supply it as a shell environment variable, or in the `.env` next to your compose file.
+
+### In the relay's own `.env`
+
+Leave both lines out of `environment:` and write them inside the volume you already mount. That keeps the password out of your compose file and your shell history.
+
+```sh
+TAPFLOW_ADMIN_EMAIL=admin@yourteam.com
+TAPFLOW_ADMIN_PASSWORD=a-password-you-choose
+```
+
+Narrow the permissions on a file you create yourself.
 
 ```sh
 chmod 600 .tapflow/data/.env

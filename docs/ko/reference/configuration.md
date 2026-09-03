@@ -88,18 +88,7 @@ openssl rand -hex 32
 
 두 변수를 설정하면 릴레이가 시작하면서 첫 Admin 계정을 만듭니다. 브라우저 온보딩과 `tapflow admin init`이 모두 닿지 않는 Docker 설치를 위한 경로입니다.
 
-```yaml
-services:
-  relay:
-    image: tapflow/tapflow:latest
-    environment:
-      - TAPFLOW_ADMIN_EMAIL=admin@yourteam.com
-      - TAPFLOW_ADMIN_PASSWORD=${TAPFLOW_ADMIN_PASSWORD:?set this before starting}
-```
-
-`${...:?}`는 값이 없으면 컴포즈가 시작을 거부하는 문법입니다. 리터럴을 적어두면 그대로 복사돼 알려진 비밀번호가 됩니다. 컴포즈는 이 값을 셸 환경이나 컴포즈 파일 옆의 `.env`에서 읽습니다. 릴레이가 읽는 `.tapflow/data/.env`와는 다른 파일입니다.
-
-`/setup` 페이지는 루프백에서 온 요청에만 응답합니다. 공개된 인스턴스를 낯선 사람이 먼저 차지하지 못하게 막는 검사인데, 컨테이너는 브리지 게이트웨이를 거치므로 여기에 걸립니다. 릴레이 전용 이미지에는 CLI가 들어 있지 않아 `tapflow admin init`도 쓸 수 없습니다.
+평소에는 브라우저에서 `/setup` 페이지로 첫 계정을 만듭니다. 브라우저를 쓸 수 없는 서버에서는 `tapflow admin init`이 그 자리를 대신합니다. 컨테이너에서는 둘 다 막힙니다. `/setup`은 루프백에서 온 요청에만 응답하는데 컨테이너는 브리지 게이트웨이를 거쳐서 그 검사에 걸립니다. 그리고 릴레이 전용 이미지에는 CLI가 들어 있지 않습니다.
 
 동작은 이렇습니다.
 
@@ -110,9 +99,31 @@ services:
 
 두 변수를 비워두면 아무것도 달라지지 않습니다.
 
-### 비밀번호를 `.env`에 둘 때
+값을 둘 자리는 두 곳이고 **둘을 섞으면 안 됩니다.** 컴포즈는 보간할 값을 셸이나 컴포즈 파일 옆의 `.env`에서 찾습니다. 릴레이는 볼륨 안의 `.tapflow/data/.env`를 읽습니다. 서로 다른 파일입니다.
 
-비밀번호를 컴포즈 파일 대신 `.tapflow/data/.env`에 적으면 이미지 정의와 셸 히스토리 양쪽에서 빠지고 이미 마운트하고 있는 볼륨 안에 남습니다. 직접 만든 파일은 권한을 좁혀 주세요.
+### 컴포즈에 두는 경우
+
+```yaml
+services:
+  relay:
+    image: tapflow/tapflow:latest
+    environment:
+      - TAPFLOW_ADMIN_EMAIL=admin@yourteam.com
+      - TAPFLOW_ADMIN_PASSWORD=${TAPFLOW_ADMIN_PASSWORD:?set this before starting}
+```
+
+`${...:?}`는 값이 없으면 컴포즈가 시작을 거부하는 문법입니다. 리터럴을 적어두면 그대로 복사돼 알려진 비밀번호가 됩니다. 값은 셸 환경변수로 넣거나 컴포즈 파일 옆의 `.env`에 적습니다.
+
+### 릴레이의 `.env`에 두는 경우
+
+`environment:`에서 두 줄을 빼고 이미 마운트하고 있는 볼륨 안에 적습니다. 비밀번호가 컴포즈 파일과 셸 히스토리 양쪽에서 빠집니다.
+
+```sh
+TAPFLOW_ADMIN_EMAIL=admin@yourteam.com
+TAPFLOW_ADMIN_PASSWORD=a-password-you-choose
+```
+
+직접 만든 파일은 권한을 좁혀 주세요.
 
 ```sh
 chmod 600 .tapflow/data/.env
