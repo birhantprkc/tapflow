@@ -39,7 +39,11 @@ permissions:
 
 concurrency:
   # Two `edited` events in quick succession would otherwise both find no marker and both comment.
-  group: announce-linked-pr-${{ github.event.pull_request.number || 'manual' }}
+  # **One group for every run, not one per pull request.** A manual backfill and an `edited` event
+  # for the same PR would otherwise sit in different groups, run together, both find no marker and
+  # both comment — the duplicate the marker exists to prevent. Serialising event runs against each
+  # other is the price, and it is small: each run is short, and nothing is cancelled.
+  group: announce-linked-pr
   cancel-in-progress: false
 
 jobs:
@@ -153,7 +157,11 @@ jobs:
           if [ -n "${PR:-}" ]; then
             targets=$PR
           else
-            targets=$(gh pr list --state open --limit 200 --json number --jq '.[].number')
+            # **`--repo` is not optional here.** Nothing is checked out, so `gh` has no git remote to
+            # infer the repository from and the command fails outright. Every other call in this job
+            # names the repository in its path, which is why this one stood out only once it was
+            # written — and a local dry run cannot catch it, because a local run has a checkout.
+            targets=$(gh pr list --repo "$REPO" --state open --limit 200 --json number --jq '.[].number')
             if [ -z "$targets" ]; then
               echo "no open pull requests — nothing to announce."
               exit 0
