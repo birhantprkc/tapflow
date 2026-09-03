@@ -23,6 +23,15 @@ on:
   pull_request_target:
     types: [opened, reopened, edited]
 
+  # **The event-driven half cannot reach a pull request that is already open.** A
+  # `pull_request_target` workflow only takes effect once it is on the default branch, and it fires
+  # on events rather than on state — so every issue that already had a PR against it when this landed
+  # stays silent until that PR happens to be edited. Three of them were in exactly that position on
+  # the day this was written. Running it by hand walks the open list through the same code, which
+  # matters more than the convenience: a backfill written separately would be a second implementation
+  # of the marker, and the two would disagree the first time one changed.
+  workflow_dispatch:
+
 permissions:
   contents: read
   issues: write
@@ -30,7 +39,7 @@ permissions:
 
 concurrency:
   # Two `edited` events in quick succession would otherwise both find no marker and both comment.
-  group: announce-linked-pr-${{ github.event.pull_request.number }}
+  group: announce-linked-pr-${{ github.event.pull_request.number || 'manual' }}
   cancel-in-progress: false
 
 jobs:
@@ -48,92 +57,112 @@ jobs:
           owner=${REPO%/*}
           name=${REPO#*/}
 
-          # **`closingIssuesReferences`, not a regex over the body.** GitHub already decides what
-          # closes what — `Closes`, `Fixes`, `Resolves`, each in any case, across repositories. A
-          # second parser here would disagree with the sidebar sooner or later, and the disagreement
-          # would be invisible.
-          #
-          # The response is captured whole rather than filtered with `--jq`, because three separate
-          # questions are asked of it below and one API call is enough for all three. `gh` still
-          # exits non-zero when the call fails, which `set -e` carries out.
-          # shellcheck disable=SC2016  # `$owner`/`$name`/`$pr` below are GraphQL variables,
-          # bound by the -F flags. Single quotes are what keeps the shell out of them.
-          resp=$(gh api graphql \
-            -f query='
-              query($owner:String!, $name:String!, $pr:Int!) {
-                repository(owner:$owner, name:$name) {
-                  pullRequest(number:$pr) {
-                    closingIssuesReferences(first:100) {
-                      pageInfo { hasNextPage }
-                      nodes { number repository { nameWithOwner } }
-                    }
-                  }
-                }
-              }' \
-            -F owner="$owner" -F name="$name" -F pr="$PR")
-
-          refs=.data.repository.pullRequest.closingIssuesReferences
-
-          # A null `pullRequest` means the query succeeded and answered about nothing — a shape that
-          # would otherwise flow on as "closes no issues".
-          [ "$(jq -r '.data.repository.pullRequest == null' <<<"$resp")" = "false" ] || {
-            echo "the query returned no pull request for #$PR — refusing to report on that"
-            exit 1
-          }
-
-          # **A truncated list is a stop, not a shorter list.** `first:100` is far past anything real
-          # here, so reaching the cap means something is wrong rather than busy — and silently
-          # dropping the overflow is the failure this repository keeps finding in its own guards.
-          [ "$(jq -r "$refs.pageInfo.hasNextPage" <<<"$resp")" = "false" ] || {
-            echo "PR #$PR closes more than 100 issues — refusing to report on a truncated list"
-            exit 1
-          }
-
-          # **Only this repository.** A closing reference can point at another repo, and the loop
-          # below posts by number alone — so `other-org/other-repo#42` would land a comment on *our*
-          # #42, which is a different issue. The token cannot write to that repo anyway, so those are
-          # named in the log and skipped.
-          issues=$(jq -r --arg repo "$REPO" "$refs.nodes[] | select(.repository.nameWithOwner == \$repo) | .number" <<<"$resp")
-          foreign=$(jq -r --arg repo "$REPO" "$refs.nodes[] | select(.repository.nameWithOwner != \$repo) | \"\(.repository.nameWithOwner)#\(.number)\"" <<<"$resp")
-          [ -z "$foreign" ] || echo "skipping references outside $REPO: $(tr '\n' ' ' <<<"$foreign")"
-
-          if [ -z "$issues" ]; then
-            echo "PR #$PR closes no issues in $REPO — nothing to announce."
-            exit 0
-          fi
-
-          # The marker is the whole idempotency story: `edited` fires on a title change, and a
-          # reopen fires again on a PR that was already announced.
-          marker="<!-- linked-pr: $PR -->"
           announced=0
           skipped=0
+          scanned=0
 
-          for issue in $issues; do
-            # **The fetch and the match are separate statements on purpose.** Written as one
-            # pipeline ending in `|| true`, that `true` covers the whole thing: a 5xx or a secondary
-            # rate limit trips `pipefail`, the failure is swallowed, `grep -c` prints 0, and the
-            # workflow reads "not announced yet" when it means "could not check" — posting the
-            # duplicate the marker exists to prevent. Assigning first lets `set -e` see a failed
-            # read; `grep -q` inside `if` is then free to answer no.
-            bodies=$(gh api --paginate "repos/$REPO/issues/$issue/comments" --jq '.[].body')
-            if grep -qF "$marker" <<<"$bodies"; then
-              echo "issue #$issue already carries the marker for PR #$PR — skipping"
-              skipped=$((skipped + 1))
-              continue
+          announce() {
+            pr=$1
+
+            # **`closingIssuesReferences`, not a regex over the body.** GitHub already decides what
+            # closes what — `Closes`, `Fixes`, `Resolves`, each in any case, across repositories. A
+            # second parser here would disagree with the sidebar sooner or later, and the
+            # disagreement would be invisible.
+            #
+            # The response is captured whole rather than filtered with `--jq`, because three separate
+            # questions are asked of it below and one API call is enough for all three. `gh` still
+            # exits non-zero when the call fails, which `set -e` carries out.
+            # shellcheck disable=SC2016  # `$owner`/`$name`/`$pr` below are GraphQL variables,
+            # bound by the -F flags. Single quotes are what keeps the shell out of them.
+            resp=$(gh api graphql \
+              -f query='
+                query($owner:String!, $name:String!, $pr:Int!) {
+                  repository(owner:$owner, name:$name) {
+                    pullRequest(number:$pr) {
+                      closingIssuesReferences(first:100) {
+                        pageInfo { hasNextPage }
+                        nodes { number repository { nameWithOwner } }
+                      }
+                    }
+                  }
+                }' \
+              -F owner="$owner" -F name="$name" -F pr="$pr")
+
+            refs=.data.repository.pullRequest.closingIssuesReferences
+
+            # A null `pullRequest` means the query succeeded and answered about nothing — a shape
+            # that would otherwise flow on as "closes no issues".
+            [ "$(jq -r '.data.repository.pullRequest == null' <<<"$resp")" = "false" ] || {
+              echo "the query returned no pull request for #$pr — refusing to report on that"
+              exit 1
+            }
+
+            # **A truncated list is a stop, not a shorter list.** `first:100` is far past anything
+            # real here, so reaching the cap means something is wrong rather than busy — and silently
+            # dropping the overflow is the failure this repository keeps finding in its own guards.
+            [ "$(jq -r "$refs.pageInfo.hasNextPage" <<<"$resp")" = "false" ] || {
+              echo "PR #$pr closes more than 100 issues — refusing to report on a truncated list"
+              exit 1
+            }
+
+            # **Only this repository.** A closing reference can point at another repo, and the loop
+            # below posts by number alone — so `other-org/other-repo#42` would land a comment on
+            # *our* #42, which is a different issue. The token cannot write to that repo anyway, so
+            # those are named in the log and skipped.
+            issues=$(jq -r --arg repo "$REPO" "$refs.nodes[] | select(.repository.nameWithOwner == \$repo) | .number" <<<"$resp")
+            foreign=$(jq -r --arg repo "$REPO" "$refs.nodes[] | select(.repository.nameWithOwner != \$repo) | \"\(.repository.nameWithOwner)#\(.number)\"" <<<"$resp")
+            [ -z "$foreign" ] || echo "PR #$pr: skipping references outside $REPO: $(tr '\n' ' ' <<<"$foreign")"
+
+            if [ -z "$issues" ]; then
+              echo "PR #$pr closes no issues in $REPO"
+              return 0
             fi
 
-            # **"links this issue", not "is open".** A bare `#123` reference is rendered by GitHub
-            # with the pull request's *current* state, so a sentence written in this tense stays true
-            # after the PR merges or closes. Saying "is open" would need a second workflow to come
-            # back and correct it, which is a second thing to get wrong.
-            gh api "repos/$REPO/issues/$issue/comments" -f body="$(printf '%s\n\n%s' \
-              "#$PR links this issue. Under [CONTRIBUTING](https://github.com/$REPO/blob/main/CONTRIBUTING.md#claiming-an-issue), opening a pull request is how an issue is claimed — check that one before starting your own." \
-              "$marker")" >/dev/null
-            echo "commented on issue #$issue for PR #$PR"
-            announced=$((announced + 1))
+            # The marker is the whole idempotency story: `edited` fires on a title change, a reopen
+            # fires again on a PR that was already announced, and the manual run walks every open PR
+            # whether or not it has been seen.
+            marker="<!-- linked-pr: $pr -->"
+
+            for issue in $issues; do
+              # **The fetch and the match are separate statements on purpose.** Written as one
+              # pipeline ending in `|| true`, that `true` covers the whole thing: a 5xx or a
+              # secondary rate limit trips `pipefail`, the failure is swallowed, `grep -c` prints 0,
+              # and the workflow reads "not announced yet" when it means "could not check" — posting
+              # the duplicate the marker exists to prevent. Assigning first lets `set -e` see a
+              # failed read; `grep -q` inside `if` is then free to answer no.
+              bodies=$(gh api --paginate "repos/$REPO/issues/$issue/comments" --jq '.[].body')
+              if grep -qF "$marker" <<<"$bodies"; then
+                echo "issue #$issue already carries the marker for PR #$pr — skipping"
+                skipped=$((skipped + 1))
+                continue
+              fi
+
+              # **"links this issue", not "is open".** A bare `#123` reference is rendered by GitHub
+              # with the pull request's *current* state, so a sentence written in this tense stays
+              # true after the PR merges or closes. Saying "is open" would need a second workflow to
+              # come back and correct it, which is a second thing to get wrong.
+              gh api "repos/$REPO/issues/$issue/comments" -f body="$(printf '%s\n\n%s' \
+                "#$pr links this issue. Under [CONTRIBUTING](https://github.com/$REPO/blob/main/CONTRIBUTING.md#claiming-an-issue), opening a pull request is how an issue is claimed — check that one before starting your own." \
+                "$marker")" >/dev/null
+              echo "commented on issue #$issue for PR #$pr"
+              announced=$((announced + 1))
+            done
+          }
+
+          # One pull request on an event; every open one when a human asks.
+          if [ -n "${PR:-}" ]; then
+            targets=$PR
+          else
+            targets=$(gh pr list --state open --limit 200 --json number --jq '.[].number')
+            if [ -z "$targets" ]; then
+              echo "no open pull requests — nothing to announce."
+              exit 0
+            fi
+          fi
+
+          for pr_number in $targets; do
+            announce "$pr_number"
+            scanned=$((scanned + 1))
           done
 
-          # **Say what was done.** A run that announced nothing and a run that could not read
-          # anything look identical in a log that only prints on success — the failure this
-          # repository keeps finding in its own guards.
-          echo "issues in $REPO: $(grep -c . <<<"$issues"), announced: $announced, already marked: $skipped"
+          echo "pull requests scanned: $scanned, announced: $announced, already marked: $skipped"
