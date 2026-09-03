@@ -57,6 +57,8 @@
 | `TAPFLOW_VERCEL_TOKEN` | — | *(비어있음)* | `tls.dnsProvider`가 `vercel`일 때 쓰는 Vercel API 토큰. |
 | `TAPFLOW_VERCEL_TEAM_ID` | — | *(비어있음)* | 도메인이 팀 스코프에 속할 때 필요한 Vercel 팀 ID. |
 | `TAPFLOW_ACME_EMAIL` | — | *(비어있음)* | Let's Encrypt 계정 연락 이메일(선택). |
+| `TAPFLOW_ADMIN_EMAIL` | — | *(비어있음)* | 릴레이가 부팅하면서 만드는 첫 Admin 계정의 이메일. `TAPFLOW_ADMIN_PASSWORD`와 **함께** 설정합니다. 이미 소유자가 있는 설치에서는 아무 일도 하지 않습니다. |
+| `TAPFLOW_ADMIN_PASSWORD` | — | *(비어있음)* | 그 계정의 비밀번호. 최소 8자입니다. |
 | `SMTP_HOST` | `smtp.host` | `` | SMTP 호스트 |
 | `SMTP_PORT` | `smtp.port` | `587` | SMTP 포트 |
 | `SMTP_SECURE` | `smtp.secure` | `false` | TLS 사용 여부 (`true` 문자열로 설정) |
@@ -81,6 +83,42 @@ openssl rand -hex 32
 
 프록시나 터널로 노출하는 경우 공개 URL(`tunnel.publicUrl` 또는 `relay.url`)도 함께 설정하세요. 설정하지 않으면 CORS/CSRF 허용 목록이 loopback만 남아, 대시보드의 cross-origin 요청이 차단될 수 있습니다.
 :::
+
+## 컨테이너 설치의 첫 Admin 계정
+
+`POST /api/v1/auth/init`은 로컬 클라이언트에게만 응답합니다. 공개된 인스턴스를 낯선 사람이 먼저 차지하는 것을 막는 검사입니다. 그런데 컨테이너는 항상 브리지 게이트웨이 뒤에 있어서 그 검사에 걸립니다. `docker compose up`이 아무도 통과할 수 없는 로그인 화면에서 끝났던 이유입니다. 이미지는 릴레이 전용이라 `tapflow admin init`을 돌릴 CLI도 들어 있지 않습니다.
+
+두 변수를 설정하면 릴레이가 부팅하면서 첫 Admin을 만듭니다.
+
+```yaml
+services:
+  relay:
+    image: tapflow/tapflow:latest
+    environment:
+      - TAPFLOW_ADMIN_EMAIL=admin@yourteam.com
+      - TAPFLOW_ADMIN_PASSWORD=change-this-password
+```
+
+동작은 네 가지입니다.
+
+- **둘 다 설정하거나 둘 다 비웁니다.** 하나만 있으면 릴레이가 시작하지 않습니다.
+- **비밀번호는 8자 이상입니다.** 짧으면 역시 시작하지 않습니다.
+- **요청받은 부트스트랩이 실패하면 릴레이가 뜨지 않습니다.** 이 상황은 소유자가 없는 설치에서만 생깁니다. 그대로 서비스하면 루프백에 닿는 무엇이든 그 설치를 차지할 수 있고 로그인할 수 있는 사람이 없으니 잃을 서비스도 없습니다.
+- **소유자가 이미 있으면 아무 일도 하지 않습니다.** 계정이 덮어써지지 않고 재시작마다 반복되지도 않습니다.
+
+설정하지 않으면 아무것도 달라지지 않습니다.
+
+## 직접 만든 `.env`는 `chmod 600`
+
+`tapflow init`은 `<dataDir>/.env`를 0600으로 만듭니다. 그런데 배포되는 이미지는 릴레이 전용이라 CLI가 없고 컨테이너 운영자는 그 파일을 **자기 umask로 직접** 씁니다. 그리고 위 부트스트랩은 그 파일에 평문 비밀번호를 넣으라고 안내합니다.
+
+릴레이는 시작할 때 파일 모드를 확인하고 다른 사용자가 읽을 수 있으면 경고합니다.
+
+```
+.tapflow/data/.env is readable by other users (mode 644). Run: chmod 600 .tapflow/data/.env
+```
+
+경고일 뿐 시작을 막지는 않습니다. 파일을 마운트한 볼륨 안에 두면 컴포즈 파일과 셸 히스토리 양쪽에서 비밀번호가 빠집니다.
 
 ## 스트리밍 튜닝 (에이전트)
 

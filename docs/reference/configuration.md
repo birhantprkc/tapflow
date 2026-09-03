@@ -57,6 +57,8 @@ Secrets can also live in the `.tapflow/data/.env` file. The relay loads it first
 | `TAPFLOW_VERCEL_TOKEN` | — | *(empty)* | Vercel API token for DNS-01 issuance when `tls.dnsProvider` is `vercel`. |
 | `TAPFLOW_VERCEL_TEAM_ID` | — | *(empty)* | Vercel team ID, required when the domain belongs to a team scope. |
 | `TAPFLOW_ACME_EMAIL` | — | *(empty)* | Optional contact email for the Let's Encrypt account. |
+| `TAPFLOW_ADMIN_EMAIL` | — | *(empty)* | Email for the first Admin account, created while the relay boots. Set it **together with** `TAPFLOW_ADMIN_PASSWORD`. Does nothing on an install that already has an owner. |
+| `TAPFLOW_ADMIN_PASSWORD` | — | *(empty)* | Password for that account, at least 8 characters. |
 | `SMTP_HOST` | `smtp.host` | `` | SMTP host |
 | `SMTP_PORT` | `smtp.port` | `587` | SMTP port |
 | `SMTP_SECURE` | `smtp.secure` | `false` | Enable TLS (set to string `"true"`) |
@@ -79,6 +81,42 @@ If the relay runs behind a same-host reverse proxy (nginx, Caddy) and `TAPFLOW_T
 
 For proxied or tunneled deployments, also set a public URL (`tunnel.publicUrl` or `relay.url`). Otherwise the CORS/CSRF allowlist is loopback-only and the dashboard's cross-origin requests can be blocked.
 :::
+
+## The first Admin account on a container install
+
+`POST /api/v1/auth/init` only answers a local client — the check that stops a stranger claiming a public instance before you set a password. A container is always behind its bridge gateway, so it fails that check, which is why `docker compose up` ended at a login screen nobody could get past. The image is relay-only and carries no CLI to run `tapflow admin init` with either.
+
+Set both variables and the relay creates that first Admin while it boots.
+
+```yaml
+services:
+  relay:
+    image: tapflow/tapflow:latest
+    environment:
+      - TAPFLOW_ADMIN_EMAIL=admin@yourteam.com
+      - TAPFLOW_ADMIN_PASSWORD=change-this-password
+```
+
+Four things about how it behaves:
+
+- **Set both or neither.** One without the other stops the relay starting.
+- **The password is at least 8 characters.** A shorter one also stops it starting.
+- **A bootstrap that was asked for and failed stops the relay.** That only happens on an install with no owner, where serving anyway would leave it claimable by anything that reaches loopback — and where there is no working service to lose, because nobody can log in either.
+- **It does nothing once an install has an owner.** Your account is never replaced, and restarts do not repeat it.
+
+Nothing changes if you do not set them.
+
+## `chmod 600` an `.env` you write by hand
+
+`tapflow init` creates `<dataDir>/.env` with mode 0600. The published image is relay-only and has no CLI, so a container operator writes that file themselves, under their own umask — and the bootstrap above asks them to put a plaintext password in it.
+
+The relay checks the mode at startup and warns when other users can read it:
+
+```
+.tapflow/data/.env is readable by other users (mode 644). Run: chmod 600 .tapflow/data/.env
+```
+
+It is a warning rather than a refusal. Keeping the file inside the volume you already mount takes the password out of both your compose file and your shell history.
 
 ## Streaming tuning (agent)
 
