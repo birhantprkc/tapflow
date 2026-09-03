@@ -1,6 +1,6 @@
 # Contributing to tapflow
 
-> Common rules: [AGENTS.md](./AGENTS.md) | Full index: [INDEX.md](./INDEX.md)
+> Common rules: [AGENTS.md](./AGENTS.md) | Full index: [INDEX.md](./INDEX.md) | Community standards: [Code of Conduct](./CODE_OF_CONDUCT.md)
 
 ## Development setup
 
