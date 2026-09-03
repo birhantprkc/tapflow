@@ -92,17 +92,19 @@ services:
     image: tapflow/tapflow:latest
     environment:
       - TAPFLOW_ADMIN_EMAIL=admin@yourteam.com
-      - TAPFLOW_ADMIN_PASSWORD=change-this-password
+      - TAPFLOW_ADMIN_PASSWORD=${TAPFLOW_ADMIN_PASSWORD:?set this before starting}
 ```
+
+`${...:?}` makes Compose refuse to start when the value is missing — a literal here would be copied unchanged and become a known password. Compose reads that value from your shell or from the `.env` beside your compose file, which is a different file from the `.tapflow/data/.env` the relay reads.
 
 The `/setup` page only answers a request from loopback — the check that stops a stranger claiming a public instance first. A container reaches the relay through its bridge gateway, so it fails that check, and the relay-only image carries no CLI to run `tapflow admin init` with either.
 
 How it behaves:
 
-- Set both variables together. One without the other stops the relay starting.
-- The password must be at least 8 characters.
-- It does nothing on an install that already has an owner. Your account is never replaced, and restarts do not repeat it.
-- If you asked for an account and it could not be created, the relay does not start. An ownerless relay is claimable by anything that reaches loopback, so stopping is safer than serving.
+- **It does nothing on an install that already has an owner.** Your account is never replaced, restarts do not repeat it, and none of the three checks below run.
+- On an install with no owner, set both variables together. One without the other stops the relay starting.
+- The password must be at least 8 characters. A shorter one also stops it starting.
+- If the account you asked for could not be created, the relay does not start. An ownerless relay is claimable by anything that reaches loopback, so stopping is safer than serving.
 
 Leave both unset and nothing changes.
 
@@ -116,7 +118,7 @@ chmod 600 .tapflow/data/.env
 
 `tapflow init` creates that file with mode 0600, but the relay-only image has no CLI — so a container operator writes it under their own umask. The relay checks the mode at startup and warns when other users can read it.
 
-```
+```text
 .tapflow/data/.env is readable by other users (mode 644). Run: chmod 600 .tapflow/data/.env
 ```
 
