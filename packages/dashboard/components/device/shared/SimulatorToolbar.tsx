@@ -488,6 +488,9 @@ export function SimulatorToolbar({
               // button non-focusable, so focus fell to `<body>` and the name change was announced
               // to nobody. Same shape as the restart and network controls; the guard is below.
               aria-disabled={recordState === 'uploading' || recordState === 'done'}
+              // Both on purpose: the live region fires once, when the state changes; the description
+              // is what a user who tabs to the button afterwards gets. Some screen readers read both
+              // while the button is focused, which is the cheaper failure.
               aria-describedby={recordStatusId}
               onClick={() => { if (recordState === 'idle' || recordState === 'recording') onRecordToggle(); }}
             >

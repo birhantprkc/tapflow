@@ -44,6 +44,15 @@ describe('the record button while the recording is processed', () => {
     expect(button.getAttribute('aria-disabled')).toBe('true')
   })
 
+  it('keeps focus through stop, processing and saved', () => {
+    const { rerender } = toolbar('recording')
+    record().focus()
+    rerender('uploading')
+    expect(record()).toHaveFocus()
+    rerender('done')
+    expect(record()).toHaveFocus()
+  })
+
   it('is busy while processing and not once saved', () => {
     const { rerender } = toolbar('uploading')
     expect(record().getAttribute('aria-busy')).toBe('true')
