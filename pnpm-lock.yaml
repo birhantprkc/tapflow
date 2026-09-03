@@ -4,16 +4,6 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
-overrides:
-  hono@>=4.0.0 <4.12.34: ^4.12.34
-  fast-uri@>=2.0.0 <2.4.4: '>=2.4.4 <3'
-  fast-uri@>=3.0.0 <3.1.5: '>=3.1.5 <4'
-  fast-uri@>=4.0.0 <4.1.2: '>=4.1.2 <5'
-  undici@>=7.0.0 <7.29.0: '>=7.29.0 <8'
-  axios@>=1.15.2 <1.18.0: '>=1.18.0 <2'
-  body-parser@>=2.0.0 <2.3.0: '>=2.3.0 <3'
-  protobufjs@>=7.5.0 <=7.6.4: '>=7.6.5 <8'
-
 importers:
 
   .:
@@ -1468,7 +1458,7 @@ packages:
     resolution: {integrity: sha512-eWpQYr67tqJLeaSUl0Q+TquuYfUdTibpOJlUMV2FfUP7+KqCC5TufnwnlXL6mobZBJbGAYRd7ZvEBDCbLInjhg==}
     engines: {node: '>=20'}
     peerDependencies:
-      hono: ^4.12.34
+      hono: ^4
 
   '@hookform/resolvers@5.9.1':
     resolution: {integrity: sha512-7b7vsbraJxKgjVSA1Nur9tLwj539WGJUBLA7QNvXnFoT2pM5Z7G+6rlukk4B2/QrTZy6huRtH6wKeESPKuIr6w==}
@@ -2812,7 +2802,7 @@ packages:
     resolution: {integrity: sha512-fbGYivgK5uBTRt7p5F3zy6VrETlV9RtZjBqd1/HxGdjdckBgBM4ugP8LHpjolqTj14TXTxSK1ZfgPbHYyGuH7g==}
     peerDependencies:
       async-validator: ^4
-      axios: '>=1.18.0 <2'
+      axios: ^1
       change-case: ^5
       drauu: ^0.4
       focus-trap: ^7

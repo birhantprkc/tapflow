@@ -277,9 +277,12 @@ A dashboard change names **`@tapflowio/relay`**, never `@tapflowio/dashboard`. T
 
 Reach for `pnpm.overrides` last: try `pnpm update <pkg>` first, which usually takes the patch with no
 permanent entry to maintain, because the problem is normally a stale lockfile rather than a
-forbidding range — measured on 2026-08-06, all fourteen entries in the block were inert.
-`pnpm overrides:audit` judges the entries that are already there — still needed, correct, reaching
-production — so run it before adding a fifteenth, and when one is added, plan to remove it. **Derive the
+forbidding range. **The block is empty, and that is the finished state rather than a gap**: it held
+fourteen entries on 2026-08-06 and eight on 2026-09-03, and on both dates every one of them was
+inert. They were retired once the audit could say so — deleting them and resolving cold moved no
+resolved version, and every package they named was already at or above its advisory floor.
+`pnpm overrides:audit` judges whatever is there — still needed, correct, reaching production — so run
+it before adding the first one back, and when one is added, plan to remove it. **Derive the
 override key from the GHSA advisory, never from the Dependabot alert**, and scope both the key and
 its replacement to one major line.
 

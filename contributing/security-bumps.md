@@ -16,7 +16,14 @@ patch — it is that the **lockfile does not re-evaluate ranges**. The patch nea
 inside the same major, the declaring range is a caret, and `pnpm update <pkg>` takes it with no
 permanent entry to maintain. An override is a workaround for a stale lockfile, and it outlives the
 problem: measured on 2026-08-06, all fourteen entries in the block were inert — removing the whole
-thing and resolving cold produced a byte-identical tree.
+thing and resolving cold produced a byte-identical tree. Measured again on 2026-09-03 with eight
+entries left: same answer, and they were retired then. **`pnpm.overrides` is empty today**, so an
+entry added now is the only one, and nothing else in the block will hide it going stale.
+
+Stale is the failure mode to watch for, because it does not look like one. Three of those eight
+pinned `fast-uri` up to a floor the advisories had since moved past — 3.1.5 where 3.1.6 was
+required — so had they ever fired they would have landed on a version that was still affected while
+reading, to anyone scanning the block, like the matter was handled.
 
 `pnpm overrides:audit` judges each entry: still needed, correct, and whether it reaches a published
 package's production tree. Run it before adding an entry, and when one is added, plan to remove it.
