@@ -53,24 +53,52 @@ jobs:
           # second parser here would disagree with the sidebar sooner or later, and the disagreement
           # would be invisible.
           #
-          # `--jq` on a failed call prints nothing and exits non-zero; `set -o pipefail` is what
-          # makes that reach us rather than reading as "this PR closes no issues".
+          # The response is captured whole rather than filtered with `--jq`, because three separate
+          # questions are asked of it below and one API call is enough for all three. `gh` still
+          # exits non-zero when the call fails, which `set -e` carries out.
           # shellcheck disable=SC2016  # `$owner`/`$name`/`$pr` below are GraphQL variables,
           # bound by the -F flags. Single quotes are what keeps the shell out of them.
-          issues=$(gh api graphql \
+          resp=$(gh api graphql \
             -f query='
               query($owner:String!, $name:String!, $pr:Int!) {
                 repository(owner:$owner, name:$name) {
                   pullRequest(number:$pr) {
-                    closingIssuesReferences(first:20) { nodes { number } }
+                    closingIssuesReferences(first:100) {
+                      pageInfo { hasNextPage }
+                      nodes { number repository { nameWithOwner } }
+                    }
                   }
                 }
               }' \
-            -F owner="$owner" -F name="$name" -F pr="$PR" \
-            --jq '.data.repository.pullRequest.closingIssuesReferences.nodes[].number')
+            -F owner="$owner" -F name="$name" -F pr="$PR")
+
+          refs=.data.repository.pullRequest.closingIssuesReferences
+
+          # A null `pullRequest` means the query succeeded and answered about nothing — a shape that
+          # would otherwise flow on as "closes no issues".
+          [ "$(jq -r '.data.repository.pullRequest == null' <<<"$resp")" = "false" ] || {
+            echo "the query returned no pull request for #$PR — refusing to report on that"
+            exit 1
+          }
+
+          # **A truncated list is a stop, not a shorter list.** `first:100` is far past anything real
+          # here, so reaching the cap means something is wrong rather than busy — and silently
+          # dropping the overflow is the failure this repository keeps finding in its own guards.
+          [ "$(jq -r "$refs.pageInfo.hasNextPage" <<<"$resp")" = "false" ] || {
+            echo "PR #$PR closes more than 100 issues — refusing to report on a truncated list"
+            exit 1
+          }
+
+          # **Only this repository.** A closing reference can point at another repo, and the loop
+          # below posts by number alone — so `other-org/other-repo#42` would land a comment on *our*
+          # #42, which is a different issue. The token cannot write to that repo anyway, so those are
+          # named in the log and skipped.
+          issues=$(jq -r --arg repo "$REPO" "$refs.nodes[] | select(.repository.nameWithOwner == \$repo) | .number" <<<"$resp")
+          foreign=$(jq -r --arg repo "$REPO" "$refs.nodes[] | select(.repository.nameWithOwner != \$repo) | \"\(.repository.nameWithOwner)#\(.number)\"" <<<"$resp")
+          [ -z "$foreign" ] || echo "skipping references outside $REPO: $(tr '\n' ' ' <<<"$foreign")"
 
           if [ -z "$issues" ]; then
-            echo "PR #$PR closes no issues — nothing to announce."
+            echo "PR #$PR closes no issues in $REPO — nothing to announce."
             exit 0
           fi
 
@@ -81,10 +109,14 @@ jobs:
           skipped=0
 
           for issue in $issues; do
-            # Every comment, not the first page: a busy issue can push ours past thirty.
-            existing=$(gh api --paginate "repos/$REPO/issues/$issue/comments" --jq '.[].body' \
-              | grep -cF "$marker" || true)
-            if [ "$existing" -gt 0 ]; then
+            # **The fetch and the match are separate statements on purpose.** Written as one
+            # pipeline ending in `|| true`, that `true` covers the whole thing: a 5xx or a secondary
+            # rate limit trips `pipefail`, the failure is swallowed, `grep -c` prints 0, and the
+            # workflow reads "not announced yet" when it means "could not check" — posting the
+            # duplicate the marker exists to prevent. Assigning first lets `set -e` see a failed
+            # read; `grep -q` inside `if` is then free to answer no.
+            bodies=$(gh api --paginate "repos/$REPO/issues/$issue/comments" --jq '.[].body')
+            if grep -qF "$marker" <<<"$bodies"; then
               echo "issue #$issue already carries the marker for PR #$PR — skipping"
               skipped=$((skipped + 1))
               continue
@@ -104,4 +136,4 @@ jobs:
           # **Say what was done.** A run that announced nothing and a run that could not read
           # anything look identical in a log that only prints on success — the failure this
           # repository keeps finding in its own guards.
-          echo "issues linked: $(printf '%s\n' "$issues" | grep -c .), announced: $announced, already marked: $skipped"
+          echo "issues in $REPO: $(grep -c . <<<"$issues"), announced: $announced, already marked: $skipped"
