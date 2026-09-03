@@ -561,13 +561,31 @@ export function DeviceViewer({ sessionId, deviceId, buildId, resetMode, onRecord
     sendRef.current({ type: 'app:launch', sessionId, requestId, buildId });
   }, [sessionId, buildId]);
 
+  const restartButtonRef = useRef<HTMLButtonElement | null>(null);
+  const hadViewer = useRef(false);
+  /**
+   * Whether a restart owes focus back to the button that started it.
+   *
+   * **Armed where the restart commits, not where it is asked for.** Asking is `onReboot`, and three
+   * ways of asking never produce a viewer coming back to spend the flag: the relay refuses the
+   * shutdown, the 20s deadline passes, or something else claims the device while the shutdown is
+   * still unanswered — that last one cancels inside `useDeviceReboot` and tells nobody, by design.
+   * A flag left armed is spent by whatever boot happens next, which is the unsolicited recovery this
+   * is gated to ignore. Arming on the shutdown's success instead means none of those three ever arm
+   * it, rather than each of them having to remember to disarm.
+   */
+  const restoreFocusAfterReboot = useRef(false);
+
   // **Boots through the same helper the join and the rebind use**, which is what keeps a reboot's
   // reply recognisable as this mount's. `app-only` is not a choice here: a reboot is not a request to
   // erase (#439), and wiping stays on the selector screen where a session is being created.
   const { pending: rebootPending, reboot } = useDeviceReboot({
     sessionId, deviceId, deviceReady, send,
     handlerRef: rebootHandlerRef,
-    onShutdownComplete: useCallback(() => { sendBoot('app-only'); }, [sendBoot]),
+    onShutdownComplete: useCallback(() => {
+      restoreFocusAfterReboot.current = true;
+      sendBoot('app-only');
+    }, [sendBoot]),
     onError: useCallback((message: string) => { toast.error(message); }, []),
   });
 
@@ -576,52 +594,53 @@ export function DeviceViewer({ sessionId, deviceId, buildId, resetMode, onRecord
    *
    * The restart is the only control here that destroys the thing it was pressed from: its boot sends
    * `device:booting`, which sets `chrome` to null, which unmounts the viewer and the toolbar inside
-   * it. Focus then falls to `document.body` and a keyboard user is dropped out of the interface they
-   * just acted from — with nothing named to tell them the device is coming back.
+   * it. Focus then falls to `document.body`.
    *
-   * **Only when a viewer was there and is now gone.** This branch also renders on the very first
-   * boot, where nobody has focused anything and taking focus would be the opposite defect: a page
-   * that grabs the caret on load. `document.activeElement === document.body` does not separate the
-   * two on its own — it is true on a fresh render as well — which is what the transition ref is for.
-   * Measured: with the body test alone, the first-boot case took focus.
+   * **It stays there until the device is back, and that is accepted rather than fixed.** The a11y rule
+   * set this package follows calls focus landing on `document.body` the failure and a labelled
+   * `tabIndex={-1}` container an acceptable place to park it (`06-focus-management.md`, rules 1 and 3),
+   * and that parking is what used to be here. Its price was a focus nothing could use — see below —
+   * which had to be indicated, so a ring was drawn around the whole viewer on every boot. What is lost
+   * by not parking is the tab position for the seconds the device is away; what is gained is that the
+   * indicator now only ever appears on something a keystroke can act on. #683 is the announcement half
+   * of the same gap and is not solved by either choice.
+   *
+   * **It goes back to the button they pressed, not to the device.** Parking it on the screen region
+   * was the earlier answer and it bought nothing: keystrokes reach the device through
+   * `keyboardActive`, which only a pointer press sets, so the region held a focus that could not be
+   * used — and an unusable focus still has to be indicated, which is how a ring came to be drawn
+   * around the entire viewer on every boot. The restart button is a real control, it is where the
+   * tester was, and it carries the browser's own focus ring at the size of a button.
+   *
+   * **Only after a restart this component sequenced.** A stream dying on its own clears the chrome
+   * too, and moving the caret onto a destructive control nobody pressed is its own defect — so the
+   * flag comes from the restart's own shutdown landing rather than from the chrome going away. That
+   * also settles the first boot, where nobody has focused anything and taking focus would be a page
+   * grabbing the caret on load.
    */
-  const bootingRegionRef = useRef<HTMLDivElement | null>(null);
-  /** The mounted viewer's own root, so focus can be handed back when the device returns. */
-  const viewerRootRef = useRef<HTMLDivElement | null>(null);
-  const hadViewer = useRef(false);
-  /** Whether *this* component moved focus, which is the only case it may move it back. */
-  const parkedFocus = useRef(false);
   useEffect(() => {
     const hasViewer = Boolean(iosChrome ?? androidChrome);
-    const lostViewer = hadViewer.current && !hasViewer;
     const regainedViewer = !hadViewer.current && hasViewer;
     hadViewer.current = hasViewer;
-
-    // Still the body check as well, on both transitions: the tester may have clicked somewhere
-    // outside the viewer while it was going down, and moving focus off what they chose is its own
-    // way of losing their place.
-    if (lostViewer) {
-      const node = bootingRegionRef.current;
-      if (!node || document.activeElement !== document.body) return;
-      node.focus();
-      parkedFocus.current = true;
-      return;
-    }
-    // **The other half, and without it this only moves the drop later.** The region focus was parked
-    // in unmounts the moment the chrome arrives, so focus would fall to `document.body` at the end of
-    // the boot instead of the start of it — the same defect, one step further along.
-    if (regainedViewer && parkedFocus.current) {
-      // Cleared whether or not the focus moves: the parking is spent either way, and leaving it set
-      // would let a later, unrelated boot cycle claim focus on the strength of this restart.
-      parkedFocus.current = false;
-      // **The body check belongs on this side too**, which the comment above once claimed and the
-      // code did not do. A tester can Tab out of the booting region while the device comes back —
-      // to the status card, the header, anywhere — and pulling focus off what they chose is the
-      // defect this whole effect exists to avoid, aimed the other way.
-      if (document.activeElement !== document.body) return;
-      viewerRootRef.current?.focus();
-    }
+    if (!regainedViewer || !restoreFocusAfterReboot.current) return;
+    // Spent whether or not the focus moves: leaving it set would let a later, unrelated boot cycle
+    // claim focus on the strength of this restart.
+    restoreFocusAfterReboot.current = false;
+    // A tester can Tab somewhere else while the device comes back — the status card, the header,
+    // anywhere — and pulling focus off what they chose is the defect this exists to avoid, aimed the
+    // other way.
+    if (document.activeElement !== document.body) return;
+    restartButtonRef.current?.focus();
   }, [iosChrome, androidChrome]);
+
+  // **After the shutdown lands there are still two ways the returning viewer is not this restart's.**
+  // The boot behind it fails, so the device that turns up later was booted by something else; or the
+  // agent goes away mid-boot and the rebind that follows boots the device itself. `session:rebound`
+  // needs no branch of its own — the agent announces its departure first, which is this flag.
+  useEffect(() => {
+    if (bootError || agentAway) restoreFocusAfterReboot.current = false;
+  }, [bootError, agentAway]);
+
 
   const commonProps = {
     sessionId, buildId, send, openUrl, launchApp, connected, joined,
@@ -635,31 +654,29 @@ export function DeviceViewer({ sessionId, deviceId, buildId, resetMode, onRecord
     onRecordingUploaded,
     swKeyboardVisible, swKeyboardPending, onKbdToggle,
     rebootPending, onReboot: reboot,
-    viewerRootRef,
+    restartButtonRef,
   };
 
   // Before chrome arrives, show a phone skeleton + status card so the layout isn't empty
   if (!iosChrome && !androidChrome) {
     // **`role="region"`, because a bare `div` is `generic` and ARIA prohibits naming that role** — the
-    // name focus is meant to announce would not be exposed. **"Device screen", not "Device"** — the
-    // toolbar's four group names (Navigation / Device / Capture / Environment) are a vocabulary the
-    // placement rule treats as a contract, and this region *contains* that group: one name over two
-    // very different scopes, and `getByLabelText('Device')` matching both. The name says what this
-    // *is* rather than
-    // what is happening: a fixed "starting up" keeps asserting a recovery after a boot that failed,
-    // while the card below carries the outcome.
+    // name would not be exposed at all. **"Device screen", not "Device"** — the toolbar's four group
+    // names (Navigation / Device / Capture / Environment) are a vocabulary the placement rule treats as
+    // a contract, and this region *contains* that group: one name over two very different scopes, and
+    // `getByLabelText('Device')` matching both. The name says what this *is* rather than what is
+    // happening: a fixed "starting up" keeps asserting a recovery after a boot that failed, while the
+    // card below carries the outcome.
     //
-    // The ring is `focus-visible` rather than plain focus. "No suppression, because `tabIndex={-1}`
-    // means only a deliberate focus can reach it" was the earlier reasoning and it is **false**: such
-    // an element is out of the tab order but still takes focus from a mouse, and a click on anything
-    // unfocusable inside it lands here — so every tap drew a ring around the whole thing.
+    // **It is a landmark, not a focus target.** It held `tabIndex={-1}` so that a restart could park
+    // focus here, and a `tabIndex={-1}` element still takes focus from a mouse — so every tap on the
+    // skeleton drew a ring around the whole thing, and the ring came back on every boot once the
+    // parking worked. Nothing was gained for it: this region has no keyboard behaviour to offer, and
+    // focus after a restart now returns to the button that started it.
     return (
       <div
-        ref={bootingRegionRef}
-        tabIndex={-1}
         role="region"
         aria-label="Device screen"
-        className="flex items-start justify-center gap-16 outline-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 rounded-md"
+        className="flex items-start justify-center gap-16"
       >
         {/* **No `aria-busy` anywhere, and the two shapes below are hidden.** Three attempts put it in
             three places and each was wrong in the same way. On this container it sat above

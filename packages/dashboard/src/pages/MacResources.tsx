@@ -203,7 +203,11 @@ const percentOf = (v: number) => `${Math.round(v * 10) / 10}%`
 const bisectTime = bisector<Datum, number>(getTime).left
 
 const MARGIN = { top: 8, right: 24, bottom: 24, left: 40 }
-const INSET = 16 // left/right breathing room inside the plot area
+// Headroom above the 100% line, so its label is not cut off by the top of the plot. **Vertical only.**
+// It was the horizontal padding too, which put the window's own edges 16px inside the grid at both
+// ends — a strip the gridlines frame and no sample can ever reach, which reads as missing data for
+// the same reason the axis running past `now` did.
+const INSET = 16
 
 function ChartCard({
   title,
@@ -284,14 +288,22 @@ export function AreaChartInner({
   const innerW = width - MARGIN.left - MARGIN.right
   const innerH = height - MARGIN.top - MARGIN.bottom
 
-  // Anchor to "now" rounded up to a clean step, so tick times stay round (e.g. 23:50).
+  // **The window ends at `now`, and the ticks are what get rounded — not the window.** Rounding the edge
+  // up to the next clean step (`ceil(now / step) * step`) kept the tick times round at the cost of up to a
+  // full step of axis that no sample can ever reach: an hour of empty 6h chart, and 63px of 504 on 7d.
+  // Empty because it has not happened yet, which reads as a gap in the data rather than as the edge.
   const step = TICK_STEP_MS[range]
-  const maxT = Math.ceil(now / step) * step
+  const maxT = now
   const minT = maxT - RANGE_MS[range]
-  const xScale = scaleTime({ domain: [minT, maxT], range: [INSET, Math.max(INSET, innerW - INSET)] })
+  const xScale = scaleTime({ domain: [minT, maxT], range: [0, Math.max(0, innerW)] })
   const yScale = scaleLinear({ domain: [0, 100], range: [innerH, INSET] })
-  // Ticks span the whole window regardless of where data exists.
-  const ticks = Array.from({ length: RANGE_MS[range] / step + 1 }, (_, i) => new Date(minT + i * step))
+  // Counted down from the last round step at or before `now`, so the ticks stay on clean times without
+  // the window following them into the future. Ticks span the whole window regardless of where data
+  // exists. **Round in UTC**, which `formatTick` then renders locally — so the labels read 23:50 only
+  // where the offset is a whole multiple of the step, and 07:45 in a 45-minute zone.
+  const lastTick = Math.floor(maxT / step) * step
+  const tickCount = Math.floor((lastTick - minT) / step) + 1
+  const ticks = Array.from({ length: tickCount }, (_, i) => new Date(lastTick - (tickCount - 1 - i) * step))
 
   const gradId = `fill-${dataKey}`
   const clipId = `plot-${dataKey}`
@@ -364,11 +376,12 @@ export function AreaChartInner({
         }
       >
         <LinearGradient id={gradId} from={hex} to={hex} fromOpacity={0.3} toOpacity={0} fromOffset="5%" toOffset="95%" />
-        {/* **The series is clipped to the plot, and the axis labels live outside it.** `maxT` is rounded
-            *up* to a clean step so the tick times stay round, which pushes the window's start up to one
-            step later than the oldest point the API returned — 10 minutes on the 1h range. `scaleTime`
-            does not clamp, so those points map to a negative x and the area painted straight through the
-            y-axis labels, worst on a series sitting where the labels are (RAM at ~57% covers 50% and 25%).
+        {/* **The series is clipped to the plot, and the axis labels live outside it.** The window runs
+            `now - interval` to `now` on the dashboard's clock, while the relay selects the samples from
+            *its own* — two clocks only ever approximately equal, so a relay running behind returns points
+            older than the window's left edge. `scaleTime` does not clamp, so those points map to a
+            negative x and the area painted straight through the y-axis labels, worst on a series sitting
+            where the labels are (RAM at ~57% covers 50% and 25%).
             Clipping rather than dropping them: a point just off-window still shapes the curve at the edge,
             which is what an off-screen sample should do. */}
         <clipPath id={clipId}>

@@ -58,8 +58,8 @@ interface IOSViewerProps {
   /** Restart control (#628). Owned by `DeviceViewer`, which sequences the shutdown and the boot. */
   rebootPending: boolean;
   onReboot: () => void;
-  /** Focused when the device comes back, so a restart does not end with focus on `document.body`. */
-  viewerRootRef: MutableRefObject<HTMLDivElement | null>;
+  /** The toolbar's restart button, so `DeviceViewer` can put focus back on it after a restart. */
+  restartButtonRef: MutableRefObject<HTMLButtonElement | null>;
   perfHookRef?: MutableRefObject<PerfHook>;
 }
 
@@ -69,13 +69,14 @@ export function IOSViewer({
   launching, chrome,
   binaryFrameHandlerRef, clipboardHandlerRef, clipboardSupported, networkHandlerRef, networkSupported, onRecordingUploaded,
   swKeyboardVisible, swKeyboardPending, onKbdToggle,
-  rebootPending, onReboot, viewerRootRef,
+  rebootPending, onReboot, restartButtonRef,
   perfHookRef,
 }: IOSViewerProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const screenAreaRef = useRef<HTMLDivElement>(null);
   const { fps, frameCount } = useFps();
+
   const lastFrameRecvAtRef = useRef<number>(0);
   const { recordState, recordCanvasRef, startClientRecording, stopClientRecording } = useClientRecording({ sessionId, buildId, onRecordingUploaded });
   const deviceSeq = useRef(0);
@@ -634,17 +635,20 @@ export function IOSViewer({
   ) : null;
 
   return (
-    // **`focus-visible`, not `focus`** — a `tabIndex={-1}` element is out of the tab order but still
-    // takes focus from a *mouse*, and a click on anything unfocusable inside it lands here. So every
-    // tap on the simulator drew a ring around the whole viewer. `focus-visible` is the browser's own
-    // answer to that: it fires for keyboard and for a programmatic focus that follows one, which is
-    // exactly the restart hand-back this element exists for, and not for a pointer.
+    // **This region is not focusable, and that is the fix rather than an omission.** It carried
+    // `tabIndex={-1}` for a while, which put it out of the tab order and still let a *mouse* focus it —
+    // a click on anything unfocusable inside lands on the container — so a ring drew itself around the
+    // whole viewer on every tap, and then around it again on every keystroke once `:focus-visible` was
+    // tried, because this viewer forwards keys to the device from a `window` listener.
+    //
+    // The question underneath was whether the region should hold focus at all, and it should not:
+    // keystrokes reach the device through `keyboardActive`, which only `handlePointerDown` sets. Focus
+    // here granted nothing, so the indicator drawn for it advertised nothing. Whether the device screen
+    // should be operable from the keyboard is a real question and a separate one — #747.
     <div
-      ref={viewerRootRef}
-      tabIndex={-1}
       role="region"
       aria-label="Device screen"
-      className="flex items-start justify-center gap-16 outline-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 rounded-md"
+      className="flex items-start justify-center gap-16"
     >
       <canvas ref={recordCanvasRef} style={{ display: 'none' }} />
 
@@ -661,7 +665,7 @@ export function IOSViewer({
         deviceSlot={deviceSlot}
         launchSlot={launchSlot}
         network={networkSupported ? { position: network.position, steerable: network.steerable, reason: network.reason, pending: network.pending, onToggle: network.toggle } : undefined}
-        reboot={{ pending: rebootPending, onReboot }}
+        reboot={{ pending: rebootPending, onReboot, buttonRef: restartButtonRef }}
       />
 
       <div className="flex items-start gap-8">

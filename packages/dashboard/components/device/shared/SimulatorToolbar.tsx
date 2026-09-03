@@ -9,7 +9,7 @@ import {
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { cn } from '@/lib/utils';
 import { useId, useState } from 'react';
-import type { ReactNode } from 'react';
+import type { MutableRefObject, ReactNode } from 'react';
 import type { NetworkUnavailableReason } from '@tapflowio/protocol';
 import { Kbd, KbdGroup } from '@/components/ui/kbd';
 
@@ -63,8 +63,12 @@ interface SimulatorToolbarProps {
    *
    * `onReboot` is called only after the tester confirms; the dialog is here rather than at the caller
    * so every platform gets the same wording for the same irreversible thing.
+   *
+   * `buttonRef` is how focus finds its way back. The restart is the only control here that unmounts
+   * the toolbar it was pressed from, so a keyboard user is left on `document.body` while the device
+   * comes back; `DeviceViewer` puts them on this button again once it returns.
    */
-  reboot?: { pending: boolean; onReboot: () => void };
+  reboot?: { pending: boolean; onReboot: () => void; buttonRef?: MutableRefObject<HTMLButtonElement | null> };
 }
 
 export interface NetworkControl {
@@ -416,6 +420,7 @@ export function SimulatorToolbar({
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
+                  ref={reboot.buttonRef}
                   variant="ghost"
                   size="icon"
                   className="h-8 w-8"
