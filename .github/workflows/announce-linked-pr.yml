@@ -1,0 +1,107 @@
+# Say on an issue that a pull request is working on it.
+#
+# **The reader this exists for has not arrived yet.** When #630 opened against #481 the claim was
+# real, but it showed only as a linked-PR row in the sidebar — so the good-first-issue list went on
+# advertising the issue, and thirteen days later #743 arrived having written the same fix. Two
+# contributors lost an evening to that in one day. A sentence on the issue is what neither of them
+# had.
+#
+# So this fires on *every* link, not only on a collision: the value is in the comment already being
+# there when the next person reads the issue.
+name: Announce linked PR
+
+on:
+  # **`pull_request_target`, and the checkout is deliberately absent.**
+  #
+  # Every contributor PR here comes from a fork, and a fork's `pull_request` run gets a read-only
+  # token — it cannot comment, which is the whole job. `pull_request_target` runs with the base
+  # repository's permissions instead. That is only safe while no PR code is fetched or executed, so
+  # nothing below checks anything out: it reads the event payload and calls the API.
+  #
+  # `edited` is here because the closing keyword is often added after opening. It also fires on a
+  # title change, which is why the idempotency marker below is not optional.
+  pull_request_target:
+    types: [opened, reopened, edited]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: read
+
+concurrency:
+  # Two `edited` events in quick succession would otherwise both find no marker and both comment.
+  group: announce-linked-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  announce:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Comment on every issue this PR closes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          owner=${REPO%/*}
+          name=${REPO#*/}
+
+          # **`closingIssuesReferences`, not a regex over the body.** GitHub already decides what
+          # closes what — `Closes`, `Fixes`, `Resolves`, each in any case, across repositories. A
+          # second parser here would disagree with the sidebar sooner or later, and the disagreement
+          # would be invisible.
+          #
+          # `--jq` on a failed call prints nothing and exits non-zero; `set -o pipefail` is what
+          # makes that reach us rather than reading as "this PR closes no issues".
+          # shellcheck disable=SC2016  # `$owner`/`$name`/`$pr` below are GraphQL variables,
+          # bound by the -F flags. Single quotes are what keeps the shell out of them.
+          issues=$(gh api graphql \
+            -f query='
+              query($owner:String!, $name:String!, $pr:Int!) {
+                repository(owner:$owner, name:$name) {
+                  pullRequest(number:$pr) {
+                    closingIssuesReferences(first:20) { nodes { number } }
+                  }
+                }
+              }' \
+            -F owner="$owner" -F name="$name" -F pr="$PR" \
+            --jq '.data.repository.pullRequest.closingIssuesReferences.nodes[].number')
+
+          if [ -z "$issues" ]; then
+            echo "PR #$PR closes no issues — nothing to announce."
+            exit 0
+          fi
+
+          # The marker is the whole idempotency story: `edited` fires on a title change, and a
+          # reopen fires again on a PR that was already announced.
+          marker="<!-- linked-pr: $PR -->"
+          announced=0
+          skipped=0
+
+          for issue in $issues; do
+            # Every comment, not the first page: a busy issue can push ours past thirty.
+            existing=$(gh api --paginate "repos/$REPO/issues/$issue/comments" --jq '.[].body' \
+              | grep -cF "$marker" || true)
+            if [ "$existing" -gt 0 ]; then
+              echo "issue #$issue already carries the marker for PR #$PR — skipping"
+              skipped=$((skipped + 1))
+              continue
+            fi
+
+            # **"links this issue", not "is open".** A bare `#123` reference is rendered by GitHub
+            # with the pull request's *current* state, so a sentence written in this tense stays true
+            # after the PR merges or closes. Saying "is open" would need a second workflow to come
+            # back and correct it, which is a second thing to get wrong.
+            gh api "repos/$REPO/issues/$issue/comments" -f body="$(printf '%s\n\n%s' \
+              "#$PR links this issue. Under [CONTRIBUTING](https://github.com/$REPO/blob/main/CONTRIBUTING.md#claiming-an-issue), opening a pull request is how an issue is claimed — check that one before starting your own." \
+              "$marker")" >/dev/null
+            echo "commented on issue #$issue for PR #$PR"
+            announced=$((announced + 1))
+          done
+
+          # **Say what was done.** A run that announced nothing and a run that could not read
+          # anything look identical in a log that only prints on success — the failure this
+          # repository keeps finding in its own guards.
+          echo "issues linked: $(printf '%s\n' "$issues" | grep -c .), announced: $announced, already marked: $skipped"
