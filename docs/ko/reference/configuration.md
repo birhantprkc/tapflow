@@ -118,9 +118,10 @@ services:
 
 `environment:`에서 두 줄을 빼고 이미 마운트하고 있는 볼륨 안에 적습니다. 비밀번호가 컴포즈 파일과 셸 히스토리 양쪽에서 빠집니다.
 
-```sh
+```ini
+# 비밀번호는 = 뒤에 직접 적습니다. 비워 두면 릴레이가 시작하지 않습니다.
 TAPFLOW_ADMIN_EMAIL=admin@yourteam.com
-TAPFLOW_ADMIN_PASSWORD=a-password-you-choose
+TAPFLOW_ADMIN_PASSWORD=
 ```
 
 직접 만든 파일은 권한을 좁혀 주세요.

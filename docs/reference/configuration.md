@@ -116,9 +116,10 @@ services:
 
 Leave both lines out of `environment:` and write them inside the volume you already mount. That keeps the password out of your compose file and your shell history.
 
-```sh
+```ini
+# Paste your own password after the =. Left empty, the relay does not start.
 TAPFLOW_ADMIN_EMAIL=admin@yourteam.com
-TAPFLOW_ADMIN_PASSWORD=a-password-you-choose
+TAPFLOW_ADMIN_PASSWORD=
 ```
 
 Narrow the permissions on a file you create yourself.
