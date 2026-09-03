@@ -203,7 +203,11 @@ const percentOf = (v: number) => `${Math.round(v * 10) / 10}%`
 const bisectTime = bisector<Datum, number>(getTime).left
 
 const MARGIN = { top: 8, right: 24, bottom: 24, left: 40 }
-const INSET = 16 // left/right breathing room inside the plot area
+// Headroom above the 100% line, so its label is not cut off by the top of the plot. **Vertical only.**
+// It was the horizontal padding too, which put the window's own edges 16px inside the grid at both
+// ends — a strip the gridlines frame and no sample can ever reach, which reads as missing data for
+// the same reason the axis running past `now` did.
+const INSET = 16
 
 function ChartCard({
   title,
@@ -291,7 +295,7 @@ export function AreaChartInner({
   const step = TICK_STEP_MS[range]
   const maxT = now
   const minT = maxT - RANGE_MS[range]
-  const xScale = scaleTime({ domain: [minT, maxT], range: [INSET, Math.max(INSET, innerW - INSET)] })
+  const xScale = scaleTime({ domain: [minT, maxT], range: [0, Math.max(0, innerW)] })
   const yScale = scaleLinear({ domain: [0, 100], range: [innerH, INSET] })
   // Counted down from the last round step at or before `now`, so the ticks stay on clean times without
   // the window following them into the future. Ticks span the whole window regardless of where data
