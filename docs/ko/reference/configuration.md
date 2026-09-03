@@ -84,7 +84,7 @@ openssl rand -hex 32
 프록시나 터널로 노출하는 경우 공개 URL(`tunnel.publicUrl` 또는 `relay.url`)도 함께 설정하세요. 설정하지 않으면 CORS/CSRF 허용 목록이 loopback만 남아, 대시보드의 cross-origin 요청이 차단될 수 있습니다.
 :::
 
-## 컨테이너에서 첫 관리자 계정 만들기 (`TAPFLOW_ADMIN_EMAIL`)
+## Docker 컨테이너에서 첫 관리자 계정 만들기 (`TAPFLOW_ADMIN_EMAIL`)
 
 두 변수를 설정하면 릴레이가 시작하면서 첫 Admin 계정을 만듭니다. 브라우저 온보딩과 `tapflow admin init`이 모두 닿지 않는 Docker 설치를 위한 경로입니다.
 

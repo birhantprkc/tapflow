@@ -82,7 +82,7 @@ If the relay runs behind a same-host reverse proxy (nginx, Caddy) and `TAPFLOW_T
 For proxied or tunneled deployments, also set a public URL (`tunnel.publicUrl` or `relay.url`). Otherwise the CORS/CSRF allowlist is loopback-only and the dashboard's cross-origin requests can be blocked.
 :::
 
-## Create the first Admin account in a container (`TAPFLOW_ADMIN_EMAIL`)
+## Create the first Admin account in a Docker container (`TAPFLOW_ADMIN_EMAIL`)
 
 Set both variables and the relay creates the first Admin account while it starts — the path for a Docker install, where neither the browser onboarding nor `tapflow admin init` can reach.
 
