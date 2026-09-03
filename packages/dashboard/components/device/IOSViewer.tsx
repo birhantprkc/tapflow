@@ -8,7 +8,6 @@ import { Home, Keyboard, Loader2, Play } from 'lucide-react';
 import { useFps } from '@/hooks/useFps';
 import { SimulatorToolbar } from './shared/SimulatorToolbar';
 import { useNetworkControl } from '@/hooks/useNetworkControl';
-import { useFocusArrivalRing } from '@/hooks/useFocusArrivalRing';
 import type { NetworkMessageHandler } from '@/hooks/useNetworkControl';
 import { SimulatorInfoCard } from './shared/SimulatorInfoCard';
 import { DeepLinkDialog } from './DeepLinkDialog';
@@ -59,8 +58,8 @@ interface IOSViewerProps {
   /** Restart control (#628). Owned by `DeviceViewer`, which sequences the shutdown and the boot. */
   rebootPending: boolean;
   onReboot: () => void;
-  /** Focused when the device comes back, so a restart does not end with focus on `document.body`. */
-  viewerRootRef: MutableRefObject<HTMLDivElement | null>;
+  /** The toolbar's restart button, so `DeviceViewer` can put focus back on it after a restart. */
+  restartButtonRef: MutableRefObject<HTMLButtonElement | null>;
   perfHookRef?: MutableRefObject<PerfHook>;
 }
 
@@ -70,7 +69,7 @@ export function IOSViewer({
   launching, chrome,
   binaryFrameHandlerRef, clipboardHandlerRef, clipboardSupported, networkHandlerRef, networkSupported, onRecordingUploaded,
   swKeyboardVisible, swKeyboardPending, onKbdToggle,
-  rebootPending, onReboot, viewerRootRef,
+  rebootPending, onReboot, restartButtonRef,
   perfHookRef,
 }: IOSViewerProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -86,7 +85,6 @@ export function IOSViewer({
   const [canvasReady, setCanvasReady] = useState(false);
   const [isLandscape, setIsLandscape] = useState(false);
   const [keyboardActive, setKeyboardActive] = useState(false);
-  const { focusProps } = useFocusArrivalRing();
   const [flashedButton, setFlashedButton] = useState<string | null>(null);
   const [hoveredButton, setHoveredButton] = useState<string | null>(null);
   const [pinchActive, setPinchActive] = useState(false);
@@ -637,19 +635,20 @@ export function IOSViewer({
   ) : null;
 
   return (
-    // **The ring is driven by how focus arrived, not by `:focus-visible`.** A `tabIndex={-1}` element is
-    // out of the tab order but still takes focus from a *mouse* — a click on anything unfocusable inside
-    // it lands here — so a plain `:focus` ring drew itself around the whole viewer on every tap.
-    // `focus-visible` fixed that and brought its own: the browser re-evaluates it on every keystroke, and
-    // this viewer forwards keystrokes to the device from a `window` listener, so typing lit the ring under
-    // a focus a pointer had placed. See `useFocusArrivalRing`.
+    // **This region is not focusable, and that is the fix rather than an omission.** It carried
+    // `tabIndex={-1}` for a while, which put it out of the tab order and still let a *mouse* focus it —
+    // a click on anything unfocusable inside lands on the container — so a ring drew itself around the
+    // whole viewer on every tap, and then around it again on every keystroke once `:focus-visible` was
+    // tried, because this viewer forwards keys to the device from a `window` listener.
+    //
+    // The question underneath was whether the region should hold focus at all, and it should not:
+    // keystrokes reach the device through `keyboardActive`, which only `handlePointerDown` sets. Focus
+    // here granted nothing, so the indicator drawn for it advertised nothing. Whether the device screen
+    // should be operable from the keyboard is a real question and a separate one — #747.
     <div
-      ref={viewerRootRef}
-      tabIndex={-1}
       role="region"
       aria-label="Device screen"
-      {...focusProps}
-      className="flex items-start justify-center gap-16 outline-none rounded-md data-[focus-ring]:ring-2 data-[focus-ring]:ring-ring data-[focus-ring]:ring-offset-2"
+      className="flex items-start justify-center gap-16"
     >
       <canvas ref={recordCanvasRef} style={{ display: 'none' }} />
 
@@ -666,7 +665,7 @@ export function IOSViewer({
         deviceSlot={deviceSlot}
         launchSlot={launchSlot}
         network={networkSupported ? { position: network.position, steerable: network.steerable, reason: network.reason, pending: network.pending, onToggle: network.toggle } : undefined}
-        reboot={{ pending: rebootPending, onReboot }}
+        reboot={{ pending: rebootPending, onReboot, buttonRef: restartButtonRef }}
       />
 
       <div className="flex items-start gap-8">

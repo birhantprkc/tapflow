@@ -1,8 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, act, fireEvent } from '@testing-library/react'
+import { render, screen, act } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import type { BrowserInbound } from '@/lib/types'
-import { __resetFocusModality } from '@/hooks/useFocusArrivalRing'
 
 // **The wiring, which the hook's suite and the toolbar's suite cannot reach between them** (#628).
 //
@@ -69,9 +68,7 @@ async function confirmRestart() {
 }
 
 describe('DeviceViewer — reboot wiring', () => {
-  // The focus modality is module scope on purpose — it has to outlive the remount a restart causes —
-  // so it also outlives a test, and a Tab pressed in one would ring the viewer in the next.
-  beforeEach(() => { send.mockClear(); toast.error.mockClear(); deliver = null; __resetFocusModality() })
+  beforeEach(() => { send.mockClear(); toast.error.mockClear(); deliver = null })
 
   it('offers the control on a live device', () => {
     live()
@@ -123,10 +120,48 @@ describe('DeviceViewer — reboot wiring', () => {
     expect(toast.error.mock.calls[0][0]).toContain('agent offline')
   })
 
-  it('catches focus when the restart unmounts the toolbar it was pressed from', async () => {
-    // **The restart is the only control that destroys its own toolbar.** Its boot sends
-    // `device:booting`, that clears the chrome, and the viewer holding the button goes with it — so a
-    // keyboard user is left on `document.body` with nothing named saying the device is coming back.
+  it('forgets the owed focus when the restart is refused', async () => {
+    // **The flag is armed by asking for a restart and spent by a viewer coming back — and a refused
+    // shutdown produces the first without the second.** Nothing goes down, the toolbar stays exactly
+    // where it was, and the flag survives. Later, a stream that drops and recovers clears and restores
+    // the chrome on its own, and the caret jumps onto a destructive control nobody pressed: the defect
+    // the sibling test below is named for, reached through a restart that never happened.
+    live()
+    await confirmRestart()
+    const id = shutdowns()[0].requestId
+    act(() => { deliver!({ type: 'device:shutdown-error', sessionId: 'mine', requestId: id, message: 'agent offline' }) })
+    // The tester clicks the phone and reads the toast — which, since the screen is no longer a focus
+    // target, leaves the caret on the body. That is the state the restore's own guard waits for.
+    act(() => { (document.activeElement as HTMLElement | null)?.blur() })
+
+    act(() => { deliver!({ type: 'device:booting', sessionId: 'mine' }) })
+    act(() => { deliver!({ type: 'session:chrome', sessionId: 'mine', payload: CHROME }) })
+    expect(document.activeElement, 'a refused restart still moved the caret, one boot later').toBe(document.body)
+  })
+
+  it('forgets the owed focus when the boot behind the shutdown fails', async () => {
+    // The third path that ends a restart with no viewer returning: the device went down and did not
+    // come back. Same consequence as the sibling above, one step further in.
+    live()
+    await confirmRestart()
+    const id = shutdowns()[0].requestId
+    act(() => { deliver!({ type: 'device:shutdown-done', sessionId: 'mine', requestId: id, payload: { deviceId: 'dev-1' } }) })
+    const bootId = boots()[0].requestId
+    act(() => { deliver!({ type: 'device:booting', sessionId: 'mine' }) })
+    act(() => { deliver!({ type: 'device:boot-error', sessionId: 'mine', requestId: bootId, message: 'no such device' }) })
+
+    act(() => { deliver!({ type: 'session:chrome', sessionId: 'mine', payload: CHROME }) })
+    expect(document.activeElement, 'a failed boot still moved the caret when the device turned up later')
+      .toBe(document.body)
+  })
+
+  it('parks focus nowhere while the device is away, because there is nowhere worth parking it', async () => {
+    // **The booting region is a landmark, not a focus target.** Focus was parked here for a while, and
+    // it bought nothing: keystrokes reach the device through `keyboardActive`, which only a pointer
+    // press sets, so this region could hold a focus it had no way to use — and an unusable focus still
+    // has to be indicated, which drew a ring around the whole viewer on every boot. What the tester
+    // loses instead is their tab position for the few seconds the device is away, and it comes back
+    // with the device.
     live()
     await confirmRestart()
     const id = shutdowns()[0].requestId
@@ -135,8 +170,11 @@ describe('DeviceViewer — reboot wiring', () => {
 
     expect(screen.queryByRole('button', { name: 'Restart the device' }), 'the toolbar survived the reboot')
       .toBeNull()
-    expect(document.activeElement, 'focus was dropped on the body')
-      .toBe(screen.getByRole('region', { name: 'Device screen' }))
+    const region = screen.getByRole('region', { name: 'Device screen' })
+    expect(document.activeElement, 'the booting region took focus it cannot use').not.toBe(region)
+    // A floor, and named as one: the behaviour above cannot fail while the region is unfocusable, so
+    // this is what would notice `tabIndex` coming back and the whole ring problem with it.
+    expect(region.hasAttribute('tabindex'), 'the region is focusable again').toBe(false)
   })
 
   it('does not take focus on a first boot nobody asked for', async () => {
@@ -149,10 +187,11 @@ describe('DeviceViewer — reboot wiring', () => {
     expect(document.activeElement, 'the first boot stole focus').toBe(document.body)
   })
 
-  it('hands focus back to the viewer when the device returns', async () => {
-    // **Without this the fix above only moves the drop later**: the region focus was parked in
-    // unmounts when the chrome arrives, so focus would fall to `document.body` at the *end* of the
-    // boot instead of the start of it.
+  it('puts focus back on the restart button once the device returns', async () => {
+    // **Where the tester actually was.** The restart is the only control that unmounts the toolbar it
+    // was pressed from, so this is the one focus move the viewer owes anyone — and it is owed to a
+    // real button, which is keyboard-operable and comes with the browser's own ring at the size of a
+    // button. The button is a fresh element: the one they pressed was destroyed with the toolbar.
     live()
     await confirmRestart()
     const id = shutdowns()[0].requestId
@@ -161,10 +200,21 @@ describe('DeviceViewer — reboot wiring', () => {
     act(() => { deliver!({ type: 'device:ready', sessionId: 'mine', payload: { deviceId: 'dev-1' } }) })
     act(() => { deliver!({ type: 'session:chrome', sessionId: 'mine', payload: CHROME }) })
 
-    const restart = screen.getByRole('button', { name: 'Restart the device' })
     expect(document.activeElement, 'focus was left on the body once the device came back')
-      .not.toBe(document.body)
-    expect(document.activeElement?.contains(restart), 'focus came back outside the viewer').toBe(true)
+      .toBe(screen.getByRole('button', { name: 'Restart the device' }))
+  })
+
+  it('does not chase a device that came back on its own', async () => {
+    // **The control for the test above.** A stream dying and recovering clears and restores the chrome
+    // with nobody pressing anything, and moving the caret onto a destructive control nobody asked for
+    // is its own defect — the reason the restore hangs off `onReboot` rather than off the chrome going
+    // away. Measured: inferring it from the transition leaves every other test in this file green.
+    live()
+    act(() => { deliver!({ type: 'device:booting', sessionId: 'mine' }) })
+    act(() => { deliver!({ type: 'session:chrome', sessionId: 'mine', payload: CHROME }) })
+
+    expect(screen.getByRole('button', { name: 'Restart the device' }), 'the viewer never came back').toBeTruthy()
+    expect(document.activeElement, 'a boot nobody asked for moved the caret').toBe(document.body)
   })
 
   it('keeps the empty status region out of the card\'s layout', () => {
@@ -184,119 +234,24 @@ describe('DeviceViewer — reboot wiring', () => {
     }
   })
 
-  it('rings for a focus no pointer placed', () => {
-    // **The half that used to be untestable.** It read the class list for `focus-visible:ring-2` and said
-    // so: "jsdom evaluates no CSS, so nothing here can watch a ring appear". A className floor cannot
-    // fail when the ring stops appearing altogether, which is the exact shape the sibling test below
-    // needs a control for. The ring is now a state this suite can read.
-    //
-    // The ring is the region's only focus indicator, so drawing it is the default and a pointer is what
-    // takes it away. An arrival with no press behind it — Tab, a hand-back, an assistive technology —
-    // has to be visible whether or not anything can say which of those it was.
+  it('does not take focus when the tester clicks the device screen', async () => {
+    // **The defect that started all of this, closed at the source.** A `tabIndex={-1}` container is out
+    // of the tab order and still takes focus from a *mouse* — a click on anything unfocusable inside it
+    // lands on the container — so every tap on the screen focused the whole viewer, a ring was drawn
+    // around it, and `:focus-visible` then redrew that ring on every keystroke because this viewer
+    // forwards keys to the device from a `window` listener. None of it survives the region not being
+    // focusable. Typing still reaches the device: `keyboardActive` is set by the press, not by focus.
     live()
     const region = screen.getByRole('region', { name: 'Device screen' })
-    act(() => { region.focus() })
-    expect(region.hasAttribute('data-focus-ring'), 'an unattributed arrival draws no ring').toBe(true)
-    // **The floor the behavioural tests cannot replace.** The attribute and the ring are joined by one
-    // string in three JSX files, and jsdom evaluates no CSS — so every test above stays green if that
-    // string is tidied away and no region ever draws an indicator again.
-    expect(region.className, 'the attribute no longer drives a ring').toMatch(/data-\[focus-ring\]:ring-2/)
-  })
-
-  it('does not ring the whole viewer when focus lands on a control inside it', () => {
-    // **The guard, and the blur, neither of which anything executed.** Measured: dropping the
-    // `e.target === e.currentTarget` checks left 16/16 green, and so did making `onBlur` a no-op.
-    // Without the guard a tester tabbing into the toolbar fires `focusin` on a *child*, it bubbles to
-    // the root, no press is recent, and the ring is drawn around the entire viewer while focus sits on
-    // a 24px button — the original defect back through a different door. Without the blur the ring
-    // survives the move and points at nothing.
-    live()
-    const region = screen.getByRole('region', { name: 'Device screen' })
-    act(() => { region.focus() })
-    expect(region.hasAttribute('data-focus-ring'), 'the ring was never lit, so this asserts nothing').toBe(true)
-
-    act(() => { screen.getByRole('button', { name: 'Restart the device' }).focus() })
-    expect(region.hasAttribute('data-focus-ring'), 'a child’s focus ringed the whole viewer').toBe(false)
-  })
-
-  it('still rings on the hand-back, across the remount the restart puts in between', async () => {
-    // **The case the ring exists for.** A restart clears the chrome and the viewer holding the ring goes
-    // with it, so the focus `DeviceViewer` hands back lands on a *fresh* instance. Nothing about that
-    // arrival tells anyone it happened except the ring: it is programmatic, it is not where the tester
-    // was looking, and the region it lands on has `outline-none`.
-    live()
-    // Driven from the keyboard end to end, because `confirmRestart` clicks — and a press seconds earlier
-    // must not still be suppressing the ring by the time the device comes back.
-    send.mockClear()
-    screen.getByRole('button', { name: 'Restart the device' }).focus()
-    await userEvent.keyboard('{Enter}')
-    screen.getByRole('button', { name: 'Restart' }).focus()
-    await userEvent.keyboard('{Enter}')
-    const id = shutdowns()[0].requestId
-    act(() => { deliver!({ type: 'device:shutdown-done', sessionId: 'mine', requestId: id, payload: { deviceId: 'dev-1' } }) })
-    act(() => { deliver!({ type: 'device:booting', sessionId: 'mine' }) })
-    act(() => { deliver!({ type: 'session:chrome', sessionId: 'mine', payload: CHROME }) })
-
-    const region = screen.getByRole('region', { name: 'Device screen' })
-    expect(document.activeElement, 'the hand-back did not land').toBe(region)
-    expect(region.hasAttribute('data-focus-ring'), 'the hand-back arrived with no indicator').toBe(true)
-  })
-
-  it('rings on the hand-back from a restart driven by the mouse, which is the ordinary one', async () => {
-    // **The sibling above avoids the pointer; this one is made of it.** `confirmRestart` clicks twice,
-    // and the device comes back well inside the 200ms a press counts for — so the suppression rule is
-    // the only thing standing between the tester and an invisible focus move, on the path they take.
-    live()
-    await confirmRestart()
-    const id = shutdowns()[0].requestId
-    act(() => { deliver!({ type: 'device:shutdown-done', sessionId: 'mine', requestId: id, payload: { deviceId: 'dev-1' } }) })
-    act(() => { deliver!({ type: 'device:booting', sessionId: 'mine' }) })
-    act(() => { deliver!({ type: 'session:chrome', sessionId: 'mine', payload: CHROME }) })
-
-    const region = screen.getByRole('region', { name: 'Device screen' })
-    expect(document.activeElement, 'the hand-back did not land').toBe(region)
-    expect(region.hasAttribute('data-focus-ring'), 'the confirm click suppressed the hand-back’s ring').toBe(true)
-  })
-
-  it('does not ring for a tap, nor when the tester then types at the device', () => {
-    // Two defects, one after the other. A `tabIndex={-1}` element is out of the tab order and still takes
-    // focus from a *mouse* — a click on anything unfocusable inside it lands here — so a plain `:focus`
-    // ring drew itself around the whole viewer on every tap. `focus-visible` answered that, and then the
-    // browser re-evaluated it on every keystroke: the viewers forward keys to the device from a `window`
-    // listener, so a tester who clicked and then typed lit the ring mid-sentence under a pointer's focus.
-    // Both shipped, and it was the user who saw them, not the suite.
-    live()
-    const region = screen.getByRole('region', { name: 'Device screen' })
-    // On the region, because that is where a tap lands. Pressing `window` instead would say nothing
-    // about the rule: the press has to be *inside the element taking focus* to suppress its ring.
-    fireEvent.pointerDown(region)
-    act(() => { region.focus() })
-    expect(region.hasAttribute('data-focus-ring'), 'a pointer arrival drew a ring').toBe(false)
-
-    fireEvent.keyDown(window, { key: 'a' })
-    expect(region.hasAttribute('data-focus-ring'), 'typing at the device lit the ring').toBe(false)
-  })
-
-  it('rings for a hand-back that follows a press somewhere else', () => {
-    // **A press suppresses the ring for what it placed focus on, not for the next 200ms of the whole
-    // document.** Recording only the *time* of the press meant a click anywhere — the page around the
-    // viewer, or the confirm button of the restart dialog, which Radix renders in a portal outside the
-    // region — silenced an arrival landing immediately after it. That is exactly the hand-back a
-    // mouse-driven restart ends with, and the ring is the only thing that reports it.
-    //
-    // The press is put outside the region deliberately: the toolbar and the status card are *inside*
-    // it, so a press on either is one the region can fairly claim.
-    live()
-    const region = screen.getByRole('region', { name: 'Device screen' })
-    fireEvent.pointerDown(document.body)
-    act(() => { region.focus() })
-    expect(region.hasAttribute('data-focus-ring'), 'a press outside the region suppressed its ring').toBe(true)
+    await userEvent.click(region)
+    expect(document.activeElement, 'the tap focused the whole viewer').not.toBe(region)
   })
 
   it('does not take focus when a first boot finishes', () => {
     // **The control for the hand-back**, and the same defect in the other direction as the first-boot
     // test above: a viewer arriving is not on its own a reason to move the caret, only a viewer
-    // arriving *back* is. Measured — dropping the `parkedFocus` check left every other test green.
+    // arriving *back* is. Measured — dropping the `restoreFocusAfterReboot` gate left every other test
+    // in this file green.
     live()
     expect(screen.getByRole('button', { name: 'Restart the device' }), 'the viewer never arrived').toBeTruthy()
     expect(document.activeElement, 'the first boot pulled focus into the viewer').toBe(document.body)
