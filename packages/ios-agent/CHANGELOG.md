@@ -1,5 +1,64 @@
 # @tapflowio/ios-agent
 
+## 0.20.1
+
+### Patch Changes
+
+- a2be8e0: **The check that decides whether the iOS network filter needs replacing now covers two things it
+  could not see.** Since the extension keeps its version when its inputs are unchanged, anything the
+  check misses is no longer a harmless extra replace — it is a replace macOS skips **silently**,
+  leaving that Mac on the old provider with every version reading correctly.
+
+  Two inputs live on the maintainer's Mac rather than in the repository, and both change the shipped
+  extension with no source file moving: the **provisioning profile**, which is the extension's only
+  sealed resource and is renewed annually, and the **toolchain** that builds it. Both are now compared
+  before a build, so a renewal or an Xcode upgrade produces a new version by itself.
+
+  The build machine's OS version is deliberately left out, even though it sits in the same place. It
+  moves on every macOS point update, and including it would make a software update replace the filter
+  on every Mac — the cost this whole mechanism exists to remove.
+
+  Nothing changes for anyone installing tapflow. The filter is byte-identical; only the rule that
+  decides when it needs replacing got stricter.
+
+- 49f95e4: Keep iOS network control working after the filter is upgraded, and stop the upgrade from taking the Mac's network down.
+
+  Replacing the network filter's system extension leaves the previous one holding the XPC service name, so the new provider could not vend its listener and `--confirm` answered "no listener" while the filter was enforcing normally. The agent read that as "not confirmed" and the dashboard's **Take device offline** control went unavailable on every Mac that had upgraded. It now falls back to the provider's own state file, which is the channel the CLI already preferred.
+
+  The upgrade also switches the filter off _before_ it copies the app into `/Applications`, not only before activating it. Copying the app makes macOS restart the filter session on its own timing, and a filter session going down arms a kernel-wide IP drop — that is what took a Mac's network down for 2m34s on 2026-09-02, and the previous ordering was winning the race by 69 milliseconds.
+
+  Also: the provider publishes a rule change immediately instead of waiting for its next idle pulse, its state file names which provider wrote it, and a listener that fails to start now says so rather than logging success.
+
+- 79d5c1b: **A release that changes nothing but the filter's host binary no longer replaces the system
+  extension.** `build.sh` stamped one `CFBundleVersion` into the host app and the extension alike, so
+  any rebuild bumped both and macOS replaced a running provider — which interrupts every new connection
+  on the Mac until the replacement is up. Three of the six filter rebuilds so far touched nothing
+  outside `Host/` and paid that for nothing.
+
+  The extension now keeps its version when its own inputs are unchanged. Those inputs are everything
+  except `Host/`, `project.yml` and `build.sh` included, because both change what the extension binary
+  is without touching a line of Swift — and an extension that changed without its version changing is
+  replaced **silently**, leaving the old provider running with every check green.
+
+  **The first rebuild after this still bumps it once**, since `build.sh` is itself an extension input.
+  That is one replace, and the change that made a replace survivable landed first.
+
+  **Two versions means the checks that compare them had to be told apart.** `isNetFilterCurrent` and
+  `tapflow doctor ios` were comparing the host app's version against the extension macOS runs, which
+  only ever agreed because one number was written into both. Left alone, doctor would have reported a
+  Mac whose `/Applications` app is stale as fully healthy — and that binary is the agent's own path to
+  the filter, so an older one meets flags it does not understand. Doctor now names the app when only
+  the app is behind, and says to run `tapflow migrate net-filter`.
+
+  **And an install it cannot judge is refused rather than guessed at.** macOS keeps an extension
+  enforcing when its container app is deleted; the extension's version used to stand in for the host's,
+  and now only gives a lower bound. In that state tapflow says so and names both remedies instead of
+  replacing a filter that may be newer than the one it carries.
+
+  - @tapflowio/protocol@0.20.1
+  - @tapflowio/agent-core@0.20.1
+  - @tapflowio/audiotap-helper@0.3.2
+
 ## 0.20.0
 
 ### Minor Changes

@@ -1,5 +1,111 @@
 # tapflow
 
+## 0.20.1
+
+### Patch Changes
+
+- a6ab06d: TLS startup instructions now use the certificate-resolved hostname for remote agent connections instead of leaving a misleading host placeholder.
+- 06db7d9: **Replacing the iOS network filter no longer takes the Mac's network down with it.** The filter is a
+  content filter, so every new connection on the Mac waits for the provider to decide, not only the
+  simulator's. `migrate net-filter` replaced the extension while that configuration stayed switched on,
+  which killed the process that decides and left new connections waiting for an answer nobody would
+  give. Measured on 2026-09-02: the Mac's own traffic timed out and a restart was the only way back.
+  Already-open connections kept working, so the visible symptom was a dead browser next to things that
+  carried on.
+
+  The replace now switches the filter off first and `--install` turns it back on. The window that
+  remains was measured across ~300 probes on a same-version disable/enable cycle: about four seconds of
+  raised latency, no failures, because the kernel passes traffic for a provider that has not applied
+  its settings yet. That cycle did not swap the provider process, so a real replacement is **expected**
+  to behave the same way over a longer window rather than measured to.
+
+  The disable runs before the activation, and the binary asked to perform it is the one this
+  package shipped rather than whatever was already installed. **A later entry in this same release
+  moves a second disable ahead of the copy too**, because the copy into `/Applications` turned out
+  not to be as inert as this paragraph originally claimed: macOS runs the extension from its own
+  directory, which is why it keeps filtering for an app you deleted, but the copy still prompts it
+  to restart on its own schedule. The shipped order is now off, copy, off, activate. Asking
+  whatever was already installed would have been wrong twice over: a build older than the flag
+  does not refuse it, it falls through to writing `isEnabled = true`, and a Mac whose app had been
+  deleted had nothing to ask while its extension was still activated and filtering.
+
+  **It also refuses while devices are in use.** Booted simulators, attached emulators and a relay
+  serving on `:4000` all count, because the filter is host-wide and the person affected is not
+  necessarily the person at the keyboard. `--ignore-running-devices` replaces it anyway;
+  `tapflow migrate data-dir` rejects that flag rather than ignoring it. The gate sits in the shared
+  install routine, so `tapflow setup ios` is covered too.
+
+  **And a filter that was switched off is no longer reported as up to date.** `systemextensionsctl`
+  describes the system extension, not `NEFilterManager.isEnabled`, so a Mac interrupted between the
+  disable and the install had the right app, the right activated extension, no filter, and `doctor ios`
+  all green — with the only thing that would restore it being the run that had just declined to do
+  anything. Being current now means enforcing as well as matching, in all three places that ask:
+  `doctor ios` says the filter is switched off and names the command that turns it back on, and neither
+  `migrate net-filter` nor `setup ios` reports a stopped filter as nothing to do.
+
+- 49f95e4: Keep iOS network control working after the filter is upgraded, and stop the upgrade from taking the Mac's network down.
+
+  Replacing the network filter's system extension leaves the previous one holding the XPC service name, so the new provider could not vend its listener and `--confirm` answered "no listener" while the filter was enforcing normally. The agent read that as "not confirmed" and the dashboard's **Take device offline** control went unavailable on every Mac that had upgraded. It now falls back to the provider's own state file, which is the channel the CLI already preferred.
+
+  The upgrade also switches the filter off _before_ it copies the app into `/Applications`, not only before activating it. Copying the app makes macOS restart the filter session on its own timing, and a filter session going down arms a kernel-wide IP drop — that is what took a Mac's network down for 2m34s on 2026-09-02, and the previous ordering was winning the race by 69 milliseconds.
+
+  Also: the provider publishes a rule change immediately instead of waiting for its next idle pulse, its state file names which provider wrote it, and a listener that fails to start now says so rather than logging success.
+
+- 3ead059: **`tapflow migrate net-filter` now checks that the filter actually came back before saying it did.**
+  The host binary's exit 0 means macOS did not refuse the change, which is smaller than "it works" —
+  the configuration reaches the provider afterwards with nothing coming back — and by that point the
+  command has switched the filter off in order to replace it safely. So a run could report _iOS network
+  control is available now_ over a Mac where nothing was filtering.
+
+  It now waits, up to thirty seconds, for a filter to report itself running — one that started _after_
+  the install, not the previous provider's last heartbeat — and leaves as soon as one does.
+  `tapflow setup ios` does the same when it installs the filter.
+
+  When none appears the command says so and **exits non-zero** instead of claiming success, because
+  that state is the one where the configuration is switched on and nothing is answering for it. Usually
+  it is simply still starting, and `tapflow doctor ios` will say so a moment later; if new connections
+  on the Mac have stopped, the command names the `--off` that takes the filter out of the path.
+
+- 79d5c1b: **A release that changes nothing but the filter's host binary no longer replaces the system
+  extension.** `build.sh` stamped one `CFBundleVersion` into the host app and the extension alike, so
+  any rebuild bumped both and macOS replaced a running provider — which interrupts every new connection
+  on the Mac until the replacement is up. Three of the six filter rebuilds so far touched nothing
+  outside `Host/` and paid that for nothing.
+
+  The extension now keeps its version when its own inputs are unchanged. Those inputs are everything
+  except `Host/`, `project.yml` and `build.sh` included, because both change what the extension binary
+  is without touching a line of Swift — and an extension that changed without its version changing is
+  replaced **silently**, leaving the old provider running with every check green.
+
+  **The first rebuild after this still bumps it once**, since `build.sh` is itself an extension input.
+  That is one replace, and the change that made a replace survivable landed first.
+
+  **Two versions means the checks that compare them had to be told apart.** `isNetFilterCurrent` and
+  `tapflow doctor ios` were comparing the host app's version against the extension macOS runs, which
+  only ever agreed because one number was written into both. Left alone, doctor would have reported a
+  Mac whose `/Applications` app is stale as fully healthy — and that binary is the agent's own path to
+  the filter, so an older one meets flags it does not understand. Doctor now names the app when only
+  the app is behind, and says to run `tapflow migrate net-filter`.
+
+  **And an install it cannot judge is refused rather than guessed at.** macOS keeps an extension
+  enforcing when its container app is deleted; the extension's version used to stand in for the host's,
+  and now only gives a lower bound. In that state tapflow says so and names both remedies instead of
+  replacing a filter that may be newer than the one it carries.
+
+- Updated dependencies [a2be8e0]
+- Updated dependencies [3d2aade]
+- Updated dependencies [49f95e4]
+- Updated dependencies [79d5c1b]
+- Updated dependencies [07d4b40]
+- Updated dependencies [da07ac4]
+- Updated dependencies [ea2b5cc]
+- Updated dependencies [916b02a]
+  - @tapflowio/ios-agent@0.20.1
+  - @tapflowio/relay@0.20.1
+  - @tapflowio/android-agent@0.20.1
+  - @tapflowio/agent-core@0.20.1
+  - @tapflowio/flow-runner@0.20.1
+
 ## 0.20.0
 
 ### Minor Changes
