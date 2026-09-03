@@ -57,6 +57,8 @@ Secrets can also live in the `.tapflow/data/.env` file. The relay loads it first
 | `TAPFLOW_VERCEL_TOKEN` | — | *(empty)* | Vercel API token for DNS-01 issuance when `tls.dnsProvider` is `vercel`. |
 | `TAPFLOW_VERCEL_TEAM_ID` | — | *(empty)* | Vercel team ID, required when the domain belongs to a team scope. |
 | `TAPFLOW_ACME_EMAIL` | — | *(empty)* | Optional contact email for the Let's Encrypt account. |
+| `TAPFLOW_ADMIN_EMAIL` | — | *(empty)* | Email for the first Admin account, created while the relay boots. Set it **together with** `TAPFLOW_ADMIN_PASSWORD`. Does nothing on an install that already has an owner. |
+| `TAPFLOW_ADMIN_PASSWORD` | — | *(empty)* | Password for that account, at least 8 characters. |
 | `SMTP_HOST` | `smtp.host` | `` | SMTP host |
 | `SMTP_PORT` | `smtp.port` | `587` | SMTP port |
 | `SMTP_SECURE` | `smtp.secure` | `false` | Enable TLS (set to string `"true"`) |
@@ -79,6 +81,60 @@ If the relay runs behind a same-host reverse proxy (nginx, Caddy) and `TAPFLOW_T
 
 For proxied or tunneled deployments, also set a public URL (`tunnel.publicUrl` or `relay.url`). Otherwise the CORS/CSRF allowlist is loopback-only and the dashboard's cross-origin requests can be blocked.
 :::
+
+## Create the first Admin account in a Docker container (`TAPFLOW_ADMIN_EMAIL`)
+
+Set both variables and the relay creates the first Admin account while it starts — the path for a Docker install, where neither the browser onboarding nor `tapflow admin init` can reach.
+
+Normally you create that first account through the `/setup` page in a browser, and `tapflow admin init` stands in for it on a server with no browser. A container closes both doors: `/setup` only answers a request from loopback — the check that stops a stranger claiming a public instance first — and a container reaches the relay through its bridge gateway, while the relay-only image carries no CLI.
+
+How it behaves:
+
+- **It does nothing on an install that already has an owner.** Your account is never replaced, restarts do not repeat it, and none of the three checks below run.
+- On an install with no owner, set both variables together. One without the other stops the relay starting.
+- The password must be at least 8 characters. A shorter one also stops it starting.
+- If the account you asked for could not be created, the relay does not start. An ownerless relay is claimable by anything that reaches loopback, so stopping is safer than serving.
+
+Leave both unset and nothing changes.
+
+There are two places to keep the values and **they do not combine.** Compose looks for what it interpolates in your shell or in the `.env` beside your compose file. The relay reads `.tapflow/data/.env` inside the volume. Different files.
+
+### In your compose file
+
+```yaml
+services:
+  relay:
+    image: tapflow/tapflow:latest
+    environment:
+      - TAPFLOW_ADMIN_EMAIL=admin@yourteam.com
+      - TAPFLOW_ADMIN_PASSWORD=${TAPFLOW_ADMIN_PASSWORD:?set this before starting}
+```
+
+`${...:?}` makes Compose refuse to start when the value is missing — a literal here would be copied unchanged and become a known password. Supply it as a shell environment variable, or in the `.env` next to your compose file.
+
+### In the relay's own `.env`
+
+Leave both lines out of `environment:` and write them inside the volume you already mount. That keeps the password out of your compose file and your shell history.
+
+```ini
+# Paste your own password after the =. Left empty, the relay does not start.
+TAPFLOW_ADMIN_EMAIL=admin@yourteam.com
+TAPFLOW_ADMIN_PASSWORD=
+```
+
+Narrow the permissions on a file you create yourself.
+
+```sh
+chmod 600 .tapflow/data/.env
+```
+
+`tapflow init` creates that file with mode 0600, but the relay-only image has no CLI — so a container operator writes it under their own umask. The relay checks the mode at startup and warns when other users can read it.
+
+```text
+.tapflow/data/.env is readable by other users (mode 644). Run: chmod 600 .tapflow/data/.env
+```
+
+It is a warning rather than a refusal.
 
 ## Streaming tuning (agent)
 
