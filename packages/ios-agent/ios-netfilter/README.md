@@ -192,6 +192,14 @@ export DEVELOPMENT_TEAM=<10자리 Team ID>
 ./build.sh
 ```
 
+**한 번에 하나만 돌린다.** 두 번째 `build.sh`는 `build/Build/…/XCBuildData/build.db`가 잠겨 있어
+실패한다(`database is locked. Possibly there are two concurrent builds running in the same filesystem
+location`). 그 자체는 명확한 에러인데, **`./build.sh | tail`처럼 파이프에 물리면 종료 코드가 `tail`의
+것이라 실패가 exit 0으로 보고된다.** 그리고 실패한 실행도 `plutil -replace`까지는 이미 지나갔으므로,
+`Extension/Info.plist`와 `Host/Info.plist`에 **빌드된 적 없는 `CFBundleVersion`이 박힌 채 남는다** —
+`shipped.json`과 어긋나고, 그 상태로 커밋하면 아티팩트 신선도 가드가 잡는다(잡히는 것이 다행인
+쪽이다). 복구는 `rm -rf build` 후 한 번만 다시 돌리는 것이다.
+
 **교체가 무응답으로 끝나면 delegate가 수거된 것이다.** `submitRequest`가 반환하고 delegate가 한 번도
 안 불린다 — 에러도 거절도 승인 프롬프트도 없다. 호스트가 45초에 끊고 exit 6을 내는 게 유일하게 이걸
 보이게 하는 장치다.
