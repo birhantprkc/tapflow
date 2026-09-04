@@ -597,18 +597,13 @@ private func flowShape(_ flow: NEFilterFlow) -> (port: Int?, how: String, isUDP:
     let outbound = flow.direction == .outbound
     guard let socketFlow = flow as? NEFilterSocketFlow else { return (nil, "not-a-socket-flow", false, outbound) }
     let udp = socketFlow.socketProtocol == IPPROTO_UDP
-    // **Both channels go through the same normalisation**, so `0` and absent produce the same answer
-    // and the channel name in the log means what it says. Skipping that on the second one made an
-    // unconnected flow read as "the first channel is empty", which is the condition this name exists
-    // to distinguish.
-    if let host = socketFlow.remoteEndpoint as? NWHostEndpoint, let p = normalisedPort(Int(host.port)) {
-        return (p, "remoteEndpoint", udp, outbound)
-    }
-    if let e = socketFlow.remoteFlowEndpoint, case let .hostPort(host: _, port: p) = e,
-       let n = normalisedPort(Int(p.rawValue)) {
-        return (n, "remoteFlowEndpoint", udp, outbound)
-    }
-    return (nil, "unreadable", udp, outbound)
+    // Read here, decided in `portFromChannels` — the two property reads are the only part a unit test
+    // cannot reach, so they are the only part left in this file.
+    var flowPort: UInt16?
+    if let e = socketFlow.remoteFlowEndpoint, case let .hostPort(host: _, port: p) = e { flowPort = p.rawValue }
+    let (port, how) = portFromChannels(hostEndpointPort: (socketFlow.remoteEndpoint as? NWHostEndpoint)?.port,
+                                       flowEndpointPort: flowPort)
+    return (port, how, udp, outbound)
 }
 
 // MARK: - pid → UDID

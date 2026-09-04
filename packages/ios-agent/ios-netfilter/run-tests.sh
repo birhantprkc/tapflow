@@ -61,5 +61,7 @@ mutate "dns: ignore protocol"    's/isOutbound \&\& isUDP \&\& remotePort == dns
 mutate "dns: ignore direction"   's/isOutbound \&\& isUDP \&\& remotePort == dnsPort/isUDP \&\& remotePort == dnsPort/'     || fails=1
 mutate "port: 0 is a port"       's/raw > 0, raw <= 65535/raw >= 0, raw <= 65535/'                 || fails=1
 mutate "port: no upper bound"    's/raw > 0, raw <= 65535/raw > 0/'                                || fails=1
+mutate "channels: reversed"      's/if let s = hostEndpointPort/if let f = flowEndpointPort, let p = normalisedPort(Int(f)) { return (p, "remoteFlowEndpoint") }; if let s = hostEndpointPort/' || fails=1
+mutate "channels: first unguarded" 's/if let s = hostEndpointPort, let p = normalisedPort(Int(s))/if let s = hostEndpointPort, let p = Int(s)/' || fails=1
 restore
 [[ $fails -eq 0 ]] && echo "=== all mutations killed ===" || { echo "=== a mutation survived ==="; exit 1; }

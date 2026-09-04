@@ -58,6 +58,26 @@ func normalisedPort(_ raw: Int?) -> Int? {
 }
 
 /**
+ * Which of the two endpoint channels yielded a port, and what it was.
+ *
+ * **The choosing is here and the reading is not**, which is the whole reason this function exists.
+ * `NEFilterSocketFlow` cannot be built in a unit test, so the downcast and the two property reads stay
+ * in `Provider.swift` where nothing can cover them — but everything decided *from* those values is
+ * decidable from the values alone, and that is the part with a test.
+ *
+ * **Order is load-bearing and so is the normalisation on both branches.** `remoteEndpoint` is
+ * deprecated and `remoteFlowEndpoint` replaces it, so the deprecated one is asked first while it still
+ * answers; and one of them reports an unconnected flow as `0` while the other omits it, so without
+ * normalising both the same condition reads as two different channels — which defeats the one thing
+ * the channel name in the log is for.
+ */
+func portFromChannels(hostEndpointPort: String?, flowEndpointPort: UInt16?) -> (port: Int?, how: String) {
+    if let s = hostEndpointPort, let p = normalisedPort(Int(s)) { return (p, "remoteEndpoint") }
+    if let f = flowEndpointPort, let p = normalisedPort(Int(f)) { return (p, "remoteFlowEndpoint") }
+    return (nil, "unreadable")
+}
+
+/**
  * Whether a flow must be allowed even when its simulator is in the offline set.
  *
  * **Outbound UDP to port 53, and nothing else. Each of the three conditions is the reason, not a

@@ -56,6 +56,31 @@ final class FlowClassificationTests: XCTestCase {
         XCTAssertFalse(allows(port: 5353))
     }
 
+    /// **The channel choice, which is what the diagnostic log claims to make visible.** The first
+    /// channel wins when it answers; `0` and a value the other side cannot parse both fall through to
+    /// the second, and neither reads as "the first channel is empty".
+    func testChoosesTheChannelThatActuallyAnswered() {
+        var r = portFromChannels(hostEndpointPort: "53", flowEndpointPort: 5353)
+        XCTAssertEqual(r.port, 53); XCTAssertEqual(r.how, "remoteEndpoint")
+
+        r = portFromChannels(hostEndpointPort: "0", flowEndpointPort: 53)
+        XCTAssertEqual(r.port, 53, "port 0 on the first channel must fall through, not win")
+        XCTAssertEqual(r.how, "remoteFlowEndpoint")
+
+        r = portFromChannels(hostEndpointPort: nil, flowEndpointPort: 53)
+        XCTAssertEqual(r.port, 53); XCTAssertEqual(r.how, "remoteFlowEndpoint")
+
+        r = portFromChannels(hostEndpointPort: "not-a-number", flowEndpointPort: 53)
+        XCTAssertEqual(r.port, 53); XCTAssertEqual(r.how, "remoteFlowEndpoint")
+
+        r = portFromChannels(hostEndpointPort: nil, flowEndpointPort: nil)
+        XCTAssertNil(r.port); XCTAssertEqual(r.how, "unreadable")
+
+        r = portFromChannels(hostEndpointPort: nil, flowEndpointPort: 0)
+        XCTAssertNil(r.port, "0 is not a port on either channel")
+        XCTAssertEqual(r.how, "unreadable")
+    }
+
     /// **`0` is what one endpoint channel reports for an unconnected flow and the other omits.**
     /// Without normalising, the same condition read as two different channels in the log — and that
     /// log is the thing meant to make an emptied channel visible rather than silent.
