@@ -81,3 +81,7 @@ packages/ios-agent/ios-netfilter/build/
 # would churn for no reader.
 packages/ios-agent/netprobe/TapflowNetProbe.xcodeproj/
 packages/ios-agent/netprobe/build/
+# ios-netfilter: the Swift test project is generated from tests.yml on every run (run-tests.sh).
+# Unlike TapflowNetFilter.xcodeproj it is NOT committed — nothing but the test script consumes it, and
+# xcodegen rewrites every identifier each time, so committing it would churn for no reader.
+packages/ios-agent/ios-netfilter/TapflowNetFilterTests.xcodeproj/
