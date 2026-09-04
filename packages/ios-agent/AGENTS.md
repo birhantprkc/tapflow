@@ -557,10 +557,12 @@ Four rules there are load-bearing, and each is a hole something already fell int
 - **The way back is published before the patch goes live.** `tf_hook_install` takes `original` as a
   parameter for that reason; a caller storing it afterwards leaves a window where another thread
   enters the replacement and tail-calls address zero.
-- **Every hook, or none — enforced, not just stated.** There is no uninstall, so a refusal on the
-  second target cannot undo the first. The replacements are neutered by `g_hooks_live` until the whole
-  set is in. `nw_path_monitor_set_queue` is in that set for a reason of its own: without it a replayed
-  handler has nowhere correct to run.
+- **Every hook, or none — enforced, not just stated, and there are now two sets.** There is no
+  uninstall, so a refusal on the second target cannot undo the first. The replacements are neutered by
+  `g_hooks_live` (the path set) or `g_reach_live` (the reachability set) until their own set is in.
+  `nw_path_monitor_set_queue` is in the first for a reason of its own: without it a replayed handler
+  has nowhere correct to run. **The two sets are not all-or-none with each other** — the section below
+  is why.
 - **A replayed handler runs on the queue its owner chose**, recorded from
   `nw_path_monitor_set_queue` (#640). Firing on tapflow's own queue instead could run a third-party
   handler concurrently with the framework's, and put UI work off the main thread — a crash in the app
@@ -571,6 +573,64 @@ Four rules there are load-bearing, and each is a hole something already fell int
   real run.
 - **No `SIMULATOR_UDID`, no activation.** Everything this library writes is keyed by it, and the
   host's `/tmp` is the same `/tmp` inside every simulator on the Mac.
+
+#### `NWPathMonitor` is not the only API an app asks, and the other one needed its own set
+
+`SCNetworkReachability` is what Alamofire's `NetworkReachabilityManager` and the older
+`Reachability.swift` read, and **the path hooks do not cover it.** SystemConfiguration's modern
+implementation does sit on Network.framework, but it gets there through `nw_path_create_evaluator` /
+`nw_path_copy_*` rather than `nw_path_get_status`, so the hook that fakes the path for `NWPathMonitor`
+leaves this API answering truthfully. An app built on either library showed **no offline banner at
+all** — traffic dead, and the app never told.
+
+**Faking the getter alone moves a number nobody reads**, which is the same lesson `nw_path_monitor`
+taught and is measured here too. A consumer does not poll: it registers a callback, caches what the
+callback last told it, and recomputes only inside that callback. Before `SCNetworkReachabilitySetCallback`
+was hooked, `netprobe/` recorded the getter flipping to NOT-reachable within a tick while the listener
+sat on `reachable` for the whole offline period, `fires=1` throughout. So the set is
+`GetFlags` + `SetCallback` + `SetDispatchQueue`, and `tf_push_reachability_update` replays each
+registered callout **on the queue its owner chose** — the same #640 discipline as the path push, for
+the same reason.
+
+**The `info` pointer is retained.** The framework retains it for as long as the registration lives, so
+this must too: Alamofire hands over itself, and replaying through a pointer it has already released is
+a crash in the app under test.
+
+**Why this set is separate from the path set, rather than folded in.** The path set is interdependent —
+faking the status without capturing the handlers tells an app a lie it is never corrected about — and
+that argument holds *within* this pair as well. It does not hold *between* them. If these three
+cannot be patched, an `NWPathMonitor` app still gets a correct banner and an SC app is left exactly
+where it was before any of this existed. Folding them into one set would trade that for a strictly
+worse failure: one unpatchable symbol taking layer 2 down for the apps it already served.
+
+Two gaps are open and recorded rather than closed:
+
+- **A consumer scheduled with `SCNetworkReachabilityScheduleWithRunLoop` is not re-fired.** No queue is
+  recorded for it, so the push skips it and logs. Guessing a run loop is the defect #640 ended.
+  Alamofire and current `Reachability.swift` both take the dispatch-queue path.
+- **The agent cannot see this set fail.** The verdict file is one boolean and, by the decision above,
+  a reachability refusal does not make it false — so a tester with an Alamofire app gets no signal.
+  That is no worse than before this set existed, but whether the verdict should speak per set is
+  undecided.
+
+#### `netprobe/` is how any of this is checked
+
+`packages/ios-agent/netprobe/` is a simulator app that reports the four mechanisms **separately** —
+`NWPathMonitor`, `SCNetworkReachability` (getter and listener as two different lines), `URLSession`,
+and `getaddrinfo`. Every number in this section came from it.
+
+```bash
+packages/ios-agent/netprobe/build.sh <booted-udid>
+xcrun simctl launch --console <udid> dev.tapflow.netprobe
+```
+
+**Flip the device with the condition file, not the filter rule**, when the agent is running:
+`touch /tmp/tapflow-offline-<udid>` exercises layer 2 alone and leaves layer 1's rule — and therefore
+a running agent's view of the world — untouched. The app's README has the arming steps.
+
+It is committed because the last one was not. `TFNetProbe` was built during #607, every measurement in
+that program came from it, and it survived only as an unsigned binary on one Mac — so none of those
+numbers could be reproduced by anyone else.
 
 #### What the agent trusts, and what it must not
 

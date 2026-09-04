@@ -28,6 +28,7 @@
 #import <Foundation/Foundation.h>
 #import <dlfcn.h>
 #import <Network/Network.h>
+#import <SystemConfiguration/SystemConfiguration.h>
 #import <arpa/inet.h>
 #import <netdb.h>
 #import <netinet/in.h>
@@ -536,6 +537,10 @@ static void tf_cut_open_connections(void) {
 // because the source had already been torn down.
 static dispatch_source_t g_watch_timer;
 
+// Defined with the reachability hooks further down, which need the hooked getter in scope. The
+// watcher is the only caller and it lives up here, next to the path push it mirrors.
+static void tf_push_reachability_update(void);
+
 static void tf_start_watching(void) {
   static BOOL last;
   last = tf_offline();
@@ -560,6 +565,8 @@ static void tf_start_watching(void) {
     if (now) tf_cut_open_connections();
     // Coming back needs nothing torn down — the app reconnects on its next request.
     tf_push_path_update();
+    // The other API an app may be listening on. Same push, same reason.
+    tf_push_reachability_update();
   });
   dispatch_resume(timer);
 }
@@ -698,6 +705,175 @@ static void tf_write_verdict(BOOL ok) {
   }
 }
 
+// ── reachability: the other API an app asks "am I online?" ───────────────────
+//
+// **The set above does not cover `SCNetworkReachability`, and that was measured rather than assumed.**
+// SystemConfiguration's modern implementation sits on Network.framework but reaches it through
+// `nw_path_create_evaluator`/`nw_path_copy_*`, not through `nw_path_get_status` — so the hook that
+// already fakes the path for `NWPathMonitor` leaves this API answering truthfully. Alamofire's
+// `NetworkReachabilityManager` and the older `Reachability.swift` both read it, so an app built on
+// either showed no offline banner at all.
+//
+// **Two hooks, and the second is not optional — it is the same lesson `nw_path_monitor` taught.**
+// A consumer does not poll: it registers a callback, caches what the callback last told it, and
+// recomputes only when the callback fires. Measured with `netprobe/` before this landed: the getter
+// flipped to NOT-reachable within a tick while the listener sat on `reachable` for the whole offline
+// period, `fires=1` throughout. Faking the getter alone moves a number nobody reads.
+//
+// **They are all-or-none with each other but NOT with the set above, and that asymmetry is the
+// decision.** The original set is interdependent — faking the status without capturing the handlers
+// tells an app a lie it is never corrected about — and the same holds *within* this pair. It does not
+// hold *between* them: if this pair cannot be patched, an `NWPathMonitor` app still gets a correct
+// banner and an SC app is left exactly where it was before this file existed. Folding SC into the
+// main set would trade that for a strictly worse failure — one unpatchable symbol taking layer 2 down
+// for every app, including the ones it already served.
+static Boolean (*o_SCNetworkReachabilityGetFlags)(SCNetworkReachabilityRef, SCNetworkReachabilityFlags *);
+static Boolean (*o_SCNetworkReachabilitySetCallback)(SCNetworkReachabilityRef, SCNetworkReachabilityCallBack,
+                                                     SCNetworkReachabilityContext *);
+static Boolean (*o_SCNetworkReachabilitySetDispatchQueue)(SCNetworkReachabilityRef, dispatch_queue_t);
+
+/// Gates this pair alone. Same technique and same reason as `g_hooks_live`: the patch cannot be
+/// removed, so a half-installed pair is neutered rather than uninstalled.
+static atomic_bool g_reach_live = ATOMIC_VAR_INIT(false);
+
+static BOOL tf_reach_blocking(void) {
+  if (!atomic_load_explicit(&g_reach_live, memory_order_acquire)) return NO;
+  return tf_blocking();
+}
+
+/// Registered listeners, keyed by target. Guarded by `g_handler_queue` — the same serial queue the
+/// path handlers use, for the same reason.
+static NSMutableDictionary *g_reach;
+
+static Boolean tf_SCNetworkReachabilityGetFlags(SCNetworkReachabilityRef target,
+                                                SCNetworkReachabilityFlags *flags) {
+  Boolean ok = o_SCNetworkReachabilityGetFlags(target, flags);
+  // Only the one bit. Every consumer decides "reachable" from it first — Alamofire returns
+  // `.notReachable` the moment it is absent — and clearing the rest would be inventing a link state
+  // rather than removing one.
+  if (ok && flags != NULL && tf_reach_blocking()) *flags &= ~kSCNetworkReachabilityFlagsReachable;
+  return ok;
+}
+
+static Boolean tf_SCNetworkReachabilitySetCallback(SCNetworkReachabilityRef target,
+                                                   SCNetworkReachabilityCallBack callout,
+                                                   SCNetworkReachabilityContext *context) {
+  Boolean ok = o_SCNetworkReachabilitySetCallback(target, callout, context);
+  // **Only a registration the framework accepted is recorded.** Replaying a callout it refused would
+  // deliver an update to a consumer that believes it never subscribed.
+  if (!ok || target == NULL) return ok;
+
+  void *info = (context != NULL) ? context->info : NULL;
+  const void *(*retain)(const void *) = (context != NULL) ? context->retain : NULL;
+  void (*release)(const void *) = (context != NULL) ? context->release : NULL;
+  // The framework retains `info` for as long as the registration lives, and so must this — otherwise
+  // a consumer that hands over an owned pointer (Alamofire hands over itself) is replayed through a
+  // pointer it has already freed.
+  if (retain != NULL && info != NULL) info = (void *)retain(info);
+  // **A consumer that passes `info` unretained and then drops its target without unregistering can be
+  // replayed through a stale pointer**, and that risk is created here rather than inherited: the
+  // `CFRetain` below keeps the target alive past the point where the framework would have destroyed
+  // it and stopped calling. Refusing such registrations was considered and rejected — Alamofire
+  // passes `Unmanaged.passUnretained(self)` with no retain/release, so refusing would exclude the
+  // main consumer this set exists for. What makes it acceptable is that both Alamofire and current
+  // `Reachability.swift` call `stopListening()` from `deinit`, which reaches the `callout == NULL`
+  // path below and drops the entry before the object goes away.
+
+  id key = @((uintptr_t)target);
+  dispatch_sync(g_handler_queue, ^{
+    NSDictionary *old = g_reach[key];
+    if (old[@"callout"] != nil) {
+      // Replacing or clearing an existing registration: give back what was taken above.
+      void (*orel)(const void *) = (void (*)(const void *))[old[@"release"] pointerValue];
+      void *oinfo = [old[@"info"] pointerValue];
+      if (orel != NULL && oinfo != NULL) orel(oinfo);
+      CFRelease((SCNetworkReachabilityRef)[old[@"target"] pointerValue]);
+      // The queue survives the callout being cleared: `SetCallback(NULL)` unregisters the callback,
+      // not the schedule, and a consumer that re-registers without touching its queue again would
+      // otherwise come back unfireable.
+      NSMutableDictionary *keep = [old mutableCopy];
+      [keep removeObjectForKey:@"callout"];
+      [keep removeObjectForKey:@"info"];
+      [keep removeObjectForKey:@"release"];
+      [keep removeObjectForKey:@"target"];
+      g_reach[key] = keep[@"queue"] != nil ? keep : nil;
+    }
+    // `callout == NULL` is how a consumer unsubscribes. Nothing to record, and the release above has
+    // already run.
+    if (callout == NULL) return;
+    CFRetain(target);
+    // Merged onto whatever `SetDispatchQueue` may already have left here — see the note there.
+    NSMutableDictionary *e = [g_reach[key] mutableCopy] ?: [NSMutableDictionary dictionary];
+    e[@"target"]  = [NSValue valueWithPointer:target];
+    e[@"callout"] = [NSValue valueWithPointer:(void *)callout];
+    e[@"info"]    = [NSValue valueWithPointer:info];
+    e[@"release"] = [NSValue valueWithPointer:(void *)release];
+    g_reach[key] = e;
+  });
+  return ok;
+}
+
+static Boolean tf_SCNetworkReachabilitySetDispatchQueue(SCNetworkReachabilityRef target,
+                                                        dispatch_queue_t queue) {
+  Boolean ok = o_SCNetworkReachabilitySetDispatchQueue(target, queue);
+  if (!ok || target == NULL) return ok;
+  // **Recorded for the same reason `nw_path_monitor_set_queue` is (#640): a replayed callout runs on
+  // the queue its owner chose.** Firing on tapflow's own queue instead could run the consumer's
+  // callback concurrently with a genuine framework one, and put its work — often UI — off the main
+  // thread, producing a crash in the app under test that looks like the app's fault.
+  // **Recorded even when no callout has been registered yet.** The two calls have no required order
+  // and the first draft assumed one: it returned early when there was no entry, so a consumer that
+  // set its queue *before* its callback ended up with a registration this file could never re-fire —
+  // silently, since the push logs a missing queue as if the consumer had never set one. Alamofire
+  // happens to call them the other way round, which is exactly the kind of luck a hook should not
+  // depend on.
+  id key = @((uintptr_t)target);
+  dispatch_sync(g_handler_queue, ^{
+    NSMutableDictionary *e = [g_reach[key] mutableCopy] ?: [NSMutableDictionary dictionary];
+    if (queue == nil) [e removeObjectForKey:@"queue"];
+    else e[@"queue"] = queue;
+    // A queue-only entry holds no callout, so the push skips it until `SetCallback` fills one in —
+    // and `SetCallback` merges rather than replaces, for the same reason.
+    g_reach[key] = e;
+  });
+  return ok;
+}
+
+/**
+ * Re-fire every registered reachability callout with what the getter now says.
+ *
+ * Mirrors `tf_push_path_update` deliberately, including the two things that were learned there:
+ * the snapshot is taken under the queue and the calls are made outside it (a callout that registers
+ * another target would otherwise re-enter this serial queue and deadlock), and each callout runs on
+ * **its owner's** queue rather than ours.
+ *
+ * **A target with no recorded queue is skipped and logged, not fired somewhere.** That is a real
+ * gap rather than a defensive branch: a consumer scheduled with `SCNetworkReachabilityScheduleWithRunLoop`
+ * instead of a dispatch queue is not covered by this file, and the honest answer for it is that we do
+ * not know which run loop its callback belongs to. Alamofire and current `Reachability.swift` both use
+ * the dispatch-queue path.
+ */
+static void tf_push_reachability_update(void) {
+  __block NSArray *entries;
+  dispatch_sync(g_handler_queue, ^{ entries = [g_reach.allValues copy]; });
+
+  for (NSDictionary *e in entries) {
+    if (e[@"callout"] == nil) continue;   // queue recorded, no callback registered (yet)
+    dispatch_queue_t q = e[@"queue"];
+    SCNetworkReachabilityRef target = (SCNetworkReachabilityRef)[e[@"target"] pointerValue];
+    if (q == nil) {
+      os_log_error(tf_log(), "no queue recorded for a reachability target — not re-firing its callback");
+      continue;
+    }
+    SCNetworkReachabilityFlags f = 0;
+    // Through the hooked getter, so the replayed value and a poll cannot disagree.
+    if (!SCNetworkReachabilityGetFlags(target, &f)) continue;
+    SCNetworkReachabilityCallBack cb = (SCNetworkReachabilityCallBack)[e[@"callout"] pointerValue];
+    void *info = [e[@"info"] pointerValue];
+    dispatch_async(q, ^{ cb(target, f, info); });
+  }
+}
+
 // ── install ──────────────────────────────────────────────────────────────────
 
 __attribute__((constructor))
@@ -709,6 +885,7 @@ static void tf_install(void) {
   g_monitors = [NSMutableArray array];
   g_queues = [NSMutableDictionary dictionary];
   g_handler_queue = dispatch_queue_create("io.tapflow.nethook.handlers", DISPATCH_QUEUE_SERIAL);
+  g_reach = [NSMutableDictionary dictionary];
 
   // Every hook, or none — and the rule is narrower now than the set it used to guard, not weaker.
   // Faking the status without capturing the handlers gives an app a lie it is never told (nothing
@@ -744,6 +921,40 @@ static void tf_install(void) {
       break;
     }
   }
+
+  // The reachability pair — all-or-none **with each other**, and not with the set above. The reason
+  // is on the replacements; the short form is that this failing leaves an SC-reading app where it
+  // already was, while folding it into the set above would let one unpatchable symbol take layer 2
+  // down for apps it already serves.
+  static const struct { const char *name; void *replacement; void **original; } reach[] = {
+    {"SCNetworkReachabilityGetFlags", tf_SCNetworkReachabilityGetFlags,
+     (void **)&o_SCNetworkReachabilityGetFlags},
+    // Without this the one above moves a number nobody reads — measured, `netprobe/`.
+    {"SCNetworkReachabilitySetCallback", tf_SCNetworkReachabilitySetCallback,
+     (void **)&o_SCNetworkReachabilitySetCallback},
+    {"SCNetworkReachabilitySetDispatchQueue", tf_SCNetworkReachabilitySetDispatchQueue,
+     (void **)&o_SCNetworkReachabilitySetDispatchQueue},
+  };
+  BOOL reachInstalled = YES;
+  for (size_t i = 0; i < sizeof(reach) / sizeof(reach[0]); i++) {
+    void *target = dlsym(RTLD_DEFAULT, reach[i].name);
+    if (target == NULL) {
+      os_log_error(tf_log(), "%{public}s: not found", reach[i].name);
+      reachInstalled = NO;
+      break;
+    }
+    tf_hook_error_t err;
+    if (!tf_hook_install(target, reach[i].replacement, reach[i].original, &err)) {
+      os_log_error(tf_log(), "%{public}s: refused — %{public}s", reach[i].name, tf_hook_strerror(err));
+      reachInstalled = NO;
+      break;
+    }
+  }
+  // **Gated on the main set too.** The replacements read `tf_blocking`, which is itself gated on
+  // `g_hooks_live` — but saying so here as well keeps the pair from going live in a process where the
+  // rest of layer 2 did not, which would be a control that moves one API and nothing else.
+  if (reachInstalled && installed) atomic_store_explicit(&g_reach_live, true, memory_order_release);
+  os_log(tf_log(), "reachability hooks %{public}s", reachInstalled ? "installed" : "NOT installed");
 
   // **The verdict is the target app's answer, and now only the target app can write it** — because
   // only the target app activates at all (#635).
