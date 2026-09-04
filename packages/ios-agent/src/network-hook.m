@@ -942,8 +942,10 @@ static Boolean tf_SCNetworkReachabilityScheduleWithRunLoop(SCNetworkReachability
       if ([r[@"rl"] pointerValue] == (void *)runLoop && [r[@"mode"] isEqualToString:mode]) return;
     }
     // Retained for as long as it is recorded: a run loop belonging to a thread that has since exited
-    // would otherwise be a freed object by the time the push reaches it. A block performed on a run
-    // loop nobody is running simply never fires, which is the harmless half.
+    // would otherwise be a freed object by the time the push reaches it. **That keeps the wake-up from
+    // crashing and is not otherwise harmless** — an earlier note here called it that. Holding the
+    // `CFRunLoop` alive is also what stops CF's own finalise path from draining the blocks queued on
+    // it, so a push aimed at a dead run loop leaks the references its block carries. See the push.
     CFRetain(runLoop);
     [rls addObject:@{ @"rl": [NSValue valueWithPointer:runLoop], @"mode": mode }];
     e[@"runloops"] = rls;
@@ -1008,52 +1010,80 @@ static void tf_push_reachability_update(void) {
   dispatch_sync(g_handler_queue, ^{ keys = [g_reach.allKeys copy]; });
 
   for (id key in keys) {
-    __block tf_reach_entry e = {0};
-    __block BOOL found = NO;
+    // **Everything the delivery needs is copied out under the lock, collections included.**
+    //
+    // A first version read them through a struct of `__unsafe_unretained` fields and used them after
+    // the lock. The two schedule hooks replace the whole entry dictionary on every call, so the array
+    // they hold can be the last reference — and a consumer scheduling or unscheduling while a push was
+    // in flight left this iterating a freed `NSArray`. The `dispatch_queue_t` had the same shape.
+    __block SCNetworkReachabilityRef target = NULL;
+    __block SCNetworkReachabilityCallBack callout = NULL;
+    __block void *info = NULL;
+    __block const void *(*retainFn)(const void *) = NULL;
+    __block void (*releaseFn)(const void *) = NULL;
+    __block dispatch_queue_t queue = nil;
+    __block NSArray *runloops = nil;
     dispatch_sync(g_handler_queue, ^{
+      tf_reach_entry e = {0};
       if (!tf_reach_read(key, &e)) return;
       // Nowhere to deliver: a consumer that registered a callout and scheduled nothing gets no
       // callbacks from the framework either, so replaying to it would be inventing a delivery.
       if (e.queue == nil && e.runloops.count == 0) return;
-      // Taken under the queue, so the unregister path cannot run between the read and the retain.
-      CFRetain(e.target);
-      if (e.retain != NULL && e.info != NULL) e.info = (void *)e.retain(e.info);
-      found = YES;
+      queue = e.queue;
+      runloops = [e.runloops copy];
+      callout = e.callout;
+      info = e.info;
+      retainFn = e.retain;
+      releaseFn = e.release;
+      target = e.target;
+      // Taken under the lock, so the unregister path cannot run between the read and the retain.
+      CFRetain(target);
+      if (retainFn != NULL && info != NULL) info = (void *)retainFn(info);
     });
-    if (!found) continue;
+    if (target == NULL) continue;
+
     SCNetworkReachabilityFlags f = 0;
     // Through the hooked getter, so the replayed value and a poll cannot disagree.
-    BOOL got = SCNetworkReachabilityGetFlags(e.target, &f);
-    tf_reach_entry snap = e;
-    // **One reference, one delivery.** The references taken above are dropped by whichever path runs,
-    // so a target scheduled on both a queue and a run loop takes a second pair for the second
-    // delivery rather than sharing one and releasing it twice.
-    void (^deliver)(void) = ^{
-      if (got) snap.callout(snap.target, f, snap.info);
-      if (snap.release != NULL && snap.info != NULL) snap.release(snap.info);
-      CFRelease(snap.target);
-    };
-    if (snap.queue != nil) {
-      dispatch_async(snap.queue, deliver);
-    } else {
-      deliver = nil;   // the queue path owns the references; the run-loop path takes its own below
-      if (snap.release != NULL && snap.info != NULL) snap.release(snap.info);
-      CFRelease(snap.target);
+    BOOL got = SCNetworkReachabilityGetFlags(target, &f);
+
+    // **One reference pair per delivery, and they are all taken before any of them is given back.**
+    //
+    // The version this replaces released the pair inline when there was no dispatch queue and then
+    // re-took one inside the run-loop loop. Between those two statements the push held nothing, so an
+    // unregister landing there — `stopListening()` from inside the offline callback, which is the
+    // sequence this file already names as reachable — dropped the last reference and the retain that
+    // followed reached freed memory. Counting first removes the window rather than narrowing it.
+    NSUInteger deliveries = runloops.count + (queue != nil ? 1 : 0);
+    for (NSUInteger i = 1; i < deliveries; i++) {
+      CFRetain(target);
+      if (retainFn != NULL && info != NULL) retainFn(info);
     }
-    for (NSDictionary *r in snap.runloops) {
+
+    SCNetworkReachabilityRef t = target;
+    SCNetworkReachabilityCallBack cb = callout;
+    void *ci = info;
+    void (*rel)(const void *) = releaseFn;
+    if (queue != nil) {
+      dispatch_async(queue, ^{
+        if (got) cb(t, f, ci);
+        if (rel != NULL && ci != NULL) rel(ci);
+        CFRelease(t);
+      });
+    }
+    for (NSDictionary *r in runloops) {
       CFRunLoopRef rl = (CFRunLoopRef)[r[@"rl"] pointerValue];
-      CFRetain(snap.target);
-      void *info = snap.info;
-      if (snap.retain != NULL && info != NULL) info = (void *)snap.retain(info);
-      SCNetworkReachabilityRef t = snap.target;
-      SCNetworkReachabilityCallBack cb = snap.callout;
-      void (*rel)(const void *) = snap.release;
       // **On the run loop and mode its owner named** — the same #640 discipline the queue path
       // follows. `CFRunLoopPerformBlock` only enqueues; without the wake-up a run loop already
       // sleeping does not notice until something else stirs it.
+      //
+      // **A block that never runs holds its pair forever.** `CFRunLoopPerformBlock` has no
+      // cancellation, so a run loop whose thread has exited, or one that never re-enters this mode,
+      // keeps one target reference and one `info` reference for the life of the process. That is a
+      // leak rather than a crash, and closing it needs a cancellable source rather than a block —
+      // see the issue this is filed under.
       CFRunLoopPerformBlock(rl, (__bridge CFStringRef)r[@"mode"], ^{
-        if (got) cb(t, f, info);
-        if (rel != NULL && info != NULL) rel(info);
+        if (got) cb(t, f, ci);
+        if (rel != NULL && ci != NULL) rel(ci);
         CFRelease(t);
       });
       CFRunLoopWakeUp(rl);

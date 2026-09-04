@@ -92,6 +92,24 @@ private func startReachabilityOnRunLoop() {
     if SCNetworkReachabilityGetFlags(ref, &f) { runLoopBelievesReachable = flagsAreReachable(f) }
 }
 
+/// **The teardown half, and it is here because nothing else exercises it.**
+///
+/// `SCNetworkReachabilityUnscheduleFromRunLoop` is hooked, and everything the hook does — dropping the
+/// recorded pair, releasing the run loop, clearing an entry that has nothing left — ran under no test
+/// and no measurement until this existed. A probe that only ever registers reports the registration
+/// path working and says nothing about the half that runs when a screen goes away.
+///
+/// After this, the run-loop listener must stop firing while the queue listener keeps going. That
+/// difference is the assertion; there is no other way to see it from outside.
+private func stopReachabilityOnRunLoop() {
+    guard let ref = reachRunLoopRef else { return }
+    let un = SCNetworkReachabilityUnscheduleFromRunLoop(ref, CFRunLoopGetMain(), CFRunLoopMode.defaultMode.rawValue)
+    let cleared = SCNetworkReachabilitySetCallback(ref, nil, nil)
+    reachRunLoopRef = nil
+    say("sc runloop-listener TORN DOWN unschedule=\(un) setCallback(nil)=\(cleared) " +
+        "— it must not fire again; the queue listener must keep firing")
+}
+
 private func startReachability() {
     guard let ref = SCNetworkReachabilityCreateWithName(nil, "example.com") else {
         say("sc listener could not be created"); return
@@ -167,9 +185,13 @@ private func tick() {
     let listener = listenerBelievesReachable.map { $0 ? "reachable" : "NOT-reachable" } ?? "unset"
     let agree = getter == listener ? "" : "   <-- DISAGREE: the callback has not re-fired"
     say("sc getter=\(getter) listener=\(listener) fires=\(listenerFireCount)\(agree)")
+    // **Two different targets on purpose** — the queue listener watches `example.com` and the
+    // run-loop one `example.org`, so that one scheduling path cannot mask the other. The hook masks
+    // the reachable bit for every target, so comparing the getter of one against the listener of the
+    // other is still sound; it is said out loud because the line does not look like it.
     let rl = runLoopBelievesReachable.map { $0 ? "reachable" : "NOT-reachable" } ?? "unset"
-    let rlAgree = getter == rl ? "" : "   <-- DISAGREE: the run-loop callback has not re-fired"
-    say("sc runloop-listener=\(rl) fires=\(runLoopFireCount)\(rlAgree)")
+    let rlAgree = (reachRunLoopRef == nil || getter == rl) ? "" : "   <-- DISAGREE: the run-loop callback has not re-fired"
+    say("sc runloop-listener=\(rl) fires=\(runLoopFireCount)\(rlAgree)\(reachRunLoopRef == nil ? " (torn down)" : "")")
     say("nwpath status=\(lastPathStatus.map(String.init(describing:)) ?? "unset")")
     say("getaddrinfo example.com=\(resolves("example.com")) localhost=\(resolves("localhost"))")
     fetch("fresh", "https://example.com/?tf=\(Int(Date().timeIntervalSince1970))")
@@ -187,6 +209,10 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         startReachability()
         startReachabilityOnRunLoop()
         Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { _ in tick() }
+        // Late enough that a run has already seen the run-loop listener work, early enough that the
+        // same run can then watch it stay quiet. `TAPFLOW_PROBE_TEARDOWN_AFTER` overrides it.
+        let after = ProcessInfo.processInfo.environment["TAPFLOW_PROBE_TEARDOWN_AFTER"].flatMap(Double.init) ?? 20
+        Timer.scheduledTimer(withTimeInterval: after, repeats: false) { _ in stopReachabilityOnRunLoop() }
         return true
     }
 }
