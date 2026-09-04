@@ -439,9 +439,9 @@ describe('Network hook symbols (#629)', () => {
     mockExistsSync.mockImplementation((p) => {
       const path = String(p)
       if (path === '/Applications/Xcode.app') return true
-      // `partial` keeps only `libSystem.tbd`, which is the shape that matters: the two files
-      // partition the symbols, so half the evidence looks exactly like three withdrawn symbols.
-      if (path.endsWith('Network.tbd')) return stubs === 'all'
+      // `partial` keeps only `libSystem.tbd`, which is the shape that matters: the three files
+      // partition the symbols, so a fraction of the evidence looks exactly like withdrawn symbols.
+      if (path.endsWith('Network.tbd') || path.endsWith('SystemConfiguration.tbd')) return stubs === 'all'
       if (path.endsWith('.tbd')) return stubs !== 'none'
       return true
     })
@@ -453,7 +453,10 @@ describe('Network hook symbols (#629)', () => {
     mockReadFileSync.mockReturnValue(declared as never)
   }
 
+  // Seven, from two tables in `network-hook.m`. `hookSymbolsChecked.test.mjs` is what keeps this list
+  // and `HOOK_SYMBOLS` from drifting from the dylib; this one is about what `doctor` does with them.
   const ALL = '_getaddrinfo _nw_path_get_status _nw_path_monitor_set_update_handler _nw_path_monitor_set_queue'
+    + ' _SCNetworkReachabilityGetFlags _SCNetworkReachabilitySetCallback _SCNetworkReachabilitySetDispatchQueue'
 
   it('passes when the SDK declares every symbol, and names the SDK it read', async () => {
     withSdk(ALL)
@@ -465,13 +468,24 @@ describe('Network hook symbols (#629)', () => {
   })
 
   it('names the symbol that is missing, not merely that one is', async () => {
-    // "Something is missing" sends someone to read four `.tbd` files to find out which.
+    // "Something is missing" sends someone to read the `.tbd` files to find out which.
     withSdk(ALL.replace('_nw_path_get_status ', ''))
     const c = symbolsCheck(await runDoctorChecks('ios'))
     expect(c?.ok).toBe(false)
     expect(c?.warn, 'a session works without iOS network control, so this is not a failure').toBe(true)
     expect(c?.detail).toContain('nw_path_get_status')
     expect(c?.detail, 'a symbol that is present was reported as gone').not.toContain('getaddrinfo,')
+  })
+
+  it('names a reachability symbol too, which is the half that was added last', async () => {
+    // **Aimed at the new entries rather than at the mechanism.** The test above already proves the
+    // reporting works; what it cannot prove is that the three symbols added with the reachability set
+    // are in the list `doctor` reads. A list that silently lost them would pass everything above.
+    withSdk(ALL.replace('_SCNetworkReachabilitySetCallback ', ''))
+    const c = symbolsCheck(await runDoctorChecks('ios'))
+    expect(c?.ok).toBe(false)
+    expect(c?.detail).toContain('SCNetworkReachabilitySetCallback')
+    expect(c?.detail, 'a symbol that is present was reported as gone').not.toContain('SCNetworkReachabilityGetFlags,')
   })
 
   it('says it cannot tell when one stub file is absent, rather than that its symbols are gone', async () => {
