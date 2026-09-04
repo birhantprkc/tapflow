@@ -25,6 +25,7 @@ xcrun --sdk iphonesimulator clang \
   -O2 \
   -framework Foundation \
   -framework Network \
+  -framework SystemConfiguration \
   -o "$out" \
   src/network-hook.m src/inline-hook.c
 

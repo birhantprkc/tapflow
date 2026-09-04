@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **An app that uses Alamofire or Reachability.swift now shows its offline screen when you take an iOS simulator off the network.** Taking a device offline already stopped its traffic, and an app built on `NWPathMonitor` — the modern API — drew its offline state correctly. An app that asks `SCNetworkReachability` instead was never told: it went on reporting a reachable network while every request failed, so the offline screen you came to check never appeared and the traffic being blocked looked like the feature not working. That API is answered now. What made it more than a one-line change is that these libraries do not poll — they register a callback, remember what it last told them, and recompute only when it fires — so tapflow re-fires that callback rather than only changing what a poll would return. Both ways a library can ask for that callback are covered, a dispatch queue and a run loop, and each is re-fired where its owner asked for it rather than wherever tapflow happened to be.
+
 ## [0.20.1] - 2026-09-04
 
 ### Changed
