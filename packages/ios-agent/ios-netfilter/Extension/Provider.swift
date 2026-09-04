@@ -142,8 +142,12 @@ private final class Heartbeat {
     private var flowsUnresolved = 0
     private var flowsDropped = 0
     private var flowsIdle = 0
-    /// Flows an offline simulator was allowed anyway because they are name resolution. Counted apart
-    /// from `dropped` so that "the filter is enforcing" keeps meaning what the agent reads it to mean.
+    /// Flows an offline simulator was allowed anyway because they are name resolution.
+    ///
+    /// **A subset of `simulator`, like `dropped` is** — the first draft made it a sibling instead, so
+    /// `simulator − dropped` silently stopped meaning "allowed simulator flows" for anyone reading the
+    /// file. It stays out of `dropped` because that is the number the agent reads as evidence the
+    /// filter is enforcing, and a DNS allow is not that.
     private var flowsDns = 0
     /**
      * Drops, per device (#654).
@@ -171,7 +175,7 @@ private final class Heartbeat {
     /// them as host flows would put a number in the file meaning "we decided this belonged to the
     /// Mac", when nothing decided anything. The file is read to diagnose, and a diagnosis built on an
     /// invented decision is worse than a missing one.
-    enum Outcome { case simulator(dropped: Bool, udid: String), host, unresolved, idle, dns(udid: String) }
+    enum Outcome { case simulator(dropped: Bool, udid: String), host, unresolved, idle, dns }
 
     /**
      * Candidates, in order — **and every one of them has to be readable by the agent**, which runs
@@ -236,7 +240,9 @@ private final class Heartbeat {
         case .host: flowsHost += 1
         case .unresolved: flowsUnresolved += 1
         case .idle: flowsIdle += 1
-        case .dns: flowsDns += 1
+        case .dns:
+            flowsSimulator += 1
+            flowsDns += 1
         }
         // Only a walk that ran is a walk. Counting the `pid <= 0` short circuit diluted the average
         // with samples that measured nothing.
@@ -554,19 +560,19 @@ class Provider: NEFilterDataProvider {
             // **Asked only where it can change the answer.** A flow that was going to be allowed does
             // not need to know its port, and reading the endpoint costs an allocation per flow.
             if drop {
-                let (port, how) = remotePort(of: flow)
-                if passesRegardlessOfRule(remotePort: port) {
+                let (port, how, isUDP, isOutbound) = flowShape(flow)
+                if passesRegardlessOfRule(remotePort: port, isUDP: isUDP, isOutbound: isOutbound) {
                     os_log("handleNewFlow pid=%{public}d udid=%{public}@ asid=%{public}u verdict=allow(dns port=%{public}d via %{public}@)",
                            log: log, type: .default, pid, udid, asid, port ?? -1, how)
-                    heartbeat.note(.dns(udid: udid), walkNanos: walkNanos, rule: rule, ruleChanged: ruleChanged)
+                    heartbeat.note(.dns, walkNanos: walkNanos, rule: rule, ruleChanged: ruleChanged)
                     return .allow()
                 }
                 // **The measurement this build exists to take** (#607 A2-0): whether the endpoint is
                 // readable at all on this OS, and through which property. Logged for every dropped
                 // flow rather than sampled, because a port that reads as `-1` here is the difference
                 // between this feature working and not, and it must not depend on catching a sample.
-                os_log("handleNewFlow pid=%{public}d udid=%{public}@ asid=%{public}u verdict=DROP port=%{public}d via %{public}@",
-                       log: log, type: .default, pid, udid, asid, port ?? -1, how)
+                os_log("handleNewFlow pid=%{public}d udid=%{public}@ asid=%{public}u verdict=DROP port=%{public}d via %{public}@ udp=%{public}d out=%{public}d",
+                       log: log, type: .default, pid, udid, asid, port ?? -1, how, isUDP ? 1 : 0, isOutbound ? 1 : 0)
                 heartbeat.note(.simulator(dropped: true, udid: udid), walkNanos: walkNanos, rule: rule, ruleChanged: ruleChanged)
                 return .drop()
             }
@@ -587,15 +593,22 @@ class Provider: NEFilterDataProvider {
  * only what the answer was — if a future OS empties one, that shows up as the channel changing rather
  * than as a port that mysteriously stops being readable.
  */
-private func remotePort(of flow: NEFilterFlow) -> (port: Int?, how: String) {
-    guard let socketFlow = flow as? NEFilterSocketFlow else { return (nil, "not-a-socket-flow") }
-    if let host = socketFlow.remoteEndpoint as? NWHostEndpoint, let p = Int(host.port), p > 0 {
-        return (p, "remoteEndpoint")
+private func flowShape(_ flow: NEFilterFlow) -> (port: Int?, how: String, isUDP: Bool, isOutbound: Bool) {
+    let outbound = flow.direction == .outbound
+    guard let socketFlow = flow as? NEFilterSocketFlow else { return (nil, "not-a-socket-flow", false, outbound) }
+    let udp = socketFlow.socketProtocol == IPPROTO_UDP
+    // **Both channels go through the same normalisation**, so `0` and absent produce the same answer
+    // and the channel name in the log means what it says. Skipping that on the second one made an
+    // unconnected flow read as "the first channel is empty", which is the condition this name exists
+    // to distinguish.
+    if let host = socketFlow.remoteEndpoint as? NWHostEndpoint, let p = normalisedPort(Int(host.port)) {
+        return (p, "remoteEndpoint", udp, outbound)
     }
-    if let e = socketFlow.remoteFlowEndpoint, case let .hostPort(host: _, port: p) = e {
-        return (Int(p.rawValue), "remoteFlowEndpoint")
+    if let e = socketFlow.remoteFlowEndpoint, case let .hostPort(host: _, port: p) = e,
+       let n = normalisedPort(Int(p.rawValue)) {
+        return (n, "remoteFlowEndpoint", udp, outbound)
     }
-    return (nil, "unreadable")
+    return (nil, "unreadable", udp, outbound)
 }
 
 // MARK: - pid → UDID

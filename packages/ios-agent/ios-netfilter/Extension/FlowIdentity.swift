@@ -44,27 +44,49 @@ func extractUDID(from text: String) -> String? {
 let dnsPort = 53
 
 /**
+ * A port from an endpoint, or `nil` when there is not one.
+ *
+ * **`0` is not a port and must not read as one.** The two endpoint properties disagree about it: one
+ * of them reports an unconnected flow as port `0` while the other reports nothing at all, so without
+ * this the log records a different channel for the same condition — and that log is what is supposed
+ * to make "the OS emptied a channel" visible rather than silent. Normalising here is what keeps the
+ * two answers comparable.
+ */
+func normalisedPort(_ raw: Int?) -> Int? {
+    guard let raw, raw > 0, raw <= 65535 else { return nil }
+    return raw
+}
+
+/**
  * Whether a flow must be allowed even when its simulator is in the offline set.
  *
- * **Exactly one thing passes, and the reason is that blocking it produces a worse lie than letting it
- * through.** A dropped UDP flow gives its sender nothing — no error, no reset — so a resolver whose
- * query is dropped waits out its own timeout. Measured on an offline simulator: a name already in the
- * cache failed its connection in 6ms, while a name that had to be resolved took **25 seconds** in
- * `curl` and left Safari on a white screen past 35. A tester reads that as the toggle not working.
+ * **Outbound UDP to port 53, and nothing else. Each of the three conditions is the reason, not a
+ * belt-and-braces check.**
  *
- * Allowing resolution turns every case into the first one: the name resolves, and the connection that
- * follows is dropped at 6ms with the app none the wiser about which step failed.
+ * A dropped UDP flow gives its sender nothing — no error, no reset — so a resolver whose query is
+ * dropped waits out its own timeout. Measured on an offline simulator: a name already in the cache
+ * failed its connection in 6ms, while a name that had to be resolved took **25 seconds** in `curl`
+ * and left Safari on a white screen past 35. A tester reads that as the toggle not working. Allowing
+ * resolution turns every case into the first one: the name resolves, and the connection that follows
+ * is dropped at 6ms.
  *
- * **It is not the fidelity loss it looks like.** A real device with no signal fails resolution too —
- * but layer 2 already refuses `getaddrinfo` inside the app under test, so the app tapflow exists to
- * test still sees name resolution fail. What changes is the traffic of processes layer 2 cannot reach
- * (WebKit, and every other app in the simulator), which today hang instead of failing.
+ * **TCP is excluded because it never had the problem.** A dropped TCP flow fails in 6ms, measured —
+ * so opening TCP/53 would buy nothing and would leave a simulator reported offline holding a
+ * bidirectional connection to anything listening on 53, which is the shape a DNS tunnel takes.
  *
- * **Encrypted DNS is not covered and that is not an oversight.** DNS-over-TLS has a port of its own
- * (853) and could be added here; DNS-over-HTTPS shares 443 with everything else and could not. Neither
- * is here because nothing has measured whether a simulator whose host is configured for either
- * actually uses it — and widening the hole on a guess is what this comment exists to avoid.
+ * **Inbound is excluded because `remotePort` means the other end.** For an inbound flow that is the
+ * *sender's* port, so a peer sending from source port 53 would otherwise reach a device the tester
+ * was told is offline.
+ *
+ * **It is not the fidelity loss it looks like, but it is more than nothing** — see the note in
+ * `AGENTS.md`. The app under test keeps failing name resolution only where it uses POSIX
+ * `getaddrinfo`; `URLSession` resolves through Network.framework, which layer 2 does not reach, so
+ * that path now resolves and fails at connect instead.
+ *
+ * **Encrypted DNS is not covered.** DNS-over-TLS has a port of its own (853) and could be added;
+ * DNS-over-HTTPS shares 443 and could not. Neither is here because nothing has measured whether a
+ * simulator whose host is configured for either actually uses it.
  */
-func passesRegardlessOfRule(remotePort: Int?) -> Bool {
-    remotePort == dnsPort
+func passesRegardlessOfRule(remotePort: Int?, isUDP: Bool, isOutbound: Bool) -> Bool {
+    isOutbound && isUDP && remotePort == dnsPort
 }

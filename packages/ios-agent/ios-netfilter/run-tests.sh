@@ -57,5 +57,9 @@ mutate "dns: always allow"       's/remotePort == dnsPort/true/'                
 mutate "dns: never allow"        's/remotePort == dnsPort/false/'                              || fails=1
 mutate "dns: nil allowed too"    's/remotePort == dnsPort/remotePort == dnsPort || remotePort == nil/' || fails=1
 mutate "dns: port 853 too"       's/let dnsPort = 53/let dnsPort = 853/'                       || fails=1
+mutate "dns: ignore protocol"    's/isOutbound \&\& isUDP \&\& remotePort == dnsPort/isOutbound \&\& remotePort == dnsPort/' || fails=1
+mutate "dns: ignore direction"   's/isOutbound \&\& isUDP \&\& remotePort == dnsPort/isUDP \&\& remotePort == dnsPort/'     || fails=1
+mutate "port: 0 is a port"       's/raw > 0, raw <= 65535/raw >= 0, raw <= 65535/'                 || fails=1
+mutate "port: no upper bound"    's/raw > 0, raw <= 65535/raw > 0/'                                || fails=1
 restore
 [[ $fails -eq 0 ]] && echo "=== all mutations killed ===" || { echo "=== a mutation survived ==="; exit 1; }

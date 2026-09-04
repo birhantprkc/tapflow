@@ -539,14 +539,31 @@ simulator: a name already in the resolver's cache failed its connection in **6ms
 had to be resolved took **25 seconds** in `curl` and left Safari on a white screen past **35**. That
 is the symptom this whole section exists for — it reads as the toggle not working.
 
-So `handleNewFlow` allows port 53 whatever the rule says, which turns every case into the fast one:
+So `handleNewFlow` allows **outbound UDP** to port 53 whatever the rule says, which turns every case
+into the fast one:
 the name resolves, and the connection that follows is dropped at 6ms. **Measured after: `curl` 0.52s,
 Safari 2s.**
 
-**It costs less fidelity than it looks like.** Layer 2 already refuses `getaddrinfo` inside the app
-under test, so *that* app still sees resolution fail the way a real device would. What changes is the
-traffic of processes layer 2 cannot reach — WebKit, and every other app in the simulator — which
-until now hung instead of failing.
+**It costs less fidelity than it looks like — but more than the first draft of this paragraph said.**
+Layer 2 hooks POSIX `getaddrinfo`, so an app resolving that way still fails the way a real device
+would. **`URLSession` does not resolve that way.** It goes through Network.framework, which layer 2
+does not reach — measured in this session: the probe's `URLSession` timed out at `-1001` with layer 2
+armed, which is what proved the POSIX hook is not on its path. So a `URLSession` app now resolves the
+name and fails at connect, where a device with no signal would have failed the lookup.
+
+That matters for one shape of app: one that treats "the name resolved" as "I am online". It will draw
+an online banner over a device that can reach nothing. `network-hook.m` says of that hook that "the
+specific failure is unobservable, so nothing is claimed about it" — this paragraph is what keeps the
+rest of the tree from claiming it anyway.
+
+What is unambiguously true is the other half: the traffic of processes layer 2 cannot reach at all —
+WebKit, other apps in the simulator — used to hang for 25 to 35 seconds and now fails in about two.
+
+**TCP/53 and inbound flows are not allowed**, and each exclusion is the reason rather than caution.
+A dropped TCP flow already fails in 6ms, so opening TCP/53 would buy none of the fix while letting a
+device reported offline hold a bidirectional connection to anything listening there — the shape a DNS
+tunnel takes. And on an inbound flow the remote port is the *sender's*, so a peer sending from source
+port 53 would otherwise reach a device the tester was told is offline.
 
 **The port comes from `NEFilterSocketFlow.remoteEndpoint`, and that it can be read at all was the
 question the change was gated on.** Measured on iOS 26.4: every flow reported a port, none
