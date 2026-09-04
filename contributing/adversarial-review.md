@@ -115,7 +115,12 @@ reached the defect, one for the same reason a day's work later, and one whose fi
 file the running lens was already reading. Nothing was missing from the reviews. The re-grade simply
 did not happen, which is what happens to a step that produces no artifact.
 
-So the shape to try is to give the reviewer no verdict to write, and three facts instead:
+**The gate above stays as it is.** What follows is a shape to try alongside it, not a replacement —
+the `now`/`later` column and the `later` budget have nine measured issues behind them and this has
+three, so removing them on this evidence would be the mistake it is trying to describe. Try it in a
+prompt, keep the column, and see which one the author actually uses.
+
+The shape is to add three facts and let the disposition fall out of them:
 
 | field | what it must contain |
 |---|---|

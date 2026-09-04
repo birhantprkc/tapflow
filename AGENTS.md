@@ -193,16 +193,18 @@ never happened, the way any step with no artifact does not happen. In the same s
 testing was run every single time, because `run-tests.sh --mutate` prints a line per mutation and
 fails loudly.
 
-So the candidate fix is **not more emphasis on that bullet** — writing a lesson down reads as having
+A candidate answer is **not more emphasis on that bullet** — writing a lesson down reads as having
 applied it ([test-and-guard-coverage.md](./contributing/test-and-guard-coverage.md) rule 1). It is to
-stop asking the reviewer for a verdict at all and ask for the two facts that make the disposition
-arithmetic: **is there a reaching path** (a concrete consumer or sequence, or "none found"), and
-**how many lines is the fix**. No reaching path is not an issue, it is a comment beside the code. The
-prompt shape is in [adversarial-review.md](./contributing/adversarial-review.md).
+ask the reviewer for facts instead of a verdict: **a reaching path** (a concrete consumer or sequence,
+or "none found"), **the fix in lines**, and **which lens it needs**. No reaching path is not an issue,
+it is a comment beside the code. The three fields are defined in
+[adversarial-review.md](./contributing/adversarial-review.md).
 
-**That is an observation with three data points, one author and one area — not a rule yet.** It is
-here because the count is worth knowing, and because the next few reviews are what decide it: fewer
-issues that close within the hour, or the same rate with a longer prompt.
+**Nothing above changes yet.** The `now`/`later` column and the budget stay exactly as the three
+bullets describe them, and a reviewer prompt should still ask for them — that shape has nine measured
+issues behind it and this one has three, from one author in one area. It is written down because the
+count is worth knowing, not because it has earned a replacement. What decides it is the next few
+reviews: fewer issues that close within the hour, or the same rate with a longer prompt.
 
 And the parent keeps a checklist. Asked whether #607 was finished, nobody could answer — the feature's
 remaining surface existed only as unlinked rows in a tracker sorted by date.
