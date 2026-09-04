@@ -61,6 +61,23 @@ ios-netfilter/
   전달까지 **55ms 이하**(실측). 다만 `saveToPreferences`의 성공은 저장이 받아들여졌다는 뜻뿐이고
   확인 응답이 없다. **"XPC mach service가 등록에 실패했다"고 적혀 있던 것은 틀렸다** — 리스너는
   1ms 안에 답한다(실측 0.26–0.74ms). **그래서 이제 확인은 XPC로 한다** — 아래 `--confirm`.
+- **이름 해석(포트 53)은 룰과 무관하게 통과시킨다.** UDP를 drop하면 발신자에게 아무 에러도 안 가서,
+  질의가 막힌 리졸버는 자기 타임아웃까지 매달린다. 실측(오프라인 시뮬): 캐시에 있는 이름은 연결이
+  **6ms**에 실패하는데, 해석이 필요한 이름은 `curl` **25초**, Safari는 **35초를 넘겨도 흰 화면**이었다.
+  테스터는 그걸 토글이 안 먹은 것으로 읽는다. 통과시키면 모든 경우가 첫 번째가 된다 — 이름은 풀리고
+  연결이 6ms에 죽는다. **적용 후 실측: `curl` 0.52초, Safari 2초.**
+
+  **충실도 손실로 보이는 만큼은 아니다.** 2층이 대상 앱 안에서 `getaddrinfo`를 이미 거절하므로,
+  tapflow가 테스트하려는 그 앱은 여전히 이름 해석 실패를 본다. 바뀌는 것은 2층이 못 닿는 프로세스
+  (WebKit과 시뮬 안의 다른 앱들)의 트래픽이고, 그쪽은 지금까지 실패 대신 매달리고 있었다.
+
+  포트는 `NEFilterSocketFlow.remoteEndpoint`에서 읽는다 — iOS 26.4에서 **판독 가능함을 실측**했고
+  (`unreadable` 0건), 로그가 어느 프로퍼티가 답했는지까지 남긴다. 판별 자체는
+  `Extension/FlowIdentity.swift`의 순수 함수이고 Swift 테스트가 붙어 있다.
+
+  **암호화 DNS는 안 덮는다.** DoT(853)는 포트가 있어 열 수 있고 DoH(443)는 못 가린다. 둘 다 안 넣은
+  이유는 호스트가 그렇게 설정된 맥에서 시뮬이 실제로 그걸 쓰는지 **아무도 측정하지 않았기 때문**이다.
+  추측으로 구멍을 넓히지 않는다.
 - **loopback은 예외 코드가 필요 없다**: content filter가 루프백 flow를 아예 받지 않는다(실측 —
   offline 지정된 시뮬의 `127.0.0.1` 요청 5회 전부 성공, 같은 구간 `handleNewFlow` 0건). Metro dev
   서버와 XCUITest tree runner가 이 경로다.
@@ -149,7 +166,7 @@ invalidated after a failed init
 
 ```json
 {"at":1787503422,"pulseSeconds":1,"rule":["<udid>"],
- "flows":{"simulator":116,"host":90,"unresolved":0,"dropped":24},
+ "flows":{"simulator":116,"host":90,"unresolved":0,"dropped":24,"idle":0,"dnsAllowed":12},
  "attribution":{"walks":206,"avgMicros":319.7}}
 ```
 
@@ -179,6 +196,9 @@ fail-open이다. 15초 임계값은 그 구멍을 **덮는 게 아니라 못 본
 - `rule` — **실행 중인 provider가 실제로 들고 있는 offline 집합.** 저장된 설정이 아니라 집행 중인
   것이라, exit code가 못 하는 말을 한다. 이게 없으면 필터가 죽어도 컨트롤은 "조종 가능"이라고 한다.
 - `unresolved` — 귀속이 **실패한** flow. 호스트 flow와 다르다. 여전히 allow하지만(아래) 셀 수 있다.
+- `dnsAllowed` — 오프라인 기기인데 이름 해석이라 통과시킨 flow. **`dropped`와 따로 센다**: 섞으면
+  "집행 중"의 증거가 흐려진다. `dropped`가 0인데 `dnsAllowed`만 오르는 것은 앱이 이름만 풀고 아직
+  연결을 안 한 정상 상태다.
 - `avgMicros` — flow당 부모 walk 비용. 캐시를 붙일지 판단하려면 이 숫자가 먼저다.
 
 **해결 불가 flow는 allow한다.** `sysctl` 일시 오류에 fail-closed하면 사용자 브라우저를 끊는다 — 이
@@ -294,7 +314,10 @@ log show --start "<시각>" --predicate 'subsystem == "dev.tapflow.netfilter"' -
 ## Open Questions
 
 - **배포 매체** — `bin/` committed prebuilt vs CI release asset.
-- **에러 코드** — 1층이 주는 것은 `-1005`(연결이 끊김)이고 신호 없는 실기는 `-1009`(인터넷 없음)다.
-  앱의 오프라인 분기가 후자로 쓰여 있으면 다른 가지를 탄다.
+- ~~**에러 코드**~~ — **닫혔다(조사 결과).** 1층이 주는 것은 `-1005`이고 실기는 `-1009`인데, 그 차이는
+  좁힐 수 없다. `-1009`는 커널 NECP가 만들고, NECP 세션을 여는 `necp_session_open`은
+  **platform binary만** 통과시킨다(XNU `bsd/net/necp.c`). Developer ID + notarize는 그 플래그를 영원히
+  못 얻으므로 엔타이틀먼트로 열리는 문제가 아니다. 실제로 앱이 받는 errno는 `-1005`보다도 나쁜
+  `EBADF`인데(실측), CFIL이 connect 도중 소켓을 헐어버리는 타이밍 부수효과다.
 - **`NENetworkRule` init** — macOS 15에서 deprecated. 지금은 룰 없이 `defaultAction: .filterData`로
   전량을 `handleNewFlow`에 받으므로 쓰지 않는다. 룰 기반으로 좁힐 때 최신 API를 확인할 것.

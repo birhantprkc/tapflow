@@ -14,6 +14,7 @@
 		B9EB98A005AB4F6624AB6336 /* NetFilterXPC.swift in Sources */ = {isa = PBXBuildFile; fileRef = C25D42D3D2B228816EA7E762 /* NetFilterXPC.swift */; };
 		EAAB4D2F265070333719C272 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF867352E788B5D199B6533A /* main.swift */; };
 		F5137EB914E55831493692EB /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0CDE906FDC73B161BA5D1C10 /* main.swift */; };
+		FAFD1C83502C8C97B77AB0B8 /* FlowIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = DB3E4F72359FE28D6623F356 /* FlowIdentity.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -50,6 +51,7 @@
 		C111B5C2387C9F74B90F719C /* Provider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Provider.swift; sourceTree = "<group>"; };
 		C25D42D3D2B228816EA7E762 /* NetFilterXPC.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetFilterXPC.swift; sourceTree = "<group>"; };
 		D2FD6F612A509F232BE16F3E /* IPCListener.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IPCListener.swift; sourceTree = "<group>"; };
+		DB3E4F72359FE28D6623F356 /* FlowIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FlowIdentity.swift; sourceTree = "<group>"; };
 		FEA8687E0D5DB021E56B18B1 /* TapflowNetFilter.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = TapflowNetFilter.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		FF867352E788B5D199B6533A /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -86,6 +88,7 @@
 			isa = PBXGroup;
 			children = (
 				1F9E7D610872A4CD7579C356 /* Extension.entitlements */,
+				DB3E4F72359FE28D6623F356 /* FlowIdentity.swift */,
 				189934EAACC140743935067B /* Info.plist */,
 				D2FD6F612A509F232BE16F3E /* IPCListener.swift */,
 				FF867352E788B5D199B6533A /* main.swift */,
@@ -196,6 +199,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				FAFD1C83502C8C97B77AB0B8 /* FlowIdentity.swift in Sources */,
 				A487BFF363CBC58C4C27665F /* IPCListener.swift in Sources */,
 				59B2F5CC9B41626052345E26 /* NetFilterXPC.swift in Sources */,
 				1EB5A4DC002983B05480C21D /* Provider.swift in Sources */,

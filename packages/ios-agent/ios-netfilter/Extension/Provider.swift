@@ -1,4 +1,5 @@
 import NetworkExtension
+import Network
 import Darwin
 import os.log
 
@@ -141,6 +142,9 @@ private final class Heartbeat {
     private var flowsUnresolved = 0
     private var flowsDropped = 0
     private var flowsIdle = 0
+    /// Flows an offline simulator was allowed anyway because they are name resolution. Counted apart
+    /// from `dropped` so that "the filter is enforcing" keeps meaning what the agent reads it to mean.
+    private var flowsDns = 0
     /**
      * Drops, per device (#654).
      *
@@ -167,7 +171,7 @@ private final class Heartbeat {
     /// them as host flows would put a number in the file meaning "we decided this belonged to the
     /// Mac", when nothing decided anything. The file is read to diagnose, and a diagnosis built on an
     /// invented decision is worse than a missing one.
-    enum Outcome { case simulator(dropped: Bool, udid: String), host, unresolved, idle }
+    enum Outcome { case simulator(dropped: Bool, udid: String), host, unresolved, idle, dns(udid: String) }
 
     /**
      * Candidates, in order — **and every one of them has to be readable by the agent**, which runs
@@ -232,6 +236,7 @@ private final class Heartbeat {
         case .host: flowsHost += 1
         case .unresolved: flowsUnresolved += 1
         case .idle: flowsIdle += 1
+        case .dns: flowsDns += 1
         }
         // Only a walk that ran is a walk. Counting the `pid <= 0` short circuit diluted the average
         // with samples that measured nothing.
@@ -334,7 +339,7 @@ private final class Heartbeat {
         json += ",\"rule\":\(rules)"
         json += ",\"flows\":{\"simulator\":\(flowsSimulator),\"host\":\(flowsHost)"
         json += ",\"unresolved\":\(flowsUnresolved),\"dropped\":\(flowsDropped)"
-        json += ",\"idle\":\(flowsIdle)}"
+        json += ",\"idle\":\(flowsIdle),\"dnsAllowed\":\(flowsDns)}"
         // **The store is pruned, not a copy of it** — and the difference is the whole value of the
         // field. `filter` returns a new dictionary, so an earlier version left the counts in memory
         // while publishing a pruned view: take a device offline, drop twelve flows, bring it back
@@ -546,12 +551,51 @@ class Provider: NEFilterDataProvider {
 
         case .simulator(let udid):
             let drop = rule.contains(udid)
-            os_log("handleNewFlow pid=%{public}d udid=%{public}@ asid=%{public}u verdict=%{public}@",
-                   log: log, type: .default, pid, udid, asid, drop ? "DROP" : "allow")
-            heartbeat.note(.simulator(dropped: drop, udid: udid), walkNanos: walkNanos, rule: rule, ruleChanged: ruleChanged)
-            return drop ? .drop() : .allow()
+            // **Asked only where it can change the answer.** A flow that was going to be allowed does
+            // not need to know its port, and reading the endpoint costs an allocation per flow.
+            if drop {
+                let (port, how) = remotePort(of: flow)
+                if passesRegardlessOfRule(remotePort: port) {
+                    os_log("handleNewFlow pid=%{public}d udid=%{public}@ asid=%{public}u verdict=allow(dns port=%{public}d via %{public}@)",
+                           log: log, type: .default, pid, udid, asid, port ?? -1, how)
+                    heartbeat.note(.dns(udid: udid), walkNanos: walkNanos, rule: rule, ruleChanged: ruleChanged)
+                    return .allow()
+                }
+                // **The measurement this build exists to take** (#607 A2-0): whether the endpoint is
+                // readable at all on this OS, and through which property. Logged for every dropped
+                // flow rather than sampled, because a port that reads as `-1` here is the difference
+                // between this feature working and not, and it must not depend on catching a sample.
+                os_log("handleNewFlow pid=%{public}d udid=%{public}@ asid=%{public}u verdict=DROP port=%{public}d via %{public}@",
+                       log: log, type: .default, pid, udid, asid, port ?? -1, how)
+                heartbeat.note(.simulator(dropped: true, udid: udid), walkNanos: walkNanos, rule: rule, ruleChanged: ruleChanged)
+                return .drop()
+            }
+            os_log("handleNewFlow pid=%{public}d udid=%{public}@ asid=%{public}u verdict=allow",
+                   log: log, type: .default, pid, udid, asid)
+            heartbeat.note(.simulator(dropped: false, udid: udid), walkNanos: walkNanos, rule: rule, ruleChanged: ruleChanged)
+            return .allow()
         }
     }
+}
+
+/**
+ * The remote port of a flow, and which property gave it up.
+ *
+ * **Two properties, because which one answers is the open question.** `remoteEndpoint` is deprecated
+ * since macOS 15 but is the one every shipping content filter reads; `remoteFlowEndpoint` is its
+ * replacement. The second name is returned with the port so a log line says what worked rather than
+ * only what the answer was — if a future OS empties one, that shows up as the channel changing rather
+ * than as a port that mysteriously stops being readable.
+ */
+private func remotePort(of flow: NEFilterFlow) -> (port: Int?, how: String) {
+    guard let socketFlow = flow as? NEFilterSocketFlow else { return (nil, "not-a-socket-flow") }
+    if let host = socketFlow.remoteEndpoint as? NWHostEndpoint, let p = Int(host.port), p > 0 {
+        return (p, "remoteEndpoint")
+    }
+    if let e = socketFlow.remoteFlowEndpoint, case let .hostPort(host: _, port: p) = e {
+        return (Int(p.rawValue), "remoteFlowEndpoint")
+    }
+    return (nil, "unreadable")
 }
 
 // MARK: - pid → UDID
@@ -622,12 +666,7 @@ private func procArgs(_ pid: pid_t) -> String? {
     return String(decoding: text, as: UTF8.self)
 }
 
-// .../Devices/<UDID>/... — a UDID is a 36-character uppercase UUID.
-private func extractUDID(from text: String) -> String? {
-    guard let marker = text.range(of: "/Devices/") else { return nil }
-    let udid = text[marker.upperBound...].prefix { $0 != "/" }
-    return udid.count == 36 ? String(udid) : nil
-}
+// `extractUDID(from:)` lives in `FlowIdentity.swift` — see the note there for why.
 
 // launchd_sim outlives every flow of the simulator it hosts, so caching by its identity holds for the
 // whole boot and the per-flow cost stays at the parent walk. Only positive results are cached: a host

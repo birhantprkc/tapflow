@@ -507,7 +507,7 @@ mechanism alone produces a result a tester would sign off on and be wrong about*
 
 | | what it does | what it alone gets wrong |
 |---|---|---|
-| **1. host content filter** (`ios-netfilter`) | drops that simulator's flows at the kernel | the app still believes it is online — measured: traffic dead, `NWPathMonitor` reporting `satisfied` for the life of the process — and a pooled connection keeps working |
+| **1. host content filter** (`ios-netfilter`) | drops that simulator's flows at the kernel, **except name resolution** | the app still believes it is online — measured: traffic dead, `NWPathMonitor` reporting `satisfied` for the life of the process — and a pooled connection keeps working |
 | **2. injected dylib** (`bin/libtapflow-nethook.dylib`) | fakes the path status and **cuts the sockets the app already holds** | blocks nothing: faking `nw_path_get_status` does not stop `URLSession`, which reads the kernel's real path |
 | **3. status bar** | stops showing service | pixels |
 
@@ -530,6 +530,40 @@ which is shared by every simulator on the runtime. The cache is keyed on `(pid, 
 bare pid: `launchd_sim`'s pid is reused readily, and a bare key attributes flows to simulators that
 no longer exist, which cuts a device nobody asked to cut with every log line agreeing it was right.
 `asid` looks like a cheaper key and is not one — two simulators share an asid.
+
+#### Layer 1 lets name resolution through, and that is the difference between 2 seconds and 35
+
+**A dropped UDP flow tells its sender nothing.** No error, no reset — so a resolver whose query is
+dropped waits out its own timeout, and the tester watches a spinner. Measured on an offline
+simulator: a name already in the resolver's cache failed its connection in **6ms**, while a name that
+had to be resolved took **25 seconds** in `curl` and left Safari on a white screen past **35**. That
+is the symptom this whole section exists for — it reads as the toggle not working.
+
+So `handleNewFlow` allows port 53 whatever the rule says, which turns every case into the fast one:
+the name resolves, and the connection that follows is dropped at 6ms. **Measured after: `curl` 0.52s,
+Safari 2s.**
+
+**It costs less fidelity than it looks like.** Layer 2 already refuses `getaddrinfo` inside the app
+under test, so *that* app still sees resolution fail the way a real device would. What changes is the
+traffic of processes layer 2 cannot reach — WebKit, and every other app in the simulator — which
+until now hung instead of failing.
+
+**The port comes from `NEFilterSocketFlow.remoteEndpoint`, and that it can be read at all was the
+question the change was gated on.** Measured on iOS 26.4: every flow reported a port, none
+`unreadable`. The log records which property answered (`remoteEndpoint` or `remoteFlowEndpoint`), so
+a future OS emptying one shows up as the channel changing rather than as a port that silently stops
+being readable. The decision itself is a pure function in `Extension/FlowIdentity.swift` with Swift
+tests and mutations behind it.
+
+**Counted apart from `dropped`.** The state file carries `dnsAllowed`, because folding it into
+`dropped` would blur the one number that says the filter is enforcing. A device whose app has
+resolved a name and not yet connected shows `dropped: 0` with `dnsAllowed` rising, which is a normal
+state rather than a failure.
+
+**Encrypted DNS is not covered, deliberately.** DoT has a port of its own (853) and could be added;
+DoH shares 443 and could not. Neither is there because nothing has measured whether a simulator whose
+host is configured for either actually uses it, and widening the hole on a guess is the failure mode
+this file keeps recording.
 
 #### The host cannot revoke a connection it allowed
 
@@ -734,6 +768,46 @@ already done, so the dashboard interrupts rather than re-colours.
   with tapflow's extension installed — silently, because the class *reports* a missing container app
   rather than failing. `IOSAgent` points its `SimulatorNetwork` at a nonexistent host binary under
   vitest, and `options.network` injects one.
+
+#### The filter's Swift has tests now, and CI cannot run them
+
+```bash
+pnpm --filter @tapflowio/ios-agent test:netfilter            # run them
+packages/ios-agent/ios-netfilter/run-tests.sh --mutate       # run them, then prove they hold
+```
+
+**Not part of `pnpm test`, on purpose.** That is vitest and CI runs it on `ubuntu-latest`; there is no
+macOS runner in `ci.yml`. So this is a check a Mac contributor runs by hand, and wiring it into the
+suite would only break the suite everywhere else. The constraint is #690's own shape rather than this
+script's: the filter's Swift is testable only where Xcode is.
+
+**What is testable is what does not read the kernel.** Attribution walks the process tree with
+`sysctl`, reads `KERN_PROCARGS2`, calls `proc_pidpath` — none of which stands up in a unit test. Peel
+those away and what is left is `Extension/FlowIdentity.swift`: a string arrived and a device
+identifier has to come out of it. That file exists to be the seam, which is why its function is
+`internal` rather than `private` — `tests.yml` compiles it **into** the test bundle, because a system
+extension cannot be linked by one.
+
+**`--mutate` is the half that matters.** Four of the seven tests assert that something is *not*
+found, and a test asserting absence passes when nothing happens — that is its definition, so a green
+run is not evidence it holds anything
+([contributing/test-and-guard-coverage.md](../../contributing/test-and-guard-coverage.md) rule 2).
+The flag breaks the parse five ways and requires each one to fail a test. Its first draft could not
+have done that: `run()` piped `xcodebuild` into `grep` and returned *grep's* status, so a mutation
+that did not even compile would have been reported as killed.
+
+**The spec is `tests.yml`, deliberately separate from `project.yml`.** `project.yml` is one of the
+four enumerated inputs to the extension's version stamp, so a test target declared there would make
+every test-only edit bump `CFBundleVersion` — and that replaces the system extension on every
+self-hoster's Mac, stopping all new connections while it happens. A new file at `ios-netfilter/`'s top
+level is not an input unless `EXT_SOURCE_FILES` names it, so this spec is free. The generated
+`TapflowNetFilterTests.xcodeproj` is gitignored, unlike the shipping one.
+
+**Do not run bare `xcodegen generate` to check a build.** It rewrites both `Info.plist`s with the
+literal `CURRENT_PROJECT_VERSION` from `project.yml` — `1` — discarding the committed
+`CFBundleVersion` that `shipped.json` records. `build.sh` patches them back immediately, so the
+release path is safe and only a hand-run generate leaves it wrong. Check `git status` afterwards.
+`run-tests.sh` generates from `tests.yml` alone and does not touch them.
 
 #### Building the system extension
 

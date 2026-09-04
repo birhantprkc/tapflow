@@ -1,0 +1,42 @@
+# The netfilter's Swift test project — **deliberately not part of `project.yml`.**
+#
+# `project.yml` is one of the four enumerated inputs to the extension's version stamp
+# (`scripts/lib/netfilter-artifact.mjs`), so putting a test target there would make every test-only
+# edit bump `CFBundleVersion` — and a bumped version replaces the system extension on every
+# self-hoster's Mac, which stops all new connections while it happens. A file at this directory's top
+# level is not an input unless it is named in `EXT_SOURCE_FILES`, so this spec is free.
+#
+# It compiles the extension's pure sources directly rather than linking the extension: a system
+# extension is not loadable by a test bundle, and `Provider.swift` reaches the kernel on every path.
+# See `Extension/FlowIdentity.swift` for what "pure" means here.
+name: TapflowNetFilterTests
+options:
+  bundleIdPrefix: dev.tapflow
+  deploymentTarget:
+    macOS: "15.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5"
+    # No Developer ID here. The shipping project signs with a paid team because a system extension
+    # will not load otherwise; a logic-test bundle has no such requirement, and demanding the identity
+    # would stop a contributor without the team from running the tests at all.
+    CODE_SIGN_IDENTITY: "-"
+    CODE_SIGN_STYLE: Manual
+    CODE_SIGNING_REQUIRED: NO
+    ENABLE_HARDENED_RUNTIME: NO
+targets:
+  FilterLogicTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - Extension/FlowIdentity.swift
+      - Tests
+schemes:
+  FilterLogicTests:
+    build:
+      targets:
+        FilterLogicTests: [test]
+    test:
+      targets:
+        - FilterLogicTests
