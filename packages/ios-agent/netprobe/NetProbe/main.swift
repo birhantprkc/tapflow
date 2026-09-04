@@ -43,6 +43,12 @@ private func say(_ line: String) {
 // MARK: - 2. SCNetworkReachability — the getter and the listener, kept apart
 
 private var reachRef: SCNetworkReachability?
+/// A **second** target, scheduled on the main run loop rather than a dispatch queue. The two ways of
+/// scheduling are hooked separately, so a probe that exercised only one would report a covered API as
+/// covered while the other silently did nothing.
+private var reachRunLoopRef: SCNetworkReachability?
+private var runLoopBelievesReachable: Bool?
+private var runLoopFireCount = 0
 /// **What a callback-driven consumer believes**, updated only from the callback. Never from the
 /// getter — writing it there would paper over the exact gap this probe exists to show.
 private var listenerBelievesReachable: Bool?
@@ -61,6 +67,29 @@ private func reachabilityChanged(_ target: SCNetworkReachability,
     listenerBelievesReachable = flagsAreReachable(flags)
     say("sc listener FIRED #\(listenerFireCount) flags=0x\(String(flags.rawValue, radix: 16)) " +
         "reachable=\(flagsAreReachable(flags))")
+}
+
+/// A C function pointer, like the one above, for the run-loop-scheduled target.
+private func reachabilityChangedOnRunLoop(_ target: SCNetworkReachability,
+                                          _ flags: SCNetworkReachabilityFlags,
+                                          _ info: UnsafeMutableRawPointer?) {
+    runLoopFireCount += 1
+    runLoopBelievesReachable = flagsAreReachable(flags)
+    say("sc runloop-listener FIRED #\(runLoopFireCount) flags=0x\(String(flags.rawValue, radix: 16)) " +
+        "reachable=\(flagsAreReachable(flags))")
+}
+
+private func startReachabilityOnRunLoop() {
+    guard let ref = SCNetworkReachabilityCreateWithName(nil, "example.org") else {
+        say("sc runloop-listener could not be created"); return
+    }
+    reachRunLoopRef = ref
+    var ctx = SCNetworkReachabilityContext(version: 0, info: nil, retain: nil, release: nil, copyDescription: nil)
+    let set = SCNetworkReachabilitySetCallback(ref, reachabilityChangedOnRunLoop, &ctx)
+    let sched = SCNetworkReachabilityScheduleWithRunLoop(ref, CFRunLoopGetMain(), CFRunLoopMode.defaultMode.rawValue)
+    say("sc runloop-listener registered setCallback=\(set) scheduleWithRunLoop=\(sched)")
+    var f = SCNetworkReachabilityFlags()
+    if SCNetworkReachabilityGetFlags(ref, &f) { runLoopBelievesReachable = flagsAreReachable(f) }
 }
 
 private func startReachability() {
@@ -138,6 +167,9 @@ private func tick() {
     let listener = listenerBelievesReachable.map { $0 ? "reachable" : "NOT-reachable" } ?? "unset"
     let agree = getter == listener ? "" : "   <-- DISAGREE: the callback has not re-fired"
     say("sc getter=\(getter) listener=\(listener) fires=\(listenerFireCount)\(agree)")
+    let rl = runLoopBelievesReachable.map { $0 ? "reachable" : "NOT-reachable" } ?? "unset"
+    let rlAgree = getter == rl ? "" : "   <-- DISAGREE: the run-loop callback has not re-fired"
+    say("sc runloop-listener=\(rl) fires=\(runLoopFireCount)\(rlAgree)")
     say("nwpath status=\(lastPathStatus.map(String.init(describing:)) ?? "unset")")
     say("getaddrinfo example.com=\(resolves("example.com")) localhost=\(resolves("localhost"))")
     fetch("fresh", "https://example.com/?tf=\(Int(Date().timeIntervalSince1970))")
@@ -153,6 +185,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
             "dyld=\(ProcessInfo.processInfo.environment["DYLD_INSERT_LIBRARIES"] ?? "-")")
         startPathMonitor()
         startReachability()
+        startReachabilityOnRunLoop()
         Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { _ in tick() }
         return true
     }

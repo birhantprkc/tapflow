@@ -228,7 +228,7 @@ function buildNetFilterChecks(): DoctorCheck[] {
  * `scripts/__tests__/hookSymbolsChecked.test.mjs`, which reads `wanted[]` and fails when they differ.
  */
 /**
- * Seven, from two tables in `network-hook.m` — four path hooks and three reachability hooks. The
+ * Nine, from two tables in `network-hook.m` — four path hooks and five reachability hooks. The
  * second set is all-or-none separately from the first, but a symbol a new Xcode stops exporting takes
  * it down just the same, and this list is the only thing that says so before a tester finds out by
  * launching an app.
@@ -241,6 +241,7 @@ function buildNetFilterChecks(): DoctorCheck[] {
 const HOOK_SYMBOLS = [
   'getaddrinfo', 'nw_path_get_status', 'nw_path_monitor_set_update_handler', 'nw_path_monitor_set_queue',
   'SCNetworkReachabilityGetFlags', 'SCNetworkReachabilitySetCallback', 'SCNetworkReachabilitySetDispatchQueue',
+  'SCNetworkReachabilityScheduleWithRunLoop', 'SCNetworkReachabilityUnscheduleFromRunLoop',
 ]
 
 /** The SDK stubs that between them declare everything the hook needs. */

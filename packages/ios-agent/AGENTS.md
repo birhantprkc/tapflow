@@ -589,10 +589,20 @@ all** — traffic dead, and the app never told.
 taught and is measured here too. A consumer does not poll: it registers a callback, caches what the
 callback last told it, and recomputes only inside that callback. Before `SCNetworkReachabilitySetCallback`
 was hooked, `netprobe/` recorded the getter flipping to NOT-reachable within a tick while the listener
-sat on `reachable` for the whole offline period, `fires=1` throughout. So the set is
-`GetFlags` + `SetCallback` + `SetDispatchQueue`, and `tf_push_reachability_update` replays each
-registered callout **on the queue its owner chose** — the same #640 discipline as the path push, for
-the same reason.
+sat on `reachable` for the whole offline period, `fires=1` throughout.
+
+So the set is five: `GetFlags`, `SetCallback`, and **both** ways a consumer can say where its callback
+runs — `SetDispatchQueue` and `ScheduleWithRunLoop`/`UnscheduleFromRunLoop`.
+`tf_push_reachability_update` replays each registered callout **where its owner asked for it**, on a
+queue with `dispatch_async` or on a run loop with `CFRunLoopPerformBlock` plus a wake-up. Same #640
+discipline as the path push, for the same reason.
+
+**The run-loop half was nearly left out on a reason that was false.** A draft covered only the queue
+and said the run-loop case could not be re-fired because we cannot know which run loop a callback
+belongs to. `SCNetworkReachabilityScheduleWithRunLoop` is handed the run loop *and* the mode and
+passes both through — the claim described a symbol nobody had looked up, and it had already reached a
+limitation note in the user guide before anyone checked. It is written here because the shape recurs:
+an unchecked "we cannot" is how a gap becomes documentation instead of a fix.
 
 **The app's callout is wrapped rather than registered, and the reason is narrower than it looks.**
 A review predicted that handing the app's own function to the framework would leave SC's *own*
@@ -625,15 +635,10 @@ and `tf_install` does not even attempt these patches when the path set failed. P
 dead layer 2 would take references on the app's objects and keep a target alive past the point the
 framework would have destroyed it, in exchange for a replay that could never happen.
 
-Two gaps are open and recorded rather than closed:
-
-- **A consumer scheduled with `SCNetworkReachabilityScheduleWithRunLoop` is not re-fired.** No queue is
-  recorded for it, so the push skips it and logs. Guessing a run loop is the defect #640 ended.
-  Alamofire and current `Reachability.swift` both take the dispatch-queue path.
-- **The agent cannot see this set fail.** The verdict file is one boolean and, by the decision above,
-  a reachability refusal does not make it false — so a tester with an Alamofire app gets no signal.
-  That is no worse than before this set existed, but whether the verdict should speak per set is
-  undecided.
+One gap is open and recorded rather than closed: **the agent cannot see this set fail.** The verdict
+file is one boolean and, by the decision above, a reachability refusal does not make it false — so a
+tester whose app reads this API gets no signal. That is no worse than before the set existed, but
+whether the verdict should speak per set is undecided.
 
 #### `netprobe/` is how any of this is checked
 

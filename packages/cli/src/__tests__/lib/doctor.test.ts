@@ -453,10 +453,11 @@ describe('Network hook symbols (#629)', () => {
     mockReadFileSync.mockReturnValue(declared as never)
   }
 
-  // Seven, from two tables in `network-hook.m`. `hookSymbolsChecked.test.mjs` is what keeps this list
+  // Nine, from two tables in `network-hook.m`. `hookSymbolsChecked.test.mjs` is what keeps this list
   // and `HOOK_SYMBOLS` from drifting from the dylib; this one is about what `doctor` does with them.
   const ALL = '_getaddrinfo _nw_path_get_status _nw_path_monitor_set_update_handler _nw_path_monitor_set_queue'
     + ' _SCNetworkReachabilityGetFlags _SCNetworkReachabilitySetCallback _SCNetworkReachabilitySetDispatchQueue'
+    + ' _SCNetworkReachabilityScheduleWithRunLoop _SCNetworkReachabilityUnscheduleFromRunLoop'
 
   it('passes when the SDK declares every symbol, and names the SDK it read', async () => {
     withSdk(ALL)

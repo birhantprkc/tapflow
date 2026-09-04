@@ -81,12 +81,12 @@ function checked() {
 
 describe('doctor checks the symbols the hook actually needs', () => {
   it('reads both lists, so neither side can be empty and pass', () => {
-    // Anti-vacuity from the measured count: seven in each — four path hooks plus three reachability
+    // Anti-vacuity from the measured count: nine in each — four path hooks plus five reachability
     // hooks. Two regexes that matched nothing would satisfy the comparison below by finding two empty
     // lists equal. **Set from the count, not rounded down**, so adding a set without adding it to
     // `doctor` cannot slip under a stale floor.
-    expect(rebound().length, 'the rebinding tables parsed as empty').toBeGreaterThanOrEqual(7)
-    expect(checked().length, "doctor's list parsed as empty").toBeGreaterThanOrEqual(7)
+    expect(rebound().length, 'the rebinding tables parsed as empty').toBeGreaterThanOrEqual(9)
+    expect(checked().length, "doctor's list parsed as empty").toBeGreaterThanOrEqual(9)
   })
 
   it('looks for exactly what is rebound', () => {

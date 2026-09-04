@@ -714,7 +714,7 @@ static void tf_write_verdict(BOOL ok) {
 // `NetworkReachabilityManager` and the older `Reachability.swift` both read it, so an app built on
 // either showed no offline banner at all.
 //
-// **Three hooks, and none of them is the optional one.**
+// **Five hooks, and none of them is the optional one.**
 //
 //   `GetFlags`          — what a poll returns.
 //   `SetCallback`       — **what a consumer actually reads.** These libraries do not poll: they
@@ -722,6 +722,8 @@ static void tf_write_verdict(BOOL ok) {
 //                         Measured with `netprobe/` before this existed: the getter flipped within one
 //                         tick while the listener sat on `reachable` for the whole offline period.
 //   `SetDispatchQueue`  — where a replayed callback is allowed to run (#640).
+//   `ScheduleWithRunLoop` / `UnscheduleFromRunLoop`
+//                       — the same question for a consumer that uses a run loop instead.
 //
 // **The app's callout is wrapped rather than registered, and the reason is narrower than it looks.**
 // An earlier version handed the app's own function straight to `SCNetworkReachabilitySetCallback`,
@@ -750,6 +752,8 @@ static Boolean (*o_SCNetworkReachabilityGetFlags)(SCNetworkReachabilityRef, SCNe
 static Boolean (*o_SCNetworkReachabilitySetCallback)(SCNetworkReachabilityRef, SCNetworkReachabilityCallBack,
                                                      SCNetworkReachabilityContext *);
 static Boolean (*o_SCNetworkReachabilitySetDispatchQueue)(SCNetworkReachabilityRef, dispatch_queue_t);
+static Boolean (*o_SCNetworkReachabilityScheduleWithRunLoop)(SCNetworkReachabilityRef, CFRunLoopRef, CFStringRef);
+static Boolean (*o_SCNetworkReachabilityUnscheduleFromRunLoop)(SCNetworkReachabilityRef, CFRunLoopRef, CFStringRef);
 
 /// Gates this set alone. Same technique and reason as `g_hooks_live`: the patch cannot be removed, so
 /// a half-installed set is neutered rather than uninstalled.
@@ -775,6 +779,9 @@ typedef struct {
   const void *(*retain)(const void *);
   void (*release)(const void *);
   dispatch_queue_t __unsafe_unretained queue;
+  /// `@[@{@"rl": NSValue(CFRunLoopRef), @"mode": NSString}]`. A target may be scheduled on more than
+  /// one, which the framework allows, so this is a list rather than a slot.
+  NSArray *__unsafe_unretained runloops;
 } tf_reach_entry;
 
 /// Reads one entry out of the dictionary. **Caller must already hold `g_handler_queue`.**
@@ -786,7 +793,8 @@ static BOOL tf_reach_read(id key, tf_reach_entry *out) {
   out->info    = [e[@"info"] pointerValue];
   out->retain  = (const void *(*)(const void *))[e[@"retain"] pointerValue];
   out->release = (void (*)(const void *))[e[@"release"] pointerValue];
-  out->queue   = e[@"queue"];
+  out->queue    = e[@"queue"];
+  out->runloops = e[@"runloops"];
   return YES;
 }
 
@@ -910,6 +918,70 @@ static Boolean tf_SCNetworkReachabilitySetDispatchQueue(SCNetworkReachabilityRef
 }
 
 /**
+ * Where a run-loop-scheduled callout is allowed to run — the run-loop twin of `SetDispatchQueue`.
+ *
+ * **An earlier version left this unhooked and said the reason was that we could not know which run
+ * loop a callback belonged to. That was simply false**: the API is handed both the run loop and the
+ * mode, and passes them straight through. What the claim actually described was a symbol nobody had
+ * looked up. It cost a limitation in the user guide before anyone checked.
+ *
+ * A list rather than a slot, because the framework lets one target be scheduled on several.
+ */
+static Boolean tf_SCNetworkReachabilityScheduleWithRunLoop(SCNetworkReachabilityRef target,
+                                                           CFRunLoopRef runLoop,
+                                                           CFStringRef runLoopMode) {
+  if (!tf_reach_live()) return o_SCNetworkReachabilityScheduleWithRunLoop(target, runLoop, runLoopMode);
+  Boolean ok = o_SCNetworkReachabilityScheduleWithRunLoop(target, runLoop, runLoopMode);
+  if (!ok || target == NULL || runLoop == NULL || runLoopMode == NULL) return ok;
+  id key = @((uintptr_t)target);
+  NSString *mode = (__bridge NSString *)runLoopMode;
+  dispatch_sync(g_handler_queue, ^{
+    NSMutableDictionary *e = [g_reach[key] mutableCopy] ?: [NSMutableDictionary dictionary];
+    NSMutableArray *rls = [e[@"runloops"] mutableCopy] ?: [NSMutableArray array];
+    for (NSDictionary *r in rls) {
+      if ([r[@"rl"] pointerValue] == (void *)runLoop && [r[@"mode"] isEqualToString:mode]) return;
+    }
+    // Retained for as long as it is recorded: a run loop belonging to a thread that has since exited
+    // would otherwise be a freed object by the time the push reaches it. A block performed on a run
+    // loop nobody is running simply never fires, which is the harmless half.
+    CFRetain(runLoop);
+    [rls addObject:@{ @"rl": [NSValue valueWithPointer:runLoop], @"mode": mode }];
+    e[@"runloops"] = rls;
+    g_reach[key] = e;
+  });
+  return ok;
+}
+
+static Boolean tf_SCNetworkReachabilityUnscheduleFromRunLoop(SCNetworkReachabilityRef target,
+                                                             CFRunLoopRef runLoop,
+                                                             CFStringRef runLoopMode) {
+  if (!tf_reach_live()) return o_SCNetworkReachabilityUnscheduleFromRunLoop(target, runLoop, runLoopMode);
+  Boolean ok = o_SCNetworkReachabilityUnscheduleFromRunLoop(target, runLoop, runLoopMode);
+  if (target == NULL || runLoop == NULL || runLoopMode == NULL) return ok;
+  // **Recorded whatever the call returned.** A consumer tearing down asks to be unscheduled; if the
+  // framework says it was not scheduled, continuing to replay to it is the wrong half to keep.
+  id key = @((uintptr_t)target);
+  NSString *mode = (__bridge NSString *)runLoopMode;
+  __block CFRunLoopRef drop = NULL;
+  dispatch_sync(g_handler_queue, ^{
+    NSMutableDictionary *e = [g_reach[key] mutableCopy];
+    if (e == nil) return;
+    NSMutableArray *rls = [e[@"runloops"] mutableCopy];
+    for (NSUInteger i = 0; i < rls.count; i++) {
+      if ([rls[i][@"rl"] pointerValue] == (void *)runLoop && [rls[i][@"mode"] isEqualToString:mode]) {
+        drop = runLoop;
+        [rls removeObjectAtIndex:i];
+        break;
+      }
+    }
+    if (rls.count > 0) e[@"runloops"] = rls; else [e removeObjectForKey:@"runloops"];
+    g_reach[key] = e.count > 0 ? e : nil;
+  });
+  if (drop != NULL) CFRelease(drop);
+  return ok;
+}
+
+/**
  * Re-fire every registered reachability callout with what the getter now says.
  *
  * **This covers the change the framework has no reason to report** — the condition file moving. The
@@ -925,10 +997,11 @@ static Boolean tf_SCNetworkReachabilitySetDispatchQueue(SCNetworkReachabilityRef
  * correct path, not only the careless one: a consumer told it is offline, tearing down the screen it
  * showed, calls `stopListening()` from exactly there.
  *
- * **A target with no recorded queue is skipped and logged, not fired somewhere.** That is a real gap
- * rather than a defensive branch: a consumer scheduled with `SCNetworkReachabilityScheduleWithRunLoop`
- * is not covered, and the honest answer for it is that we do not know which run loop its callback
- * belongs to. Alamofire and current `Reachability.swift` both use the dispatch-queue path.
+ * **Both delivery paths, because a consumer chooses one and the choice is not ours.** A dispatch queue
+ * and a run loop are the two ways `SCNetworkReachability` can be scheduled; covering only the first
+ * was a control that worked for Alamofire and silently did nothing for anything older. A target
+ * scheduled on neither is skipped without a log — the framework does not call it either, so there is
+ * nothing anomalous to report.
  */
 static void tf_push_reachability_update(void) {
   __block NSArray *keys;
@@ -939,28 +1012,52 @@ static void tf_push_reachability_update(void) {
     __block BOOL found = NO;
     dispatch_sync(g_handler_queue, ^{
       if (!tf_reach_read(key, &e)) return;
-      if (e.queue == nil) return;
+      // Nowhere to deliver: a consumer that registered a callout and scheduled nothing gets no
+      // callbacks from the framework either, so replaying to it would be inventing a delivery.
+      if (e.queue == nil && e.runloops.count == 0) return;
       // Taken under the queue, so the unregister path cannot run between the read and the retain.
       CFRetain(e.target);
       if (e.retain != NULL && e.info != NULL) e.info = (void *)e.retain(e.info);
       found = YES;
     });
-    if (!found) {
-      // Distinguishes "no callback registered here" from the gap worth naming.
-      __block BOOL hasCallout = NO;
-      dispatch_sync(g_handler_queue, ^{ hasCallout = g_reach[key][@"callout"] != nil; });
-      if (hasCallout) os_log_error(tf_log(), "no queue recorded for a reachability target — not re-firing its callback");
-      continue;
-    }
+    if (!found) continue;
     SCNetworkReachabilityFlags f = 0;
     // Through the hooked getter, so the replayed value and a poll cannot disagree.
     BOOL got = SCNetworkReachabilityGetFlags(e.target, &f);
     tf_reach_entry snap = e;
-    dispatch_async(snap.queue, ^{
+    // **One reference, one delivery.** The references taken above are dropped by whichever path runs,
+    // so a target scheduled on both a queue and a run loop takes a second pair for the second
+    // delivery rather than sharing one and releasing it twice.
+    void (^deliver)(void) = ^{
       if (got) snap.callout(snap.target, f, snap.info);
       if (snap.release != NULL && snap.info != NULL) snap.release(snap.info);
       CFRelease(snap.target);
-    });
+    };
+    if (snap.queue != nil) {
+      dispatch_async(snap.queue, deliver);
+    } else {
+      deliver = nil;   // the queue path owns the references; the run-loop path takes its own below
+      if (snap.release != NULL && snap.info != NULL) snap.release(snap.info);
+      CFRelease(snap.target);
+    }
+    for (NSDictionary *r in snap.runloops) {
+      CFRunLoopRef rl = (CFRunLoopRef)[r[@"rl"] pointerValue];
+      CFRetain(snap.target);
+      void *info = snap.info;
+      if (snap.retain != NULL && info != NULL) info = (void *)snap.retain(info);
+      SCNetworkReachabilityRef t = snap.target;
+      SCNetworkReachabilityCallBack cb = snap.callout;
+      void (*rel)(const void *) = snap.release;
+      // **On the run loop and mode its owner named** — the same #640 discipline the queue path
+      // follows. `CFRunLoopPerformBlock` only enqueues; without the wake-up a run loop already
+      // sleeping does not notice until something else stirs it.
+      CFRunLoopPerformBlock(rl, (__bridge CFStringRef)r[@"mode"], ^{
+        if (got) cb(t, f, info);
+        if (rel != NULL && info != NULL) rel(info);
+        CFRelease(t);
+      });
+      CFRunLoopWakeUp(rl);
+    }
   }
 }
 
@@ -1029,6 +1126,12 @@ static void tf_install(void) {
      (void **)&o_SCNetworkReachabilitySetCallback},
     {"SCNetworkReachabilitySetDispatchQueue", tf_SCNetworkReachabilitySetDispatchQueue,
      (void **)&o_SCNetworkReachabilitySetDispatchQueue},
+    // The run-loop twin. Not optional either: without it a consumer scheduled that way is registered
+    // and never replayed, which is a control that works for some apps and silently not for others.
+    {"SCNetworkReachabilityScheduleWithRunLoop", tf_SCNetworkReachabilityScheduleWithRunLoop,
+     (void **)&o_SCNetworkReachabilityScheduleWithRunLoop},
+    {"SCNetworkReachabilityUnscheduleFromRunLoop", tf_SCNetworkReachabilityUnscheduleFromRunLoop,
+     (void **)&o_SCNetworkReachabilityUnscheduleFromRunLoop},
   };
   BOOL reachInstalled = NO;
   if (installed) {
