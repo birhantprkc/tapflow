@@ -42,7 +42,10 @@ and waiting out sleeps.
 
 - **Only use an isolated worktree when the reviewer must edit files.** A fresh worktree has no
   `node_modules` and no `dist`, so it pays 8–10 minutes of install and build before it can run
-  anything — and a reviewer that does not know this reports results from commands that silently did
+  anything — **the first time on a machine.** After that pnpm's store is warm and shared across
+  worktrees: `pnpm install --frozen-lockfile` in a second worktree of the same clone was measured at
+  **5.3 seconds**, and only `pnpm build` still costs minutes. The number above is the cold case, and
+  reading it as the general one is what kept a session from running its suite for hours — and a reviewer that does not know this reports results from commands that silently did
   nothing (`vitest: command not found` swallowed by a shell exit). A read-only lens (contract,
   compatibility, documentation) can work against the primary checkout, which is already built.
 - **Say what to install.** When a worktree is required, the prompt must open with
@@ -102,6 +105,42 @@ and waiting out sleeps.
   differ — and that is the case the paragraph above this one is about. So the reviewer checks
   `git status --porcelain` as well, and treats either signal as reason to read blobs. Asking only for
   the hash is a check that reads as covering both and covers one.
+
+## Ask the reviewer for facts, not for a disposition
+
+The gate above asks for a `now`/`later` column and a `later` budget, and the root
+[AGENTS.md](../AGENTS.md) then asks the author to re-grade every one. **Measured once: three issues
+filed off that column and all three closed again within the session** — one because no consumer
+reached the defect, one for the same reason a day's work later, and one whose fix was six lines in a
+file the running lens was already reading. Nothing was missing from the reviews. The re-grade simply
+did not happen, which is what happens to a step that produces no artifact.
+
+**The gate above stays as it is.** What follows is a shape to try alongside it, not a replacement —
+the `now`/`later` column and the `later` budget have nine measured issues behind them and this has
+three, so removing them on this evidence would be the mistake it is trying to describe. Try it in a
+prompt, keep the column, and see which one the author actually uses.
+
+The shape is to add three facts and let the disposition fall out of them:
+
+| field | what it must contain |
+|---|---|
+| **reaching path** | a concrete consumer or call sequence that hits it, **or the words "none found"** |
+| **fix size** | lines, for the smallest honest fix — not the ideal one |
+| **lens** | the one already running, or which other one it needs |
+
+The disposition is then close to arithmetic and the author has nothing to defer to. **"None found" is
+not a `later`; it is a comment beside the code**, which is where the invariant belonged in two of the
+three cases above — `g_queues` carries exactly such an argument for why address reuse is harmless
+there, and the code the issues were about carried none.
+
+**Write the three fields and the disposition into `.work/reviews/<branch>.md` per finding.** That is
+the artifact the re-grade never had: a skipped one shows up as an empty column instead of as nothing
+at all. A check could assert the fields are non-empty, but it would be a spelling assertion — a floor,
+not a fence.
+
+**This is one session's evidence, from one author in one area.** It is written here rather than in the
+gate because the gate's current shape is what produced the measurement, and replacing a rule that has
+its own measurement behind it needs more than three data points.
 
 ## The cleared list ages with the diff
 
