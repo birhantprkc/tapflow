@@ -541,8 +541,8 @@ is the symptom this whole section exists for — it reads as the toggle not work
 
 So `handleNewFlow` allows **outbound UDP** to port 53 whatever the rule says, which turns every case
 into the fast one:
-the name resolves, and the connection that follows is dropped at 6ms. **Measured after: `curl` 0.52s,
-Safari 2s.**
+the name resolves, and the connection that follows is dropped at 6ms. **Measured after: the request costs whatever the lookup costs — `curl` 0.3–0.6s across
+runs, Safari 2s.** A single number here would not reproduce.
 
 **It costs less fidelity than it looks like — but more than the first draft of this paragraph said.**
 Layer 2 hooks POSIX `getaddrinfo`, so an app resolving that way still fails the way a real device

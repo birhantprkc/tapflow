@@ -35,9 +35,14 @@ echo "=== baseline (must PASS) ==="
 run && echo "  PASS" || { echo "  FAIL — fix the tests before mutating"; grep -E "error:" "$LOG" | head; exit 1; }
 
 SRC=Extension/FlowIdentity.swift
-cp "$SRC" /tmp/FlowIdentity.orig.swift
-restore () { cp /tmp/FlowIdentity.orig.swift "$SRC"; }
-trap restore EXIT
+# **`mktemp`, not a fixed path.** The interesting half is not the backup but the restore: a name
+# anything else on the machine can pre-create is a name it can replace, and `restore` writes whatever
+# is there back into a source file that gets built into a signed system extension.
+ORIG=$(mktemp -t FlowIdentity.orig) || exit 1
+cp "$SRC" "$ORIG"
+restore () { cp "$ORIG" "$SRC"; }
+cleanup () { restore; rm -f "$ORIG"; }
+trap cleanup EXIT
 
 mutate () {   # $1 = label, $2 = sed program
   restore
