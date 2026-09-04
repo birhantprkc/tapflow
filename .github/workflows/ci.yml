@@ -52,6 +52,41 @@ jobs:
 
       - run: pnpm test
 
+  # **The filter's Swift, which the job above cannot touch.**
+  #
+  # `#690` reads as "the network filter's Swift has no tests, and that is ours rather than the
+  # platform's". Half of that was a missing runner rather than missing tests: the sources under test
+  # import nothing but `Foundation`, but `run-tests.sh` drives `xcodegen` and `xcodebuild`, so it needs
+  # Xcode. **Free for a public repository**, which is why it was worth looking at twice.
+  #
+  # **`--mutate`, not a plain run.** Four of the tests assert that something is *not* allowed, and a
+  # test asserting absence passes when nothing happens — that is its definition. The flag breaks the
+  # sources fifteen ways and requires each one to fail a test, which is the only thing that makes a
+  # green run evidence (`contributing/test-and-guard-coverage.md` rule 2). It runs the suite sixteen
+  # times; the suite is one Swift file and its tests, so that is seconds.
+  #
+  # **Pinned image, deliberately.** The point of a newer Xcode dropping a symbol is caught by
+  # `doctor`'s SDK check against the developer's own SDK, not here — so an image that rolls forward
+  # would only break somebody's unrelated PR on a morning nobody chose. Bumping this line is how that
+  # change gets reviewed.
+  #
+  # **No `paths:` filter.** It would make this cheap to skip, and a skipped check that `ci` requires
+  # counts as passing — the same mechanism the `changeset` job below uses on purpose.
+  netfilter-swift:
+    runs-on: macos-15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # `tests.yml` is a spec, not a project: the `.xcodeproj` is generated on every run and
+      # gitignored, so that a test-only edit cannot bump the extension's `CFBundleVersion`.
+      - run: brew install xcodegen
+
+      - run: packages/ios-agent/ios-netfilter/run-tests.sh --mutate
+
   # `protect-main` requires the status check named `ci`. A matrix reports per-leg contexts
   # (`test (22)`, `test (24)`) and never one called `ci`, so the matrix lives in `test` and this
   # job carries the required name. Changing the matrix stays a code change — the ruleset, which
@@ -62,7 +97,7 @@ jobs:
   # exactly how the `changeset` job below exempts bot PRs. Without the assertion it has no step
   # that can fail, so it always succeeds. Either omission makes the gate decorative.
   ci:
-    needs: [test]
+    needs: [test, netfilter-swift]
     if: always()
     runs-on: ubuntu-latest
     permissions:
@@ -70,9 +105,21 @@ jobs:
     steps:
       # `needs.test.result` rolls up the whole matrix: it is `success` only if every leg was.
       # `failure`, `cancelled` and `skipped` all fail the assertion, so every path fails safe.
+      #
+      # Index syntax for the macOS job, not `needs.netfilter-swift.result`: a hyphen in property
+      # position is the same character as subtraction, and an expression that resolves to an empty
+      # string would make the assertion below compare `""` and fail in a way that reads as the job
+      # having failed. Brackets are unambiguous.
+      #
+      # **The macOS job is asserted the same way and from its first commit.** Waiting for it to prove
+      # itself before wiring it in would have shipped exactly the decorative gate the comment above
+      # this job warns about — and a runner that cannot build the project is something a PR should
+      # fail on, which is what a PR is for.
       - run: |
           echo "test result: ${{ needs.test.result }}"
+          echo "netfilter-swift result: ${{ needs['netfilter-swift'].result }}"
           [ "${{ needs.test.result }}" = "success" ]
+          [ "${{ needs['netfilter-swift'].result }}" = "success" ]
 
   changeset:
     permissions:
