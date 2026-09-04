@@ -578,9 +578,11 @@ Four rules there are load-bearing, and each is a hole something already fell int
 
 `SCNetworkReachability` is what Alamofire's `NetworkReachabilityManager` and the older
 `Reachability.swift` read, and **the path hooks do not cover it.** SystemConfiguration's modern
-implementation does sit on Network.framework, but it gets there through `nw_path_create_evaluator` /
-`nw_path_copy_*` rather than `nw_path_get_status`, so the hook that fakes the path for `NWPathMonitor`
-leaves this API answering truthfully. An app built on either library showed **no offline banner at
+implementation does sit on Network.framework, but it gets there through the
+`nw_path_create_evaluator_for_*` family rather than `nw_path_get_status`, so the hook that fakes the
+path for `NWPathMonitor` leaves this API answering truthfully. (The family is
+`nw_path_create_evaluator_for_endpoint` and its siblings — there is no bare
+`nw_path_create_evaluator`, and an earlier draft of this paragraph named one.) An app built on either library showed **no offline banner at
 all** — traffic dead, and the app never told.
 
 **Faking the getter alone moves a number nobody reads**, which is the same lesson `nw_path_monitor`
@@ -592,16 +594,36 @@ sat on `reachable` for the whole offline period, `fires=1` throughout. So the se
 registered callout **on the queue its owner chose** — the same #640 discipline as the path push, for
 the same reason.
 
-**The `info` pointer is retained.** The framework retains it for as long as the registration lives, so
-this must too: Alamofire hands over itself, and replaying through a pointer it has already released is
-a crash in the app under test.
+**The app's callout is wrapped rather than registered, and the reason is narrower than it looks.**
+A review predicted that handing the app's own function to the framework would leave SC's *own*
+callbacks unmasked, breaking the case a tester reaches first — device offline, *then* launch the app,
+where the watcher records `last = tf_offline()` at start and never pushes. **Measured, that does not
+happen**: with only the getter patched, SC's registration callback in exactly that scenario carried
+`flags=0x0`. The inference is that SC computes the flags it delivers through the public getter this
+file patches. The trampoline is kept for the weaker reason that survives — that behaviour is an
+undocumented internal, nothing promises it holds, and the failure if it changes is a consumer told it
+is online while its traffic is dead. The rationale beside the code says the same; it is written down
+because a prediction that measurement refutes is worth keeping visible.
 
-**Why this set is separate from the path set, rather than folded in.** The path set is interdependent —
-faking the status without capturing the handlers tells an app a lie it is never corrected about — and
-that argument holds *within* this pair as well. It does not hold *between* them. If these three
-cannot be patched, an `NWPathMonitor` app still gets a correct banner and an SC app is left exactly
-where it was before any of this existed. Folding them into one set would trade that for a strictly
-worse failure: one unpatchable symbol taking layer 2 down for the apps it already served.
+**The `info` pointer is retained, and so is the target, across a replay.** The framework retains
+`info` for as long as the registration lives, so this must too — Alamofire hands over itself. And the
+push takes its own references before dispatching: the path version snapshots into an `NSArray` which
+retains what it replays, while here the target and `info` are raw pointers, and an unregister landing
+between the snapshot and the async call would free both. That is reachable on the *correct* path — a
+consumer told it is offline, tearing down the screen it showed, calls `stopListening()` from exactly
+there.
+
+**Why this set is separate from the path set, and in which direction.** The path set is
+interdependent — faking the status without capturing the handlers tells an app a lie it is never
+corrected about — and that argument holds *within* this set as well. It does not hold *between* them:
+if these three cannot be patched, an `NWPathMonitor` app still gets a correct banner, where folding
+them into one set would let one unpatchable symbol take layer 2 down for the apps it already served.
+
+**The independence runs one way, and reading it as mutual is wrong.** These replacements read
+`tf_blocking`, which is gated on the path set — so the reachability set additionally *requires* it,
+and `tf_install` does not even attempt these patches when the path set failed. Patching them over a
+dead layer 2 would take references on the app's objects and keep a target alive past the point the
+framework would have destroyed it, in exchange for a replay that could never happen.
 
 Two gaps are open and recorded rather than closed:
 
@@ -626,7 +648,8 @@ xcrun simctl launch --console <udid> dev.tapflow.netprobe
 
 **Flip the device with the condition file, not the filter rule**, when the agent is running:
 `touch /tmp/tapflow-offline-<udid>` exercises layer 2 alone and leaves layer 1's rule — and therefore
-a running agent's view of the world — untouched. The app's README has the arming steps.
+a running agent's view of the world — untouched. The arming steps are in the header of
+`netprobe/build.sh`.
 
 It is committed because the last one was not. `TFNetProbe` was built during #607, every measurement in
 that program came from it, and it survived only as an unsigned binary on one Mac — so none of those

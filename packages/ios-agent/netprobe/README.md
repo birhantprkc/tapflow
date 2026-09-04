@@ -6,7 +6,7 @@
 | 무엇 | 2층이 훅하나 | 누가 읽나 |
 |---|---|---|
 | `NWPathMonitor` | 한다 | 현대적인 앱의 오프라인 배너 |
-| `SCNetworkReachability` | **아직 안 한다** | Alamofire `NetworkReachabilityManager`, 구형 `Reachability.swift` |
+| `SCNetworkReachability` | 한다 (**단, run loop로 스케줄한 소비자는 재발화 안 됨**) | Alamofire `NetworkReachabilityManager`, 구형 `Reachability.swift` |
 | `URLSession` | 못 한다 (커널의 진짜 경로를 읽는다) | 요청 결과로 분기하는 코드 |
 | `getaddrinfo` | 한다 | 직접 이름을 푸는 코드 |
 
@@ -22,6 +22,11 @@ Alamofire 같은 소비자는 폴링하지 않는다. 콜백을 등록하고, �
 ```
 sc getter=NOT-reachable listener=reachable fires=1   <-- DISAGREE: the callback has not re-fired
 ```
+
+**이 줄이 지금 나온다면 셋 중 하나다** — dylib이 무장되지 않았거나(`TAPFLOW_TARGET_BUNDLE` 미설정),
+reachability 훅 세트가 설치에 실패했거나(`log`에 `reachability hooks NOT installed`), 소비자가 run
+loop로 스케줄해서 재발화 대상이 아니거나. 훅이 붙어 있고 디스패치 큐를 쓰는 소비자라면 이 줄은 안
+나온다.
 
 ## 쓰는 법
 

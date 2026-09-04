@@ -227,10 +227,28 @@ function buildNetFilterChecks(): DoctorCheck[] {
  * `getaddrinfo` appears in its symbol table at all (measured). So the two lists are kept in step by
  * `scripts/__tests__/hookSymbolsChecked.test.mjs`, which reads `wanted[]` and fails when they differ.
  */
-const HOOK_SYMBOLS = ['getaddrinfo', 'nw_path_get_status', 'nw_path_monitor_set_update_handler', 'nw_path_monitor_set_queue']
+/**
+ * Seven, from two tables in `network-hook.m` — four path hooks and three reachability hooks. The
+ * second set is all-or-none separately from the first, but a symbol a new Xcode stops exporting takes
+ * it down just the same, and this list is the only thing that says so before a tester finds out by
+ * launching an app.
+ *
+ * **Nothing but quoted names goes between the brackets.** `hookSymbolsChecked.test.mjs` counts the
+ * entries by splitting on commas as a cross-check against its own regex, so a comment containing one
+ * makes the two disagree and fails the build — which is the check working, and is why this note is
+ * out here.
+ */
+const HOOK_SYMBOLS = [
+  'getaddrinfo', 'nw_path_get_status', 'nw_path_monitor_set_update_handler', 'nw_path_monitor_set_queue',
+  'SCNetworkReachabilityGetFlags', 'SCNetworkReachabilitySetCallback', 'SCNetworkReachabilitySetDispatchQueue',
+]
 
 /** The SDK stubs that between them declare everything the hook needs. */
-const SDK_STUBS = ['usr/lib/libSystem.tbd', 'System/Library/Frameworks/Network.framework/Network.tbd']
+const SDK_STUBS = [
+  'usr/lib/libSystem.tbd',
+  'System/Library/Frameworks/Network.framework/Network.tbd',
+  'System/Library/Frameworks/SystemConfiguration.framework/SystemConfiguration.tbd',
+]
 
 /**
  * **Does this Xcode still export what the hook rebinds** (#629).
