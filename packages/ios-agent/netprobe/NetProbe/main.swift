@@ -30,6 +30,14 @@ import UIKit
 // Output goes to stdout, which is what `simctl launch --console` reads.
 
 private let queue = DispatchQueue(label: "dev.tapflow.netprobe")
+/// **The listeners write from `queue` and the main run loop; `tick()` reads from the timer.** Without
+/// this the three reads in one line could come from either side of an update, and a report that
+/// straddles a transition is indistinguishable from the disagreement this probe exists to detect.
+private let stateLock = NSLock()
+private func locked<T>(_ body: () -> T) -> T {
+    stateLock.lock(); defer { stateLock.unlock() }
+    return body()
+}
 
 private func say(_ line: String) {
     let t = DateFormatter()
@@ -54,17 +62,26 @@ private var runLoopFireCount = 0
 private var listenerBelievesReachable: Bool?
 private var listenerFireCount = 0
 
+/// **Alamofire's reduction, copied rather than approximated.** The probe's whole claim is "this is what
+/// that library would compute", so a shortcut here would make the claim false even where the result
+/// happens to match. The dial-up-era flags below never appear in a simulator; they are here because
+/// the consumer reads them, not because we have seen one.
 private func flagsAreReachable(_ f: SCNetworkReachabilityFlags) -> Bool {
-    // The same reduction Alamofire makes: reachable, and not merely reachable-if-a-connection-is-made.
-    f.contains(.reachable) && !f.contains(.connectionRequired)
+    let isReachable = f.contains(.reachable)
+    let needsConnection = f.contains(.connectionRequired)
+    let canConnectAutomatically = f.contains(.connectionOnDemand) || f.contains(.connectionOnTraffic)
+    let canConnectWithoutUserInteraction = canConnectAutomatically && !f.contains(.interventionRequired)
+    return isReachable && (!needsConnection || canConnectWithoutUserInteraction)
 }
 
 /// A C function pointer, so it captures nothing and reads the globals above.
 private func reachabilityChanged(_ target: SCNetworkReachability,
                                  _ flags: SCNetworkReachabilityFlags,
                                  _ info: UnsafeMutableRawPointer?) {
-    listenerFireCount += 1
-    listenerBelievesReachable = flagsAreReachable(flags)
+    locked {
+        listenerFireCount += 1
+        listenerBelievesReachable = flagsAreReachable(flags)
+    }
     say("sc listener FIRED #\(listenerFireCount) flags=0x\(String(flags.rawValue, radix: 16)) " +
         "reachable=\(flagsAreReachable(flags))")
 }
@@ -73,8 +90,10 @@ private func reachabilityChanged(_ target: SCNetworkReachability,
 private func reachabilityChangedOnRunLoop(_ target: SCNetworkReachability,
                                           _ flags: SCNetworkReachabilityFlags,
                                           _ info: UnsafeMutableRawPointer?) {
-    runLoopFireCount += 1
-    runLoopBelievesReachable = flagsAreReachable(flags)
+    locked {
+        runLoopFireCount += 1
+        runLoopBelievesReachable = flagsAreReachable(flags)
+    }
     say("sc runloop-listener FIRED #\(runLoopFireCount) flags=0x\(String(flags.rawValue, radix: 16)) " +
         "reachable=\(flagsAreReachable(flags))")
 }
@@ -105,6 +124,15 @@ private func stopReachabilityOnRunLoop() {
     guard let ref = reachRunLoopRef else { return }
     let un = SCNetworkReachabilityUnscheduleFromRunLoop(ref, CFRunLoopGetMain(), CFRunLoopMode.defaultMode.rawValue)
     let cleared = SCNetworkReachabilitySetCallback(ref, nil, nil)
+    guard un && cleared else {
+        // **A partial teardown stays under observation.** Clearing the reference here would make the
+        // next tick print "(torn down)" and stop comparing — so a teardown that half-failed would be
+        // reported in exactly the same words as one that worked, which is the failure this probe is
+        // supposed to expose rather than produce.
+        say("sc runloop-listener TEARDOWN INCOMPLETE unschedule=\(un) setCallback(nil)=\(cleared) " +
+            "— still watched; it may keep firing")
+        return
+    }
     reachRunLoopRef = nil
     say("sc runloop-listener TORN DOWN unschedule=\(un) setCallback(nil)=\(cleared) " +
         "— it must not fire again; the queue listener must keep firing")
@@ -125,8 +153,8 @@ private func startReachability() {
     if SCNetworkReachabilityGetFlags(ref, &f) { listenerBelievesReachable = flagsAreReachable(f) }
 }
 
-private func reachabilityGetterSaysReachable() -> Bool? {
-    guard let ref = reachRef else { return nil }
+private func getterSaysReachable(_ ref: SCNetworkReachability?) -> Bool? {
+    guard let ref else { return nil }
     var f = SCNetworkReachabilityFlags()
     guard SCNetworkReachabilityGetFlags(ref, &f) else { return nil }
     return flagsAreReachable(f)
@@ -139,7 +167,7 @@ private var lastPathStatus: NWPath.Status?
 
 private func startPathMonitor() {
     monitor.pathUpdateHandler = { path in
-        lastPathStatus = path.status
+        locked { lastPathStatus = path.status }
         say("nwpath handler FIRED status=\(path.status)")
     }
     monitor.start(queue: queue)
@@ -181,18 +209,25 @@ private func fetch(_ label: String, _ url: String) {
 // MARK: - the tick
 
 private func tick() {
-    let getter = reachabilityGetterSaysReachable().map { $0 ? "reachable" : "NOT-reachable" } ?? "unreadable"
-    let listener = listenerBelievesReachable.map { $0 ? "reachable" : "NOT-reachable" } ?? "unset"
+    // **Each listener is compared against its own target's getter.** The two watch different names so
+    // that one scheduling path cannot mask the other, and a first version then compared the run-loop
+    // listener against the *queue* target's getter — two names can legitimately differ, so an unarmed
+    // run could print DISAGREE while both callbacks were working.
+    let (listenerCached, listenerFires, rlCached, rlFires) =
+        locked { (listenerBelievesReachable, listenerFireCount, runLoopBelievesReachable, runLoopFireCount) }
+    let word = { (b: Bool?) in b.map { $0 ? "reachable" : "NOT-reachable" } ?? "unset" }
+
+    let getter = getterSaysReachable(reachRef).map { $0 ? "reachable" : "NOT-reachable" } ?? "unreadable"
+    let listener = word(listenerCached)
     let agree = getter == listener ? "" : "   <-- DISAGREE: the callback has not re-fired"
-    say("sc getter=\(getter) listener=\(listener) fires=\(listenerFireCount)\(agree)")
-    // **Two different targets on purpose** — the queue listener watches `example.com` and the
-    // run-loop one `example.org`, so that one scheduling path cannot mask the other. The hook masks
-    // the reachable bit for every target, so comparing the getter of one against the listener of the
-    // other is still sound; it is said out loud because the line does not look like it.
-    let rl = runLoopBelievesReachable.map { $0 ? "reachable" : "NOT-reachable" } ?? "unset"
-    let rlAgree = (reachRunLoopRef == nil || getter == rl) ? "" : "   <-- DISAGREE: the run-loop callback has not re-fired"
-    say("sc runloop-listener=\(rl) fires=\(runLoopFireCount)\(rlAgree)\(reachRunLoopRef == nil ? " (torn down)" : "")")
-    say("nwpath status=\(lastPathStatus.map(String.init(describing:)) ?? "unset")")
+    say("sc getter=\(getter) listener=\(listener) fires=\(listenerFires)\(agree)")
+
+    let torn = reachRunLoopRef == nil
+    let rlGetter = getterSaysReachable(reachRunLoopRef).map { $0 ? "reachable" : "NOT-reachable" } ?? "unreadable"
+    let rl = word(rlCached)
+    let rlAgree = (torn || rlGetter == rl) ? "" : "   <-- DISAGREE: the run-loop callback has not re-fired"
+    say("sc runloop-getter=\(torn ? "-" : rlGetter) runloop-listener=\(rl) fires=\(rlFires)\(rlAgree)\(torn ? " (torn down)" : "")")
+    say("nwpath status=\(locked { lastPathStatus }.map(String.init(describing:)) ?? "unset")")
     say("getaddrinfo example.com=\(resolves("example.com")) localhost=\(resolves("localhost"))")
     fetch("fresh", "https://example.com/?tf=\(Int(Date().timeIntervalSince1970))")
     fetch("loopback", "http://127.0.0.1:8899/")

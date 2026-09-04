@@ -820,12 +820,26 @@ static void tf_reach_trampoline(SCNetworkReachabilityRef target,
                                 void *unused) {
   (void)unused;
   if (tf_reach_blocking()) flags &= ~kSCNetworkReachabilityFlagsReachable;
-  __block tf_reach_entry e = {0};
-  __block BOOL found = NO;
-  dispatch_sync(g_handler_queue, ^{ found = tf_reach_read(@((uintptr_t)target), &e); });
+  // **A reference is taken here for the same reason the push takes one.** `info` is a raw pointer,
+  // and the unregister path releases it; between reading it and calling the app with it, another
+  // thread's `SetCallback(NULL)` can make it the app's freed object. The push was fixed for this and
+  // this function was not, one definition away.
+  __block SCNetworkReachabilityCallBack callout = NULL;
+  __block void *info = NULL;
+  __block void (*releaseFn)(const void *) = NULL;
+  dispatch_sync(g_handler_queue, ^{
+    tf_reach_entry e = {0};
+    if (!tf_reach_read(@((uintptr_t)target), &e)) return;
+    callout = e.callout;
+    info = e.info;
+    releaseFn = e.release;
+    if (e.retain != NULL && info != NULL) info = (void *)e.retain(info);
+  });
+  if (callout == NULL) return;
   // **Called outside the queue**, because it is the app's code and may re-register — which would
   // re-enter this serial queue through `dispatch_sync` and deadlock it inside its own callback.
-  if (found) e.callout(target, flags, e.info);
+  callout(target, flags, info);
+  if (releaseFn != NULL && info != NULL) releaseFn(info);
 }
 
 static Boolean tf_SCNetworkReachabilitySetCallback(SCNetworkReachabilityRef target,

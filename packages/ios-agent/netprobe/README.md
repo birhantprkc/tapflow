@@ -23,9 +23,12 @@ Alamofire 같은 소비자는 폴링하지 않는다. 콜백을 등록하고, �
 sc getter=NOT-reachable listener=reachable fires=1   <-- DISAGREE: the callback has not re-fired
 ```
 
-**이 줄이 지금 나온다면 둘 중 하나다** — dylib이 무장되지 않았거나(`TAPFLOW_TARGET_BUNDLE` 미설정),
-reachability 훅 세트가 설치에 실패했거나(`log`에 `reachability hooks NOT installed`). 훅이 붙어
-있으면 이 줄은 안 나온다.
+**전환 직후 한 틱은 정상이다.** dylib의 감시자는 조건 파일을 500ms마다 보고 프로브는 2초마다 찍으므로,
+틱이 그 사이에 착지하면 getter는 이미 바뀌었고 콜백은 아직이다. 바로 다음 줄에 `FIRED`가 따라오면
+그것이다 — 실측 10ms.
+
+**두 틱 넘게 이어지면 둘 중 하나다** — dylib이 무장되지 않았거나(`TAPFLOW_TARGET_BUNDLE` 미설정),
+reachability 훅 세트가 설치에 실패했거나(`log`에 `reachability hooks NOT installed`).
 
 프로브는 **리스너를 둘** 띄운다. 하나는 디스패치 큐로, 하나는 run loop로 스케줄한다. 두 경로가
 따로 훅되므로, 하나만 시험하면 덮인 API를 덮였다고 보고하면서 다른 하나가 조용히 아무것도 안 하는
