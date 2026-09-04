@@ -540,9 +540,10 @@ had to be resolved took **25 seconds** in `curl` and left Safari on a white scre
 is the symptom this whole section exists for — it reads as the toggle not working.
 
 So `handleNewFlow` allows **outbound UDP** to port 53 whatever the rule says, which turns every case
-into the fast one:
-the name resolves, and the connection that follows is dropped at 6ms. **Measured after: the request costs whatever the lookup costs — `curl` 0.3–0.6s across
-runs, Safari 2s.** A single number here would not reproduce.
+into the fast one: the name resolves, and the connection that follows is dropped at 6ms. **After the
+change, a request costs whatever its lookup costs** — `curl` between 0.3 and 0.6 seconds across runs,
+Safari's error page at 2. The range is the measurement: a single number here would not reproduce,
+because what varies is the lookup.
 
 **It costs less fidelity than it looks like — but more than the first draft of this paragraph said.**
 Layer 2 hooks POSIX `getaddrinfo`, so an app resolving that way still fails the way a real device
