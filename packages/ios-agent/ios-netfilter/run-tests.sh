@@ -18,9 +18,24 @@ PROJ=TapflowNetFilterTests.xcodeproj
 LOG=$(mktemp -t netfilter-tests)
 
 # **Returns xcodebuild's own status.** An earlier version piped into `grep` and reported *its* exit
-# code, so a compile error read as a passing run — which in `--mutate` below would have called every
-# mutation "killed" while nothing was being tested at all.
+# code, so a compile error read as a passing run.
+#
+# **That fixed half of it, and the comment here used to claim the whole.** A non-zero status still says
+# only "something went wrong", and `--mutate` below read any non-zero as "a test caught it" — so a
+# mutation that does not compile was indistinguishable from one a test killed.
+#
+# **The discriminator is `Test Case`, and two more obvious ones are wrong.** `** TEST FAILED **` is
+# printed for a compile error too — measured: `xcodebuild test` reports the *action* failing, not the
+# build, so that line appears either way (a review proposed it and it does not work). `error:` is no
+# good either; an XCTest assertion prints those. What a compile failure never produces is a test case
+# running at all: measured, `Test Case` appears 0 times when the mutation does not build and 30 times
+# when a test kills it.
 run () {
+  # **Emptied first, and that is not tidiness.** The `return` below leaves `$LOG` untouched, so a
+  # failing `xcodegen` would hand `mutate` the *previous* mutation's log — which contains `Test Case`,
+  # and would therefore be read as this mutation having been killed by a test that never ran. The
+  # same hole this file already closed once, reached through a different door.
+  : > "$LOG"
   xcodegen generate --spec tests.yml >/dev/null || return 1
   xcodebuild test -project "$PROJ" -scheme FilterLogicTests -destination 'platform=macOS,arch=arm64' \
     CODE_SIGNING_ALLOWED=NO > "$LOG" 2>&1
@@ -44,11 +59,30 @@ restore () { cp "$ORIG" "$SRC"; }
 cleanup () { restore; rm -f "$ORIG"; }
 trap cleanup EXIT
 
+# **Three ways a mutation can fail to prove anything, and they used to print the same word.**
+#
+#   DID NOT APPLY — the `sed` matched nothing, so the source was never mutated. Says the mutation has
+#                   drifted from the code, not that a test is weak.
+#   SURVIVED      — it compiled, it ran, and every test still passed. The finding this mode exists for.
+#   BUILD BROKE   — it did not compile, so no test ever judged it. Reporting this as `killed` is how a
+#                   suite that tests nothing reads as green, which is the whole failure this file
+#                   guards against.
 mutate () {   # $1 = label, $2 = sed program
   restore
   /usr/bin/sed -i '' "$2" "$SRC"
-  if run >/dev/null 2>&1; then echo "  SURVIVED: $1   <-- a test is decoration"; return 1
-  else echo "  killed:   $1"; fi
+  if cmp -s "$ORIG" "$SRC"; then
+    echo "  DID NOT APPLY: $1   <-- the sed matched nothing; the source moved under it"
+    return 1
+  fi
+  if run >/dev/null 2>&1; then
+    echo "  SURVIVED: $1   <-- it compiled and every test still passed; one of them is decoration"
+    return 1
+  fi
+  if ! grep -q "Test Case" "$LOG"; then
+    echo "  BUILD BROKE: $1   <-- no test case ran, so nothing judged it"
+    return 1
+  fi
+  echo "  killed:   $1"
 }
 
 echo "=== mutations (each must make a test FAIL) ==="

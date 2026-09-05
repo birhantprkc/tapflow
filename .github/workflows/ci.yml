@@ -52,6 +52,75 @@ jobs:
 
       - run: pnpm test
 
+  # **The Swift the job above cannot touch — named for the language, not for today's one suite.**
+  #
+  # Swift is spread across this repo (`ios-netfilter`, `xctest-runner`, `netprobe`, the helper
+  # binaries in `ios-agent/src`) and any of it that grows tests needs Xcode, so it needs this runner.
+  # Naming the job after the one component that has them today would mean a second macOS job per
+  # component, on the scarcest runner there is.
+  #
+  # **It runs one suite, and that is worth saying rather than implying breadth it does not have.**
+  # The other test-looking Swift in the tree, `xctest-runner/TreeRunner/TreeServerTest.swift`, is a
+  # UI-test target that drives a booted simulator — a heavier proposition than a logic suite, and a
+  # decision of its own rather than another line here.
+  #
+  # `#690` reads as "the network filter's Swift has no tests, and that is ours rather than the
+  # platform's". Half of that was a missing runner rather than missing tests: the sources under test
+  # import nothing but `Foundation`, but `run-tests.sh` drives `xcodegen` and `xcodebuild`, so it needs
+  # Xcode. **Free for a public repository**, which is why it was worth looking at twice.
+  #
+  # **`--mutate`, not a plain run.** Four of the tests assert that something is *not* allowed, and a
+  # test asserting absence passes when nothing happens — that is its definition. The flag breaks the
+  # sources fifteen ways and requires each one to fail a test, which is the only thing that makes a
+  # green run evidence (`contributing/test-and-guard-coverage.md` rule 2). It runs the suite sixteen
+  # times; the suite is one Swift file and its tests, so that is seconds.
+  #
+  # **What is pinned, and what a pinned label does not cover.** `macos-15` fixes the OS; it does not
+  # fix Xcode, which GitHub rolls forward inside a label. So the toolchain here will move without this
+  # file changing, and that is worth knowing rather than claiming otherwise — a newer Xcode dropping a
+  # symbol is caught by `doctor`'s SDK check against the developer's own SDK, not by this job.
+  # `xcodegen` **is** pinned, to a release binary rather than `brew install`: unpinned, a formula bump
+  # changes how `tests.yml` is read on a morning nobody chose, and there would be no line to review.
+  #
+  # **No `paths:` filter, and not for the reason a first draft gave.** It claimed a skipped run would
+  # count as passing — the opposite of what `ci` below does, which asserts on this job's `result` and
+  # so fails on `skipped`. `paths:` is a workflow-level key anyway, so filtering would skip `ci` too
+  # and leave the required check unreported, which blocks the merge instead of waving it through.
+  # Either way the filter buys nothing, and the cost it would save is real but modest.
+  test-swift:
+    runs-on: macos-15
+    # The suite is one Swift file and its tests, but the job is `brew`-free installs plus sixteen
+    # `xcodebuild` launches. Bounded because the default is 360 minutes and this is the repository's
+    # only macOS job — a hung run would hold the required check for six hours.
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # `tests.yml` is a spec, not a project: the `.xcodeproj` is generated on every run, so a
+      # test-only edit cannot bump the extension's `CFBundleVersion`.
+      # **The digest, not just the version.** A release asset can be replaced under an existing tag,
+      # so pinning the URL pins what to ask for and not what arrives — and what arrives is unpacked
+      # and run with `sudo`. Checked before anything is extracted. Bumping the version means bumping
+      # this line too, which is the point: the pair is what gets reviewed.
+      - name: Install xcodegen (pinned)
+        env:
+          XCODEGEN_VERSION: 2.46.0
+          XCODEGEN_SHA256: 4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/xcodegen.zip \
+            "https://github.com/yonaskolb/XcodeGen/releases/download/$XCODEGEN_VERSION/xcodegen.zip"
+          echo "$XCODEGEN_SHA256  /tmp/xcodegen.zip" | shasum -a 256 -c -
+          unzip -q /tmp/xcodegen.zip -d /tmp/xcodegen
+          sudo /tmp/xcodegen/xcodegen/install.sh
+          xcodegen --version
+
+      - run: packages/ios-agent/ios-netfilter/run-tests.sh --mutate
+
   # `protect-main` requires the status check named `ci`. A matrix reports per-leg contexts
   # (`test (22)`, `test (24)`) and never one called `ci`, so the matrix lives in `test` and this
   # job carries the required name. Changing the matrix stays a code change — the ruleset, which
@@ -62,7 +131,7 @@ jobs:
   # exactly how the `changeset` job below exempts bot PRs. Without the assertion it has no step
   # that can fail, so it always succeeds. Either omission makes the gate decorative.
   ci:
-    needs: [test]
+    needs: [test, test-swift]
     if: always()
     runs-on: ubuntu-latest
     permissions:
@@ -70,9 +139,20 @@ jobs:
     steps:
       # `needs.test.result` rolls up the whole matrix: it is `success` only if every leg was.
       # `failure`, `cancelled` and `skipped` all fail the assertion, so every path fails safe.
+      #
+      # Index syntax for the macOS job. `needs.test-swift.result` also works — Actions allows a
+      # hyphen in property position — so this is a preference for a form that cannot be misread as
+      # subtraction, not a correctness fix. An earlier comment here claimed it was one.
+      #
+      # **The macOS job is asserted the same way and from its first commit.** Waiting for it to prove
+      # itself before wiring it in would have shipped exactly the decorative gate the comment above
+      # this job warns about — and a runner that cannot build the project is something a PR should
+      # fail on, which is what a PR is for.
       - run: |
           echo "test result: ${{ needs.test.result }}"
+          echo "test-swift result: ${{ needs['test-swift'].result }}"
           [ "${{ needs.test.result }}" = "success" ]
+          [ "${{ needs['test-swift'].result }}" = "success" ]
 
   changeset:
     permissions:
