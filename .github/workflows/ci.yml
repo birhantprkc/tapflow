@@ -102,13 +102,19 @@ jobs:
 
       # `tests.yml` is a spec, not a project: the `.xcodeproj` is generated on every run, so a
       # test-only edit cannot bump the extension's `CFBundleVersion`.
+      # **The digest, not just the version.** A release asset can be replaced under an existing tag,
+      # so pinning the URL pins what to ask for and not what arrives — and what arrives is unpacked
+      # and run with `sudo`. Checked before anything is extracted. Bumping the version means bumping
+      # this line too, which is the point: the pair is what gets reviewed.
       - name: Install xcodegen (pinned)
         env:
           XCODEGEN_VERSION: 2.46.0
+          XCODEGEN_SHA256: 4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806
         run: |
           set -euo pipefail
           curl -fsSL -o /tmp/xcodegen.zip \
             "https://github.com/yonaskolb/XcodeGen/releases/download/$XCODEGEN_VERSION/xcodegen.zip"
+          echo "$XCODEGEN_SHA256  /tmp/xcodegen.zip" | shasum -a 256 -c -
           unzip -q /tmp/xcodegen.zip -d /tmp/xcodegen
           sudo /tmp/xcodegen/xcodegen/install.sh
           xcodegen --version

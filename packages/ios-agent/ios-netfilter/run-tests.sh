@@ -31,6 +31,11 @@ LOG=$(mktemp -t netfilter-tests)
 # running at all: measured, `Test Case` appears 0 times when the mutation does not build and 30 times
 # when a test kills it.
 run () {
+  # **Emptied first, and that is not tidiness.** The `return` below leaves `$LOG` untouched, so a
+  # failing `xcodegen` would hand `mutate` the *previous* mutation's log — which contains `Test Case`,
+  # and would therefore be read as this mutation having been killed by a test that never ran. The
+  # same hole this file already closed once, reached through a different door.
+  : > "$LOG"
   xcodegen generate --spec tests.yml >/dev/null || return 1
   xcodebuild test -project "$PROJ" -scheme FilterLogicTests -destination 'platform=macOS,arch=arm64' \
     CODE_SIGNING_ALLOWED=NO > "$LOG" 2>&1
