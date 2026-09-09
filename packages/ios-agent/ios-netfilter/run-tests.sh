@@ -42,12 +42,20 @@ BIN="$BUNDLE/Contents/MacOS/FilterLogicTests"
 # no `globstar`, so `**` degrades to a single level and drops `Tests/*.swift` entirely — measured, and
 # it would also make the source list depend on which bash a contributor had installed.
 SOURCES=(Extension/FlowIdentity.swift Host/RuleArguments.swift)
-while IFS= read -r f; do SOURCES+=("$f"); done < <(find Tests -name '*.swift' | sort)
-# A failure inside a process substitution does not reach `set -e` — measured: with `find` missing from
-# `PATH` this loop added nothing and the script carried on at rc 0, leaving `SOURCES` as the two pure
-# files. Both consumers would catch it eventually (the guard sees two entries against nine, and a
-# bundle with no tests is now `NO VERDICT` rather than a pass) but three layers away from the cause.
-[[ ${#SOURCES[@]} -gt 2 ]] || { echo "no .swift found under Tests/ — did \`find\` run?" >&2; exit 1; }
+# **Read for its exit status, not only its output**, which a process substitution cannot give: with
+# `find` missing from `PATH` the loop added nothing and the script carried on at rc 0 — measured —
+# leaving `SOURCES` as the two pure files. A count check alone does not cover it either. Discovery
+# that emits some paths and *then* fails leaves more than two entries, so the count passes and the
+# bundle is built from part of the suite, and a mutation aimed at a file that was not compiled is
+# reported killed by tests that never saw it. That is a wrong verdict rather than a missing file,
+# which is the one failure this script may not have.
+if ! found=$(find Tests -name '*.swift' | sort); then
+  echo "could not enumerate Tests/ — refusing to compile a partial suite" >&2
+  exit 1
+fi
+while IFS= read -r f; do [[ -n "$f" ]] && SOURCES+=("$f"); done <<< "$found"
+# And the floor for discovery that succeeds and matches nothing.
+[[ ${#SOURCES[@]} -gt 2 ]] || { echo "no .swift found under Tests/" >&2; exit 1; }
 
 # **Ask the script, do not model it.** The first drift guard reimplemented these rules in JavaScript
 # and got them wrong in the one way that mattered — it expanded the glob recursively, so it reported
