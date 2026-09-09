@@ -227,20 +227,28 @@ jobs:
     # while `xcodebuild` was ~13.5s a launch here — sixteen took 2m35s–3m08s, forty-two 9m27s,
     # eighty-three 17m29s, and 18m03s for the whole job. Building the identical XCTest files with
     # `swiftc` and running them under `xcrun xctest` is **1.9s a cycle**, and the full mutation set
-    # went from 1049s to 222s locally. Dropping mutations was the alternative and it was the wrong
-    # one: nothing about the coverage had to change.
+    # went from 1049s to 222–246s across three local runs. Dropping mutations was the alternative and
+    # it was the wrong one: nothing about the coverage had to change.
     #
     # **The remaining floor is one mutation, and it does not move.** `walk: no bound` removes a bound,
     # so it does not fail an assertion — it spins until `run`'s watchdog kills it at 20s. Everything
     # else got seven times faster and that one did not, which is the shape to expect from any future
-    # bound.
+    # bound; the spread in the range above is `cache: no lock` sometimes landing there too.
     #
-    # Twenty against a run now measured in minutes. **When that stops being enough, the answer is not
-    # to raise it**: the honest options are dropping mutations that no longer aim at a decision, or
-    # running `--mutate` on a narrower trigger than every PR update and leaving the plain suite here.
-    # Bounded at all because the default is 360 minutes and this is the repository's only macOS job —
-    # a hung run would otherwise hold the required check for six hours.
-    timeout-minutes: 20
+    # **Thirty-five stays until a run here measures the new engine.** Every number above is local, on
+    # a 12-core machine, and this job runs on a 3-core one. The old ceiling was set from CI's own
+    # measurements and the paragraph that said so — *extrapolate from the slowest, not the luckiest* —
+    # was deleted in the same commit that lowered this to 20 on local numbers, which is the mistake it
+    # existed to prevent. The old 1.25x CI-to-local ratio does not carry either: it measured a
+    # workload dominated by `xcodebuild`'s fixed launch overhead, and this one is compile-bound, where
+    # core count is the variable. Lower it once a green run says what the number is.
+    #
+    # **When that stops being enough, the answer is not to raise it**: the honest options are dropping
+    # mutations that no longer aim at a decision, or running `--mutate` on a narrower trigger than
+    # every PR update and leaving the plain suite here. Bounded at all because the default is 360
+    # minutes and this is the repository's only macOS job — a hung run would otherwise hold the
+    # required check for six hours.
+    timeout-minutes: 35
     permissions:
       contents: read
     steps:

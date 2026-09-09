@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# The netfilter's Swift tests (#690). Needs Xcode and xcodegen.
+# The netfilter's Swift tests (#690). Needs a full Xcode — not Command Line Tools, which has no
+# `PlatformPath` and so no XCTest to link against. It runs no `xcodegen`; `tests.yml` is for
+# opening these in Xcode, and `--print-sources` below is what keeps the two honest.
 #
 # **CI runs `--mutate`, not the plain mode.** `.github/workflows/ci.yml` has a `test-swift` job on
 # `macos-15` that calls this script with the flag, and it is part of the `ci` rollup — so a Mac
@@ -37,11 +39,27 @@ HUNG_MARKER=$(mktemp -t netfilter-hung)
 # The same three entries as `tests.yml`'s `sources:`. Both halves of the binary pair, because both
 # have a pure part and neither can be linked: a system extension is not loadable by a test bundle,
 # and `Host/main.swift` is top-level code whose statements would become a second `main`.
-SOURCES=(Extension/FlowIdentity.swift Host/RuleArguments.swift Tests/*.swift)
+# `find` rather than a glob. `Tests/*.swift` does not descend, and `tests.yml` names the `Tests`
+# *directory*, which xcodegen walks — so one file in a subdirectory would be compiled into the Xcode
+# project and not into this bundle. `Tests/**/*.swift` is not the fix: macOS ships bash 3.2, which has
+# no `globstar`, so `**` degrades to a single level and drops `Tests/*.swift` entirely — measured, and
+# it would also make the source list depend on which bash a contributor had installed.
+SOURCES=(Extension/FlowIdentity.swift Host/RuleArguments.swift)
+while IFS= read -r f; do SOURCES+=("$f"); done < <(find Tests -name '*.swift' | sort)
 
-# No `-target`. The bundle is never shipped and only has to run on the machine testing, so pinning a
-# deployment target here would be pinning CI's runner architecture in a file nobody would think to
-# change when that moves. Nothing under test carries an `@available` branch.
+# **Ask the script, do not model it.** The first drift guard reimplemented these rules in JavaScript
+# and got them wrong in the one way that mattered — it expanded the glob recursively, so it reported
+# the two lists equal while a planted `Tests/Support/ExtraTests.swift` was compiled by xcodegen and
+# not by this script. Measured: guard green, suite still 80 tests.
+if [[ "${1:-}" == "--print-sources" ]]; then printf '%s\n' "${SOURCES[@]}"; exit 0; fi
+
+# **`-target` pins the OS and not the architecture, and a draft of this file claimed otherwise.**
+# They are separable halves of a triple: `$(uname -m)` keeps the arch wherever this runs, while
+# `macosx15.0` is the floor `tests.yml` and `project.yml` both declare. Without it the bundle builds
+# at the host's own version — measured `minos 26.0` — and an unguarded call to an API newer than 15.0
+# compiles clean locally while the shipping build rejects it. `-swift-version 5` for the same reason:
+# it is what both specs pin, today's default happens to match, and `macos-15` fixes the OS but not the
+# Xcode inside it.
 PLATFORM_DIR=$(xcrun --show-sdk-platform-path --sdk macosx)
 XCTEST_FW="$PLATFORM_DIR/Developer/Library/Frameworks"
 XCTEST_LIB="$PLATFORM_DIR/Developer/usr/lib"
@@ -61,6 +79,7 @@ DEADLINE=20
 #   1  a test failed — the mutation was killed
 #   2  it did not compile, so nothing judged it
 #   3  it had to be killed at the deadline
+#   4  no test ran, so the exit code is not a verdict either way
 run () {
   # **Emptied first, and that is not tidiness.** An early `return` leaves `$LOG` untouched, so a
   # failed build would otherwise hand `mutate` the *previous* mutation's log.
@@ -78,7 +97,8 @@ run () {
   <key>CFBundleExecutable</key><string>FilterLogicTests</string>
 </dict></plist>
 PLIST
-  swiftc -o "$BIN" -module-name FilterLogicTests \
+  swiftc -o "$BIN" -module-name FilterLogicTests -swift-version 5 \
+    -target "$(uname -m)-apple-macosx15.0" \
     -F "$XCTEST_FW" -I "$XCTEST_LIB" -L "$XCTEST_LIB" \
     -Xlinker -bundle \
     -Xlinker -rpath -Xlinker "$XCTEST_FW" -Xlinker -rpath -Xlinker "$XCTEST_LIB" \
@@ -102,6 +122,15 @@ PLIST
   kill "$watchdog" 2>/dev/null || true
   wait "$watchdog" 2>/dev/null || true
   [[ -f "$HUNG_MARKER" ]] && return 3
+
+  # **An exit code is only a verdict if a test ran, and three ways it can lie were measured.** A
+  # bundle with no `XCTestCase` in it exits **0** — `Executed 0 tests` — which reads as SURVIVED; one
+  # that cannot be loaded exits **1**, which reads as a kill; and a SIGKILL from outside this script
+  # (jetsam, a contributor's `pkill`, and `--mutate` starts eighty-three processes) is non-zero with
+  # nothing having run. The watchdog's own SIGKILL is excluded above by the marker, so a bare 137 here
+  # came from somewhere else and is not this script's to interpret.
+  [[ $rc -eq 137 ]] && return 4
+  grep -q "Test Case '" "$LOG" || return 4
   return $rc
 }
 
@@ -111,6 +140,7 @@ if [[ "${1:-}" != "--mutate" ]]; then
     0) grep -E "Executed .* tests" "$LOG" | tail -1; exit 0 ;;
     2) echo "the tests did not compile:"; grep -E "error:" "$BUILD_LOG" | head -20; exit 1 ;;
     3) echo "the run was killed after ${DEADLINE}s — something is looping"; tail -3 "$LOG"; exit 1 ;;
+    4) echo "the bundle ran and no test did — this is not a pass"; tail -3 "$LOG"; exit 1 ;;
     *) grep -E "error:|failed" "$LOG" | head -20; exit 1 ;;
   esac
 fi
@@ -140,7 +170,19 @@ echo "=== mutating a copy at $WORK — this checkout is not written to ==="
 cd "$WORK"
 
 echo "=== baseline (must PASS) ==="
-run && echo "  PASS" || { echo "  FAIL — fix the tests before mutating"; grep -E "error:" "$LOG" | head; exit 1; }
+# **Diagnosed from the right log.** A baseline that fails because the tests do not compile leaves
+# `$LOG` empty — `run` truncates it and returns before `xctest` writes a byte — so grepping it printed
+# the failure and no reason for it.
+baseline_rc=0; run || baseline_rc=$?
+if [[ $baseline_rc -ne 0 ]]; then
+  echo "  FAIL — fix the tests before mutating"
+  case $baseline_rc in
+    2) grep -E "error:" "$BUILD_LOG" | head ;;
+    *) tail -5 "$LOG" ;;
+  esac
+  exit 1
+fi
+echo "  PASS"
 
 # **Two files carry pure code now**, so a mutation names the one it aims at. The extension's half and
 # the host binary's half are tested by one bundle (`tests.yml`) but they are different targets in the
@@ -171,6 +213,8 @@ orig_for () { [[ "$1" == "$EXT_SRC" ]] && echo "$EXT_ORIG" || echo "$HOST_ORIG";
 #   BUILD BROKE   — it did not compile, so no test ever judged it. Reporting this as `killed` is how a
 #                   suite that tests nothing reads as green, which is the whole failure this file
 #                   guards against.
+#   NO VERDICT    — it built, the process ended, and no test case ever started. The same failure
+#                   reached from the other side, and the one an exit code alone cannot see: see `run`.
 #
 # And one that is a kill rather than a failure to prove anything:
 #
@@ -196,6 +240,8 @@ mutate () {   # $1 = label, $2 = sed program, $3 = file (default: the extension'
     2) echo "  BUILD BROKE: $1   <-- it did not compile, so nothing judged it"
        return 1 ;;
     3) echo "  killed (hung): $1   <-- killed at ${DEADLINE}s" ;;
+    4) echo "  NO VERDICT: $1   <-- no test ran; killed from outside, or the bundle held nothing"
+       return 1 ;;
     *) echo "  killed:   $1" ;;
   esac
 }
@@ -234,9 +280,10 @@ mutate "prune: empty rule keeps" 's/counts.filter { rule.contains($0.key) }/rule
 mutate "pulse: rates swapped"    's/enforcing ? 1 : 5/enforcing ? 5 : 1/'                      || fails=1
 mutate "pulse: always fast"      's/enforcing ? 1 : 5/1/'                                      || fails=1
 # **The one mutation here that kills by crashing rather than by asserting.** A bare Swift `Dictionary`
-# mutated from two threads corrupts its storage, so the test process takes SIGSEGV — which `run` reads
-# as a non-zero exit with `Test Case` present, exactly as a failed assertion does. That is the honest
-# outcome: the lock's absence is not observable any other way.
+# mutated from two threads corrupts its storage, so the test process takes SIGSEGV. `run` requires a
+# test to have started before it reads any exit code as a verdict, and this one does start — measured
+# 57 `Test Case` lines across three runs before the crash — so this is a real kill rather than the
+# process dying on the way in.
 # **This one is killed reliably and not always the same way**, because removing a lock is undefined
 # behaviour rather than a wrong answer. Measured 28 runs of 28 killed, in three shapes: the assertion
 # failing, `SIGSEGV`, and — once, under the load of a full mutation run — the watchdog. All three are
