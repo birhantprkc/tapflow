@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# The netfilter's Swift tests (#690). Needs Xcode and xcodegen.
+# The netfilter's Swift tests (#690). Needs a full Xcode — not Command Line Tools, which has no
+# `PlatformPath` and so no XCTest to link against. It runs no `xcodegen`; `tests.yml` is for
+# opening these in Xcode, and `--print-sources` below is what keeps the two honest.
 #
 # **CI runs `--mutate`, not the plain mode.** `.github/workflows/ci.yml` has a `test-swift` job on
 # `macos-15` that calls this script with the flag, and it is part of the `ci` rollup — so a Mac
@@ -7,9 +9,10 @@
 # expensive mode there is deliberate: a green suite is not evidence on its own, and the whole reason
 # this file exists is that the cheap mode cannot tell the difference.
 #
-# **That makes every mutation added below a cost paid on every push.** One `xcodebuild` launch each,
-# and `timeout-minutes` on that job is the ceiling — a mutation is worth adding when it aims at a
-# decision, not at a line.
+# **That makes every mutation added below a cost paid on every push**, so the engine matters more
+# than the count. It is `swiftc` plus `xcrun xctest`, not `xcodebuild`: measured on these same files,
+# a build-and-run cycle is 1.9s against ~13.5s for one `xcodebuild test` launch on CI's runner. At
+# eighty-three cycles that is the difference between eighteen minutes and three.
 #
 # **An earlier version of this header said CI could not run these at all**, which was true when it
 # was written and stopped being true without anything here noticing.
@@ -23,46 +26,142 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-PROJ=TapflowNetFilterTests.xcodeproj
-LOG=$(mktemp -t netfilter-tests)
+# The bundle is assembled by hand rather than by `xcodegen` + `xcodebuild`. `tests.yml` stays —
+# generating a real project is how you open these tests in Xcode and step through one — but nothing
+# in this script reads it, and `scripts/__tests__/netfilterTestSources.test.mjs` holds the two source
+# lists together so the affordance cannot drift away from what is actually tested.
+BUNDLE=build/FilterLogicTests.xctest
+BIN="$BUNDLE/Contents/MacOS/FilterLogicTests"
 
-# **Returns xcodebuild's own status.** An earlier version piped into `grep` and reported *its* exit
-# code, so a compile error read as a passing run.
+# The same three entries as `tests.yml`'s `sources:`. Both halves of the binary pair, because both
+# have a pure part and neither can be linked: a system extension is not loadable by a test bundle,
+# and `Host/main.swift` is top-level code whose statements would become a second `main`.
+# `find` rather than a glob. `Tests/*.swift` does not descend, and `tests.yml` names the `Tests`
+# *directory*, which xcodegen walks — so one file in a subdirectory would be compiled into the Xcode
+# project and not into this bundle. `Tests/**/*.swift` is not the fix: macOS ships bash 3.2, which has
+# no `globstar`, so `**` degrades to a single level and drops `Tests/*.swift` entirely — measured, and
+# it would also make the source list depend on which bash a contributor had installed.
+SOURCES=(Extension/FlowIdentity.swift Host/RuleArguments.swift)
+# **Read for its exit status, not only its output**, which a process substitution cannot give: with
+# `find` missing from `PATH` the loop added nothing and the script carried on at rc 0 — measured —
+# leaving `SOURCES` as the two pure files. A count check alone does not cover it either. Discovery
+# that emits some paths and *then* fails leaves more than two entries, so the count passes and the
+# bundle is built from part of the suite, and a mutation aimed at a file that was not compiled is
+# reported killed by tests that never saw it. That is a wrong verdict rather than a missing file,
+# which is the one failure this script may not have.
+if ! found=$(find Tests -name '*.swift' | sort); then
+  echo "could not enumerate Tests/ — refusing to compile a partial suite" >&2
+  exit 1
+fi
+while IFS= read -r f; do [[ -n "$f" ]] && SOURCES+=("$f"); done <<< "$found"
+# And the floor for discovery that succeeds and matches nothing.
+[[ ${#SOURCES[@]} -gt 2 ]] || { echo "no .swift found under Tests/" >&2; exit 1; }
+
+# **Ask the script, do not model it.** The first drift guard reimplemented these rules in JavaScript
+# and got them wrong in the one way that mattered — it expanded the glob recursively, so it reported
+# the two lists equal while a planted `Tests/Support/ExtraTests.swift` was compiled by xcodegen and
+# not by this script. Measured: guard green, suite still 80 tests.
+if [[ "${1:-}" == "--print-sources" ]]; then printf '%s\n' "${SOURCES[@]}"; exit 0; fi
+
+# **Below that exit on purpose: this is the only path that runs off a Mac.** The guard test calls
+# `--print-sources` from the ubuntu `test` job, and `mktemp -t foo` is a BSD spelling — GNU's wants a
+# template ending in `XXX` and answers `too few X's in template`. Nothing above the exit may need a
+# Mac or a temp file. That is not a rule anyone has to remember: moving one of these back up turns
+# the ubuntu job red, which is how this was found.
+LOG=$(mktemp -t netfilter-tests)
+BUILD_LOG=$(mktemp -t netfilter-build)
+HUNG_MARKER=$(mktemp -t netfilter-hung)
+
+# **`-target` pins the OS and not the architecture, and a draft of this file claimed otherwise.**
+# They are separable halves of a triple: `$(uname -m)` keeps the arch wherever this runs, while
+# `macosx15.0` is the floor `tests.yml` and `project.yml` both declare. Without it the bundle builds
+# at the host's own version — measured `minos 26.0` — and an unguarded call to an API newer than 15.0
+# compiles clean locally while the shipping build rejects it. `-swift-version 5` for the same reason:
+# it is what both specs pin, today's default happens to match, and `macos-15` fixes the OS but not the
+# Xcode inside it.
+PLATFORM_DIR=$(xcrun --show-sdk-platform-path --sdk macosx)
+XCTEST_FW="$PLATFORM_DIR/Developer/Library/Frameworks"
+XCTEST_LIB="$PLATFORM_DIR/Developer/usr/lib"
+
+# How long a single run may take before it is treated as hung. The whole suite executes in 0.02s and
+# the process is up for about 0.7s, so this is three orders of magnitude of headroom — it is not a
+# performance budget, it is the only thing that can end a mutation whose failure mode is a loop.
+DEADLINE=20
+
+# **Four outcomes, and the exit code is the discriminator rather than a string in a log.** That is
+# the substantive gain from dropping `xcodebuild`: `xcodebuild test` performs the build and the tests
+# as one action and reports one status, so telling a compile error from a failing assertion meant
+# counting `Test Case` occurrences — a textual check that this file had already got wrong twice.
+# Compiling and running are two commands here, so each has its own status.
 #
-# **That fixed half of it, and the comment here used to claim the whole.** A non-zero status still says
-# only "something went wrong", and `--mutate` below read any non-zero as "a test caught it" — so a
-# mutation that does not compile was indistinguishable from one a test killed.
-#
-# **The discriminator is `Test Case`, and two more obvious ones are wrong.** `** TEST FAILED **` is
-# printed for a compile error too — measured: `xcodebuild test` reports the *action* failing, not the
-# build, so that line appears either way (a review proposed it and it does not work). `error:` is no
-# good either; an XCTest assertion prints those. What a compile failure never produces is a test case
-# running at all: measured, `Test Case` appears 0 times when the mutation does not build and 30 times
-# when a test kills it.
+#   0  every test passed
+#   1  a test failed — the mutation was killed
+#   2  it did not compile, so nothing judged it
+#   3  it had to be killed at the deadline
+#   4  no test ran, so the exit code is not a verdict either way
 run () {
-  # **Emptied first, and that is not tidiness.** The `return` below leaves `$LOG` untouched, so a
-  # failing `xcodegen` would hand `mutate` the *previous* mutation's log — which contains `Test Case`,
-  # and would therefore be read as this mutation having been killed by a test that never ran. The
-  # same hole this file already closed once, reached through a different door.
+  # **Emptied first, and that is not tidiness.** An early `return` leaves `$LOG` untouched, so a
+  # failed build would otherwise hand `mutate` the *previous* mutation's log.
   : > "$LOG"
-  xcodegen generate --spec tests.yml >/dev/null || return 1
-  # `-derivedDataPath` only under `--mutate`, where it keeps the copy's build products inside the
-  # copy. A plain run stays on Xcode's default path so it is incremental across invocations.
-  # **`-test-timeouts-enabled` is what makes a mutation that loops killable at all.** Some decisions
-  # are bounds, and removing a bound does not fail a test — it makes one spin, and a `run` that never
-  # returns stops the whole mode rather than reporting anything. With an allowance, XCTest kills the
-  # case, the run continues, and the assertion that was going to catch it does. Measured: the
-  # `walk: no bound` mutation takes 87s against ~13s for a normal one, and the flags cost nothing on
-  # a green run (3.07s with, 3.71s without — noise).
-  xcodebuild test -project "$PROJ" -scheme FilterLogicTests -destination 'platform=macOS,arch=arm64' \
-    ${MUTATE_DERIVED:+-derivedDataPath "$MUTATE_DERIVED"} \
-    -test-timeouts-enabled YES -default-test-execution-time-allowance 20 \
-    CODE_SIGNING_ALLOWED=NO > "$LOG" 2>&1
+  : > "$BUILD_LOG"
+  rm -rf "$BUNDLE"
+  mkdir -p "$BUNDLE/Contents/MacOS"
+  cat > "$BUNDLE/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleIdentifier</key><string>dev.tapflow.FilterLogicTests</string>
+  <key>CFBundleName</key><string>FilterLogicTests</string>
+  <key>CFBundlePackageType</key><string>BNDL</string>
+  <key>CFBundleExecutable</key><string>FilterLogicTests</string>
+</dict></plist>
+PLIST
+  swiftc -o "$BIN" -module-name FilterLogicTests -swift-version 5 \
+    -target "$(uname -m)-apple-macosx15.0" \
+    -F "$XCTEST_FW" -I "$XCTEST_LIB" -L "$XCTEST_LIB" \
+    -Xlinker -bundle \
+    -Xlinker -rpath -Xlinker "$XCTEST_FW" -Xlinker -rpath -Xlinker "$XCTEST_LIB" \
+    "${SOURCES[@]}" > "$BUILD_LOG" 2>&1 || return 2
+
+  # **A watchdog rather than a poll**, because polling costs its interval on every one of the
+  # eighty-two runs that finish in under a second, and the deadline only ever fires for one or two of
+  # them. `timeout` is not on macOS.
+  #
+  # **The marker is what says the deadline fired, not the exit code.** SIGKILL surfaces as 137 and it
+  # was tempting to read that as the answer, but that is inferring a cause from a number the same way
+  # this file used to infer a build failure from a log line. A run really can die by signal on its
+  # own — `cache: no lock` segfaults, measured — so the watchdog records that *it* acted, before it
+  # acts, which makes the marker present by the time `wait` returns.
+  rm -f "$HUNG_MARKER"
+  xcrun xctest "$BUNDLE" > "$LOG" 2>&1 &
+  local pid=$! rc=0
+  ( sleep "$DEADLINE"; : > "$HUNG_MARKER"; kill -9 "$pid" 2>/dev/null ) &
+  local watchdog=$!
+  wait "$pid" || rc=$?
+  kill "$watchdog" 2>/dev/null || true
+  wait "$watchdog" 2>/dev/null || true
+  [[ -f "$HUNG_MARKER" ]] && return 3
+
+  # **An exit code is only a verdict if a test ran, and three ways it can lie were measured.** A
+  # bundle with no `XCTestCase` in it exits **0** — `Executed 0 tests` — which reads as SURVIVED; one
+  # that cannot be loaded exits **1**, which reads as a kill; and a SIGKILL from outside this script
+  # (jetsam, a contributor's `pkill`, and `--mutate` starts eighty-three processes) is non-zero with
+  # nothing having run. The watchdog's own SIGKILL is excluded above by the marker, so a bare 137 here
+  # came from somewhere else and is not this script's to interpret.
+  [[ $rc -eq 137 ]] && return 4
+  grep -q "Test Case '" "$LOG" || return 4
+  return $rc
 }
 
 if [[ "${1:-}" != "--mutate" ]]; then
-  if run; then grep -E "Executed .* tests|TEST SUCCEEDED" "$LOG" | tail -2; exit 0
-  else grep -E "error:|Test Case.*failed|TEST FAILED" "$LOG" | head -20; exit 1; fi
+  rc=0; run || rc=$?
+  case $rc in
+    0) grep -E "Executed .* tests" "$LOG" | tail -1; exit 0 ;;
+    2) echo "the tests did not compile:"; grep -E "error:" "$BUILD_LOG" | head -20; exit 1 ;;
+    3) echo "the run was killed after ${DEADLINE}s — something is looping"; tail -3 "$LOG"; exit 1 ;;
+    4) echo "the bundle ran and no test did — this is not a pass"; tail -3 "$LOG"; exit 1 ;;
+    *) grep -E "error:|failed" "$LOG" | head -20; exit 1 ;;
+  esac
 fi
 
 # **`--mutate` works on a COPY, and the checkout is never written to.**
@@ -78,21 +177,31 @@ fi
 # is no longer a thing that can go wrong, and `git status` stays clean throughout.
 #
 # `mktemp -d` rather than a fixed name, because `rsync --delete` into a path something else can
-# pre-create is a path it can point somewhere worth deleting. The cost is that `xcodebuild` starts
-# cold once per run — DerivedData is pinned inside the copy so nothing accumulates under
-# `~/Library` — which buys back the whole failure mode above.
+# pre-create is a path it can point somewhere worth deleting. Build products land in `build/` inside
+# the copy and go with it, so nothing accumulates anywhere.
 WORK=$(mktemp -d -t tapflow-netfilter-mutate) || exit 1
 # **The second `trap … EXIT` below REPLACES this one**, which is why `cleanup` removes `$WORK` as well.
 # Getting that wrong left a 3.7 GB copy behind on the first run of this mode — bash keeps one EXIT
 # handler, not a list, and nothing says so at the point of the second `trap`.
 trap 'rm -rf "$WORK"' EXIT
-/usr/bin/rsync -a --exclude build --exclude 'DerivedData' --exclude '*.xcodeproj' ./ "$WORK/"
+/usr/bin/rsync -a --exclude build --exclude '*.xcodeproj' ./ "$WORK/"
 echo "=== mutating a copy at $WORK — this checkout is not written to ==="
 cd "$WORK"
-export MUTATE_DERIVED="$WORK/DerivedData"
 
 echo "=== baseline (must PASS) ==="
-run && echo "  PASS" || { echo "  FAIL — fix the tests before mutating"; grep -E "error:" "$LOG" | head; exit 1; }
+# **Diagnosed from the right log.** A baseline that fails because the tests do not compile leaves
+# `$LOG` empty — `run` truncates it and returns before `xctest` writes a byte — so grepping it printed
+# the failure and no reason for it.
+baseline_rc=0; run || baseline_rc=$?
+if [[ $baseline_rc -ne 0 ]]; then
+  echo "  FAIL — fix the tests before mutating"
+  case $baseline_rc in
+    2) grep -E "error:" "$BUILD_LOG" | head ;;
+    *) tail -5 "$LOG" ;;
+  esac
+  exit 1
+fi
+echo "  PASS"
 
 # **Two files carry pure code now**, so a mutation names the one it aims at. The extension's half and
 # the host binary's half are tested by one bundle (`tests.yml`) but they are different targets in the
@@ -109,7 +218,7 @@ HOST_ORIG=$(mktemp -t RuleArguments.orig) || exit 1
 cp "$EXT_SRC" "$EXT_ORIG"
 cp "$HOST_SRC" "$HOST_ORIG"
 restore () { cp "$EXT_ORIG" "$EXT_SRC"; cp "$HOST_ORIG" "$HOST_SRC"; }
-cleanup () { restore; rm -f "$EXT_ORIG" "$HOST_ORIG"; rm -rf "${WORK:-}"; }
+cleanup () { restore; rm -f "$EXT_ORIG" "$HOST_ORIG" "$HUNG_MARKER"; rm -rf "${WORK:-}"; }
 trap cleanup EXIT
 
 # The backup a given source is compared against, so `DID NOT APPLY` stays honest per file.
@@ -123,6 +232,16 @@ orig_for () { [[ "$1" == "$EXT_SRC" ]] && echo "$EXT_ORIG" || echo "$HOST_ORIG";
 #   BUILD BROKE   — it did not compile, so no test ever judged it. Reporting this as `killed` is how a
 #                   suite that tests nothing reads as green, which is the whole failure this file
 #                   guards against.
+#   NO VERDICT    — it built, the process ended, and no test case ever started. The same failure
+#                   reached from the other side, and the one an exit code alone cannot see: see `run`.
+#
+# And one that is a kill rather than a failure to prove anything:
+#
+#   killed (hung) — the run reached the deadline. A mutation that removes a *bound* does not make an
+#                   assertion fail, it makes a case spin, so this is what catching one looks like. It
+#                   is printed apart from a plain kill because a hang that is not about a bound is a
+#                   different problem wearing the same clothes, and folding the two together would
+#                   hide it.
 mutate () {   # $1 = label, $2 = sed program, $3 = file (default: the extension's)
   restore
   local src="${3:-$EXT_SRC}" orig
@@ -132,15 +251,18 @@ mutate () {   # $1 = label, $2 = sed program, $3 = file (default: the extension'
     echo "  DID NOT APPLY: $1   <-- the sed matched nothing; the source moved under it"
     return 1
   fi
-  if run >/dev/null 2>&1; then
-    echo "  SURVIVED: $1   <-- it compiled and every test still passed; one of them is decoration"
-    return 1
-  fi
-  if ! grep -q "Test Case" "$LOG"; then
-    echo "  BUILD BROKE: $1   <-- no test case ran, so nothing judged it"
-    return 1
-  fi
-  echo "  killed:   $1"
+  local rc=0
+  run >/dev/null 2>&1 || rc=$?
+  case $rc in
+    0) echo "  SURVIVED: $1   <-- it compiled and every test still passed; one of them is decoration"
+       return 1 ;;
+    2) echo "  BUILD BROKE: $1   <-- it did not compile, so nothing judged it"
+       return 1 ;;
+    3) echo "  killed (hung): $1   <-- killed at ${DEADLINE}s" ;;
+    4) echo "  NO VERDICT: $1   <-- no test ran; killed from outside, or the bundle held nothing"
+       return 1 ;;
+    *) echo "  killed:   $1" ;;
+  esac
 }
 
 echo "=== mutations (each must make a test FAIL) ==="
@@ -177,9 +299,14 @@ mutate "prune: empty rule keeps" 's/counts.filter { rule.contains($0.key) }/rule
 mutate "pulse: rates swapped"    's/enforcing ? 1 : 5/enforcing ? 5 : 1/'                      || fails=1
 mutate "pulse: always fast"      's/enforcing ? 1 : 5/1/'                                      || fails=1
 # **The one mutation here that kills by crashing rather than by asserting.** A bare Swift `Dictionary`
-# mutated from two threads corrupts its storage, so the test process takes SIGSEGV — which `run` reads
-# as a non-zero exit with `Test Case` present, exactly as a failed assertion does. That is the honest
-# outcome: the lock's absence is not observable any other way.
+# mutated from two threads corrupts its storage, so the test process takes SIGSEGV. `run` requires a
+# test to have started before it reads any exit code as a verdict, and this one does start — measured
+# 57 `Test Case` lines across three runs before the crash — so this is a real kill rather than the
+# process dying on the way in.
+# **This one is killed reliably and not always the same way**, because removing a lock is undefined
+# behaviour rather than a wrong answer. Measured 28 runs of 28 killed, in three shapes: the assertion
+# failing, `SIGSEGV`, and — once, under the load of a full mutation run — the watchdog. All three are
+# kills; only the third costs the deadline. Do not "stabilise" it by weakening the concurrent test.
 mutate "cache: no lock"          's/lock.lock(); defer { lock.unlock() }//'                     || fails=1
 
 # --- the host binary's arguments and rule arithmetic ---
@@ -269,9 +396,10 @@ mutate "walk: an unreadable path is host" 's/if let path = read.executablePath(c
 mutate "walk: the cache is not consulted" 's/if let cached = cache.lookup(info.identity) { return .simulator(cached) }//' || fails=1
 mutate "walk: nothing is cached"         's/cache.store(info.identity, udid)//'                || fails=1
 # **The bound gets a mutation after all, and the claim that it could not was untested.** This one
-# does not fail fast — it makes the cycle case spin until the execution-time allowance set in
-# `run` kills it, which is why it costs 87s. That is the price of holding a decision whose
-# failure mode is a hang rather than a wrong answer.
+# does not fail fast — it makes the cycle case spin until `run`'s watchdog kills it, so it reports as
+# `killed (hung)` and costs the deadline. That is the price of holding a decision whose failure mode
+# is a hang rather than a wrong answer, and it is the one run in this file that does not get faster
+# by making the engine faster.
 mutate "walk: no bound"                  's/for _ in 0..<attributionWalkLimit {/while true {/' || fails=1
 mutate "walk: one step short"            's/let attributionWalkLimit = 32/let attributionWalkLimit = 31/' || fails=1
 mutate "walk: judges the flow's own process" 's/current = info.ppid//'                         || fails=1

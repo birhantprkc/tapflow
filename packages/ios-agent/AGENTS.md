@@ -819,27 +819,65 @@ The flag breaks the sources eighty-two ways and requires each one to fail a test
 not have done that: `run()` piped `xcodebuild` into `grep` and returned *grep's* status, so a mutation
 that did not even compile would have been reported as killed.
 
-**Every mutation is a cost paid on every push**, now that CI runs the flag — one `xcodebuild` each.
-Count them with `grep -cE '^mutate "'`, not `grep -c '^mutate '`, which counts the function
-definition; a comment in `ci.yml` said thirty-six for exactly that reason.
+**Every mutation is a cost paid on every push**, now that CI runs the flag, which is why the engine
+is `swiftc` and `xcrun xctest` rather than `xcodebuild`. Measured on these same files: 1.9s a
+build-and-run cycle against ~13.5s for one `xcodebuild test` launch on CI's runner, and the whole set
+from 1049s to 222–246s across three local runs. The alternative was dropping mutations, and nothing about the coverage had to
+change. Count them with `grep -cE '^mutate "'`, not `grep -c '^mutate '`, which counts the function
+definition; a comment in `ci.yml` said thirty-six for exactly that reason, and
+`scripts/__tests__/mutationCountsStated.test.mjs` now holds the stated counts against the real one.
+
+**One mutation does not get faster, and it is a shape rather than an exception.**
+`walk: no bound` removes a bound, so it fails nothing — it spins until `run`'s watchdog kills it at
+20s, and reports as `killed (hung)` rather than as a plain kill. Any future mutation aimed at a bound
+costs the deadline too.
+
+**Two exit codes replaced a string search, which is the other half of the gain.** `xcodebuild test`
+builds and tests as one action and reports one status, so telling a compile error from a failing
+assertion meant counting `Test Case` lines in the log — a textual check this file had already got
+wrong twice. Compiling and running are separate commands now, so `2` means it did not build and `1`
+means a test caught it.
 
 **And it has found something.** A mutation deleting `.filter { !$0.isEmpty }` from `parseUDIDs`
 survived — not because the test was decoration but because the filter was: `split(separator:)`
 defaults to `omittingEmptySubsequences: true`, so the line could never remove anything. A green suite
 would not have said so.
 
-**The spec is `tests.yml`, deliberately separate from `project.yml`.** `project.yml` is one of the
-four enumerated inputs to the extension's version stamp, so a test target declared there would make
-every test-only edit bump `CFBundleVersion` — and that replaces the system extension on every
-self-hoster's Mac, stopping all new connections while it happens. A new file at `ios-netfilter/`'s top
-level is not an input unless `EXT_SOURCE_FILES` names it, so this spec is free. The generated
+**`tests.yml` is how you open these tests in Xcode, and nothing else reads it.** `run-tests.sh` hands
+its own `SOURCES` array to `swiftc`, so the spec is no longer on the path CI takes — it is kept
+because stepping through a failing Swift test in a debugger is worth more than the file costs, and
+`scripts/__tests__/netfilterTestSources.test.mjs` compares what the two would compile. Without that,
+a third pure file wired into one and not the other is silent in both directions: every mutation aimed
+at it reports `BUILD BROKE`, which reads as the mutation having drifted, or the mutations pass and
+only the project nobody runs in CI is stale.
+
+**That check asks the script rather than modelling it**, via `run-tests.sh --print-sources`, and the
+first version is why. It reimplemented the script's rules in JavaScript and expanded `Tests/*.swift`
+through the same recursive walk it used for `tests.yml`'s `Tests` directory — but a shell glob does
+not descend. Measured with a planted `Tests/Support/ExtraTests.swift` that cannot pass: xcodegen
+compiled it, `swiftc` did not, the suite stayed at 80 tests and exited 0, and the check called the two
+lists equal. The script now gathers the tests with `find`, so a subdirectory reaches both — the
+divergence is gone rather than detected — and `Tests/**/*.swift` was not the fix, because macOS ships
+bash 3.2 with no `globstar` and `**` degrades to one level.
+
+**And an exit code is only a verdict if a test ran.** `xcrun xctest` exits **0** on a bundle holding
+no `XCTestCase` and **1** on one it cannot load, so `run` requires a `Test Case` line before it reads
+any status, and treats a bare 137 — a SIGKILL that was not the watchdog's — as `NO VERDICT` rather
+than as a kill. `--mutate` starts eighty-three processes; one stray `pkill` would otherwise have
+scored a surviving mutation as caught.
+
+**It is deliberately separate from `project.yml`.** `project.yml` is one of the four enumerated
+inputs to the extension's version stamp, so a test target declared there would make every test-only
+edit bump `CFBundleVersion` — and that replaces the system extension on every self-hoster's Mac,
+stopping all new connections while it happens. A new file at `ios-netfilter/`'s top level is not an
+input unless `EXT_SOURCE_FILES` names it, so this spec is free. The generated
 `TapflowNetFilterTests.xcodeproj` is gitignored, unlike the shipping one.
 
 **Do not run bare `xcodegen generate` to check a build.** It rewrites both `Info.plist`s with the
 literal `CURRENT_PROJECT_VERSION` from `project.yml` — `1` — discarding the committed
 `CFBundleVersion` that `shipped.json` records. `build.sh` patches them back immediately, so the
 release path is safe and only a hand-run generate leaves it wrong. Check `git status` afterwards.
-`run-tests.sh` generates from `tests.yml` alone and does not touch them.
+`run-tests.sh` runs no `xcodegen` at all and does not touch them.
 
 #### Building the system extension
 

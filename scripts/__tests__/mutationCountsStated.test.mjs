@@ -1,8 +1,14 @@
 // Three places state how many mutations `--mutate` runs, and the number is what says whether the
-// job fits its timeout: `ci.yml` names it twice (the count, and the count plus a baseline as
-// `xcodebuild` launches) and `ios-agent/AGENTS.md` once. All three have gone stale, and the last
-// time was inside the PR that added the mutations — the count was corrected in the first commit and
-// the review-fix commit added four more without touching it.
+// job fits its timeout: `ci.yml` names it twice (the count, and the count plus a baseline as build
+// cycles) and `ios-agent/AGENTS.md` once. All three have gone stale, and the last time was inside the
+// PR that added the mutations — the count was corrected in the first commit and the review-fix commit
+// added four more without touching it.
+//
+// **The injected library's count used to be checked here and no longer is.** `ci.yml` stated it only
+// as the argument for replacing layer 1's engine — layer 2 never invoked `xcodebuild`, which is why
+// its twenty-six mutations took fifteen seconds. That argument was acted on, the sentence went with
+// it, and nothing else states the number: no timeout is sized from it. Putting the sentence back so
+// this file has something to assert would be inventing the thing being checked.
 //
 // **The prose already carries a warning about this, and the warning is what failed.** `ci.yml` says
 // a version of that comment "said thirty-six when it was thirty-four", and `AGENTS.md` repeats the
@@ -31,7 +37,6 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const read = (...p) => readFileSync(join(ROOT, ...p), 'utf8')
 
 const LAYER1 = 'packages/ios-agent/ios-netfilter/run-tests.sh'
-const LAYER2 = 'packages/ios-agent/mutate-nethook.sh'
 
 const ONES = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten',
   'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen', 'sixteen', 'seventeen', 'eighteen',
@@ -73,13 +78,8 @@ describe('the stated mutation counts are the ones the scripts run', () => {
     const n = mutationCount(LAYER1)
     const file = '.github/workflows/ci.yml'
     expect(stated(file, /breaks[\s#]+the[\s#]+sources[\s#]+([a-z-]+)[\s#]+ways/)).toBe(words(n))
-    // One baseline runs before the mutations, so the launches are always one more.
-    expect(stated(file, /#\s+([a-z-]+)\s+`xcodebuild test`\s+launches/)).toBe(words(n + 1))
-  })
-
-  it('ci.yml states the injected library\'s count', () => {
-    expect(stated('.github/workflows/ci.yml', /Layer 2's[\s#]+equivalent[\s#]+runs[\s#]+([a-z-]+)[\s#]+mutations/))
-      .toBe(words(mutationCount(LAYER2)))
+    // One baseline runs before the mutations, so the cycles are always one more.
+    expect(stated(file, /#\s+([a-z-]+)\s+`swiftc`\s+build-and-run\s+cycles/)).toBe(words(n + 1))
   })
 
   it('ios-agent/AGENTS.md states the netfilter count', () => {
