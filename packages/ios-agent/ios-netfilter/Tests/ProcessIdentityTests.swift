@@ -95,10 +95,14 @@ final class ProcessIdentityTests: XCTestCase {
     /// `lock.lock(); defer { lock.unlock() }` from both methods leaves every other assertion in this
     /// file passing, because nothing else here starts a second thread.
     ///
-    /// **The failure is a crash, not a wrong answer**, so this asserts the entries survive rather
-    /// than trying to catch a torn read: a bare Swift `Dictionary` mutated from two threads corrupts
-    /// its own storage. Measured on a copy with the lock removed — `exit=139` (SIGSEGV) on 5 runs of
-    /// 5, against `exit=0` on 5 of 5 with it. `run-tests.sh` plants that mutation.
+    /// **The failure is not a wrong answer**, so this asserts the entries survive rather than trying
+    /// to catch a torn read: a bare Swift `Dictionary` mutated from two threads corrupts its own
+    /// storage. What that corruption *does* varies, because it is undefined behaviour and not a
+    /// defined error — measured on a copy with the lock removed, 28 runs of 28 failed, some with
+    /// `SIGSEGV`, some by surfacing an ObjC exception through this assertion, and one by hanging
+    /// until the runner's watchdog killed it. All of them are the mutation being caught, and an
+    /// earlier version of this comment reported only the first because that is what five runs
+    /// happened to show. `run-tests.sh` plants the mutation.
     func testConcurrentStoresAndLookupsKeepEveryEntry() {
         let cache = UDIDCache()
         let count = 2_000
