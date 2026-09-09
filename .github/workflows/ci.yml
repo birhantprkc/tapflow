@@ -235,20 +235,21 @@ jobs:
     # else got seven times faster and that one did not, which is the shape to expect from any future
     # bound; the spread in the range above is `cache: no lock` sometimes landing there too.
     #
-    # **Thirty-five stays until a run here measures the new engine.** Every number above is local, on
-    # a 12-core machine, and this job runs on a 3-core one. The old ceiling was set from CI's own
-    # measurements and the paragraph that said so — *extrapolate from the slowest, not the luckiest* —
-    # was deleted in the same commit that lowered this to 20 on local numbers, which is the mistake it
-    # existed to prevent. The old 1.25x CI-to-local ratio does not carry either: it measured a
-    # workload dominated by `xcodebuild`'s fixed launch overhead, and this one is compile-bound, where
-    # core count is the variable. Lower it once a green run says what the number is.
+    # **Fifteen, and the number came from a run here rather than from a laptop.** The first green run
+    # of the new engine took **5m29s** for the whole job against 18m03s before it, so this is 2.7x —
+    # more headroom than the 1.94x the old ceiling settled for, which is deliberate while there is
+    # only one measurement. A draft of this change set it to 20 from local numbers on a 12-core
+    # machine for a job that runs on a 3-core one, in the same commit that deleted the paragraph
+    # saying *extrapolate from the slowest, not the luckiest*. The old 1.25x CI-to-local ratio would
+    # not have helped either: it measured a workload dominated by `xcodebuild`'s fixed launch
+    # overhead, and this one is compile-bound, where core count is the variable.
     #
     # **When that stops being enough, the answer is not to raise it**: the honest options are dropping
     # mutations that no longer aim at a decision, or running `--mutate` on a narrower trigger than
     # every PR update and leaving the plain suite here. Bounded at all because the default is 360
     # minutes and this is the repository's only macOS job — a hung run would otherwise hold the
     # required check for six hours.
-    timeout-minutes: 35
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:

@@ -32,9 +32,6 @@ cd "$(dirname "$0")"
 # lists together so the affordance cannot drift away from what is actually tested.
 BUNDLE=build/FilterLogicTests.xctest
 BIN="$BUNDLE/Contents/MacOS/FilterLogicTests"
-LOG=$(mktemp -t netfilter-tests)
-BUILD_LOG=$(mktemp -t netfilter-build)
-HUNG_MARKER=$(mktemp -t netfilter-hung)
 
 # The same three entries as `tests.yml`'s `sources:`. Both halves of the binary pair, because both
 # have a pure part and neither can be linked: a system extension is not loadable by a test bundle,
@@ -46,12 +43,26 @@ HUNG_MARKER=$(mktemp -t netfilter-hung)
 # it would also make the source list depend on which bash a contributor had installed.
 SOURCES=(Extension/FlowIdentity.swift Host/RuleArguments.swift)
 while IFS= read -r f; do SOURCES+=("$f"); done < <(find Tests -name '*.swift' | sort)
+# A failure inside a process substitution does not reach `set -e` — measured: with `find` missing from
+# `PATH` this loop added nothing and the script carried on at rc 0, leaving `SOURCES` as the two pure
+# files. Both consumers would catch it eventually (the guard sees two entries against nine, and a
+# bundle with no tests is now `NO VERDICT` rather than a pass) but three layers away from the cause.
+[[ ${#SOURCES[@]} -gt 2 ]] || { echo "no .swift found under Tests/ — did \`find\` run?" >&2; exit 1; }
 
 # **Ask the script, do not model it.** The first drift guard reimplemented these rules in JavaScript
 # and got them wrong in the one way that mattered — it expanded the glob recursively, so it reported
 # the two lists equal while a planted `Tests/Support/ExtraTests.swift` was compiled by xcodegen and
 # not by this script. Measured: guard green, suite still 80 tests.
 if [[ "${1:-}" == "--print-sources" ]]; then printf '%s\n' "${SOURCES[@]}"; exit 0; fi
+
+# **Below that exit on purpose: this is the only path that runs off a Mac.** The guard test calls
+# `--print-sources` from the ubuntu `test` job, and `mktemp -t foo` is a BSD spelling — GNU's wants a
+# template ending in `XXX` and answers `too few X's in template`. Nothing above the exit may need a
+# Mac or a temp file. That is not a rule anyone has to remember: moving one of these back up turns
+# the ubuntu job red, which is how this was found.
+LOG=$(mktemp -t netfilter-tests)
+BUILD_LOG=$(mktemp -t netfilter-build)
+HUNG_MARKER=$(mktemp -t netfilter-hung)
 
 # **`-target` pins the OS and not the architecture, and a draft of this file claimed otherwise.**
 # They are separable halves of a triple: `$(uname -m)` keeps the arch wherever this runs, while
