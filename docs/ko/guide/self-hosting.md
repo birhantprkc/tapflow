@@ -41,7 +41,7 @@ docker compose up -d
 ```
 
 ::: danger 볼륨(volume)은 필수입니다
-위의 `./data:/app/.tapflow/data` 볼륨 마운트는 반드시 필요합니다. 릴레이는 설치할 때 비밀 키를 하나 만들어 `<dataDir>/jwt-secret`에 쓰고 계속 재사용합니다. 볼륨이 없으면 이 파일이 컨테이너의 쓰기 계층에 놓입니다. `docker restart`는 그 계층이 남으므로 키도 유지되지만 컨테이너를 **다시 만들면** 키를 잃습니다. 이미지 업데이트, `docker compose down && up`, `docker rm`이 모두 여기 해당합니다. 키가 새로 생기면 모든 사용자가 즉시 로그아웃되고 에이전트 연결이 끊어집니다.
+위의 `./data:/app/.tapflow/data` 볼륨 마운트는 반드시 필요합니다. 릴레이는 설치할 때 비밀 키를 하나 만들어 `<dataDir>/jwt-secret`에 쓰고 계속 재사용합니다. 볼륨이 없으면 이 파일이 컨테이너의 쓰기 계층에 놓입니다. `docker restart`는 그 계층이 남으므로 키도 유지되지만 컨테이너를 **다시 만들면** 키를 잃습니다. 이미지 업데이트, `docker compose down && docker compose up -d`, `docker rm`이 모두 여기 해당합니다. 키가 새로 생기면 모든 사용자가 즉시 로그아웃되고 에이전트 연결이 끊어집니다.
 :::
 
 **토폴로지:** 이 컨테이너는 릴레이만 실행합니다. 실제 시뮬레이터를 구동하는 에이전트는 같은 LAN의 Mac에서 실행되어야 하며, `agent` 스코프 토큰을 사용하여 이 Docker 서버로 아웃바운드 연결을 해야 합니다(`tapflow agent start --relay ws://<docker-box-ip>:4000 --token ...`).

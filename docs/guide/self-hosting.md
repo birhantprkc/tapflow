@@ -41,7 +41,7 @@ docker compose up -d
 ```
 
 ::: danger A volume is mandatory
-Notice the `./data:/app/.tapflow/data` volume above. It is strictly required. The relay writes a per-install secret to `<dataDir>/jwt-secret` and reuses it; without the volume that file lives in the container's writable layer. `docker restart` keeps it, because the layer survives — but anything that **recreates** the container loses it, including an image update, `docker compose down && up`, and `docker rm`. A new secret instantly logs out every user and breaks all agent connections.
+Notice the `./data:/app/.tapflow/data` volume above. It is strictly required. The relay writes a per-install secret to `<dataDir>/jwt-secret` and reuses it; without the volume that file lives in the container's writable layer. `docker restart` keeps it, because the layer survives — but anything that **recreates** the container loses it, including an image update, `docker compose down && docker compose up -d`, and `docker rm`. A new secret instantly logs out every user and breaks all agent connections.
 :::
 
 **Topology:** The container runs the relay *only*. Agents (which drive real simulators) must still run on Macs on your LAN, connecting outbound to this Docker server using an `agent`-scope token (`tapflow agent start --relay ws://<docker-box-ip>:4000 --token ...`).
