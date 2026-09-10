@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **android-agent**: Log unexpected scrcpy server process exits with their exit code and signal as warnings, while expected exits from `stop()` log at debug level (#481).
+
 - **Android and iOS now show the same unsupported-streaming status.** When the browser cannot decode the device stream, both viewers now report it through the shared status region instead of Android showing a Korean-only message and iOS showing nothing.
 
 - **A state file anyone could have written no longer confirms the iOS network filter** ([#734](https://github.com/jo-duchan/tapflow/issues/734)). The filter publishes what it is enforcing to a file, and falls back to `/tmp` when its protected directory refuses it. `/tmp` is world-writable, so any local process could write a file there with a current timestamp and a rule naming a device, and since the state file became the confirmation of a rule write the agent would take that simulator offline on its word — the sign-off failure the feature exists to prevent. A state file in a world-writable directory is now believed only when root owns it and nobody else can change it, checked on the file that is then read rather than on the path. The liveness check reads the same way, so a forged file cannot hide a filter that stopped either. The protected path is unaffected, and a refused file is named once in the log.
