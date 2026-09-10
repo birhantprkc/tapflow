@@ -18,7 +18,7 @@ The agent streams video frames to the relay continuously, so the two must share 
 You can run the relay via Docker on an always-on LAN box. This provides a clean deployment using the official image, freeing you from installing Node.js globally.
 
 ```sh
-docker pull tapflow/tapflow
+docker pull tapflow/tapflow:latest
 ```
 
 Create a `docker-compose.yml`:
@@ -26,7 +26,7 @@ Create a `docker-compose.yml`:
 ```yaml
 services:
   relay:
-    image: tapflow/tapflow:edge
+    image: tapflow/tapflow:latest
     ports:
       - "4000:4000"
     volumes:
@@ -37,11 +37,11 @@ services:
 Start the container:
 
 ```sh
-docker-compose up -d
+docker compose up -d
 ```
 
 ::: danger A volume is mandatory
-Notice the `./data:/app/.tapflow/data` volume above. It is strictly required. If omitted, the relay generates a new `JWT_SECRET` inside the container every time it restarts, which will instantly log out every user and break all agent connections.
+Notice the `./data:/app/.tapflow/data` volume above. It is strictly required. The relay writes a per-install secret to `<dataDir>/jwt-secret` and reuses it; without the volume that file lives in the container's writable layer. `docker restart` keeps it, because the layer survives — but anything that **recreates** the container loses it, including an image update, `docker compose down && up`, and `docker rm`. A new secret instantly logs out every user and breaks all agent connections.
 :::
 
 **Topology:** The container runs the relay *only*. Agents (which drive real simulators) must still run on Macs on your LAN, connecting outbound to this Docker server using an `agent`-scope token (`tapflow agent start --relay ws://<docker-box-ip>:4000 --token ...`).

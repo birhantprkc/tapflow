@@ -76,7 +76,9 @@ If you are publishing a fork of tapflow to a custom Docker registry namespace, y
 - `DOCKERHUB_USERNAME` — your Docker Hub username.
 - `DOCKERHUB_TOKEN` — your Docker Hub personal access token (Read & Write permissions).
 
-The `.github/workflows/docker-publish.yml` workflow will automatically detect these secrets and publish multi-platform images (`linux/amd64`, `linux/arm64`) to `your-username/tapflow` on every push to `main` and on version tags. Without these secrets, the CI will only build and smoke-test the image for validation, without attempting to publish it.
+The `.github/workflows/docker-publish.yml` workflow detects these secrets and publishes multi-platform images (`linux/amd64`, `linux/arm64`) on every push to `main` and on version tags. Without these secrets, CI only builds and smoke-tests the image for validation, without attempting to publish it.
+
+**The secrets alone are not enough.** That workflow hardcodes `IMAGE: tapflow/tapflow`, so a fork that sets only the two secrets pushes at *this* project's namespace and fails on permissions. Change `IMAGE` to your own namespace in the workflow as well.
 
 ### Versioning (Semver)
 
