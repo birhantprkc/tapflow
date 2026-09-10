@@ -22,12 +22,13 @@ WORKDIR /app
 # source compile of a few minutes — so an unusually slow build here is worth reading as "the
 # download failed" rather than as a mystery. The runtime stage is a fresh image that copies only
 # `/app/out`, so the shipped image does not carry any of this.
+#
+# **Measured once rather than assumed**, because a normal build never exercises this: it was forced
+# with `npm_config_build_from_source=true` on one CI cycle of the PR that added it, and node-gyp
+# compiled `better_sqlite3.node` to `gyp info ok` on both architectures — 82s on amd64, 90s on
+# arm64, against a ~35s build when the prebuild is fetched. That commit was reverted; a permanent
+# source compile would spend those ninety seconds on every release.
 RUN apk add --no-cache git python3 make g++
-
-# TEMPORARY — forces the node-gyp path so this PR's CI proves the toolchain above can actually
-# compile better-sqlite3 on both architectures. Removed in the next commit; a permanent source
-# compile would cost minutes on every release build.
-ENV npm_config_build_from_source=true
 
 # Install pnpm
 RUN npm install -g pnpm@9.15.1
