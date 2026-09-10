@@ -21,8 +21,9 @@ const commonRules = {
   // Deprecated in core since 8.53 and **removed in 11.0.0**, which is the next major rather than a
   // distant one — the version is in the rule's own metadata. ESLint does report the use, in
   // `usedDeprecatedRules`; the stylish formatter this repo runs simply does not print it, so a
-  // quiet `pnpm lint` is not evidence the rule is current. The replacement is `@stylistic/eol-last`,
-  // a new dependency for one rule and not worth adding before the upgrade needs it.
+  // quiet `pnpm lint` is not evidence the rule is current. The migration is the `@stylistic/eol-last`
+  // rule, which comes from the `@stylistic/eslint-plugin` package — a whole plugin as a new
+  // dependency for one rule, and not worth adding before the upgrade needs it.
   'eol-last': ['error', 'always'],
   '@typescript-eslint/no-explicit-any': 'error',
   '@typescript-eslint/no-unused-vars': ['warn', { argsIgnorePattern: '^_', varsIgnorePattern: '^_', caughtErrorsIgnorePattern: '^_' }],
