@@ -42,10 +42,10 @@ docker compose up -d
 
 ::: warning `publicUrl`을 설정하세요. 비우면 초대 링크가 받는 사람의 컴퓨터를 가리킵니다
 릴레이는 `Host` 헤더로 자기 주소를 추론하지 않습니다. 위조된 헤더가 피싱 링크를 정상 초대 메일로
-내보낼 수 있어서 일부러 그렇게 두었습니다. 설정이 없으면 `http://localhost:4000`으로 떨어지므로,
-팀원에게 보낸 초대가 그 사람의 컴퓨터를 열고 실패합니다.
+내보낼 수 있어서 일부러 그렇게 두었습니다. 설정이 없으면 `http://localhost:4000`으로 떨어집니다. 팀원에게 보낸 초대는
+그 사람의 컴퓨터를 열고 실패합니다.
 
-사람들이 실제로 입력할 주소를 볼륨 안의 `<dataDir>/tapflow.config.json`에 적습니다:
+팀이 실제로 입력할 주소를 볼륨 안의 `<dataDir>/tapflow.config.json`에 적습니다:
 
 ```json
 { "tunnel": { "publicUrl": "http://<docker-box-ip>:4000" } }
@@ -53,11 +53,11 @@ docker compose up -d
 :::
 
 ::: warning 브라우저를 열기 전에 첫 계정을 만드세요
-`/setup` 온보딩은 루프백에서 온 요청에만 응답하는데 컨테이너는 브리지 게이트웨이를 거칩니다. 그래서
-거절당하고, 오류는 호스트에서 `tapflow admin init`을 실행하라고 안내하지만 릴레이 전용 이미지에는
-CLI가 없습니다. `TAPFLOW_ADMIN_EMAIL`과 `TAPFLOW_ADMIN_PASSWORD`를 설정하면 릴레이가 시작하면서
-계정을 만듭니다. 두 변수를 함께 설정해야 하고, 비밀번호는 8자 이상이며, 이미 소유자가 있는 설치에서는
-아무 일도 하지 않습니다. 어느 `.env` 파일을 읽는지를 포함한 자세한 내용은
+`/setup` 온보딩은 루프백에서 온 요청에만 응답하는데 컨테이너는 브리지 게이트웨이를 거칩니다. 그래서 거절당합니다.
+오류는 호스트에서 `tapflow admin init`을 실행하라고 안내하지만 릴레이 전용 이미지에는 CLI가
+없습니다. `TAPFLOW_ADMIN_EMAIL`과 `TAPFLOW_ADMIN_PASSWORD`를 설정하면 릴레이가 시작하면서
+계정을 만듭니다. 두 변수는 함께 설정해야 합니다. 비밀번호는 8자 이상이고 이미 소유자가 있는 설치에서는
+아무 일도 하지 않습니다. 어느 `.env` 파일을 읽는지까지 자세한 내용은
 [설정](/ko/reference/configuration#docker-컨테이너에서-첫-관리자-계정-만들기-tapflow-admin-email)에
 있습니다.
 :::
