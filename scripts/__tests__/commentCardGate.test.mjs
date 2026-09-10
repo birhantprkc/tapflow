@@ -22,7 +22,7 @@ const HOOK = path.join(REPO, '.claude/hooks/comment-card-gate.sh')
 
 /** A transcript line carrying one tool call, in the shape the runtime writes. */
 const record = (name, input) => JSON.stringify({ message: { content: [{ type: 'tool_use', name, input }] } })
-const CARD = path.resolve('/repo/.work/COMMENT-CARD.md')
+const CARD = path.resolve('/repo/.internal/COMMENT-CARD.md')
 const READ_CARD = record('Read', { file_path: CARD })
 /** `cardWasRead` against the card this repo would resolve, which is the whole point of the second
  *  argument: a filename match accepted `/tmp/COMMENT-CARD.md` and `NOT-COMMENT-CARD.md` alike. */
@@ -92,9 +92,26 @@ describe('which commands post a comment', () => {
     // The list is GitHub's rather than ours, which is why it is enumerated: a `*Comment*` pattern
     // would catch `deleteIssueComment`, which publishes nothing, and miss `addPullRequestReview`,
     // which does.
+    //
+    // Nine of these were missing and the gate said nothing while a session replied into review
+    // threads with `addPullRequestReviewThreadReply` a dozen times. The last four are the ones a
+    // second attempt still missed, because it reached for another name rule — none of them starts
+    // with `add` or `update`. The test that matters is the negative pair below.
     for (const op of ['addComment', 'addPullRequestReview', 'addPullRequestReviewComment',
-      'addDiscussionComment', 'updateIssueComment']) {
+      'addDiscussionComment', 'updateIssueComment',
+      'addPullRequestReviewThread', 'addPullRequestReviewThreadReply',
+      'updatePullRequestReview', 'updatePullRequestReviewComment', 'updateDiscussionComment',
+      'submitPullRequestReview', 'dismissPullRequestReview', 'createDiscussion', 'updateDiscussion']) {
       it(`sees ${op}`, () => expect(postsAComment(mutation(op)), op).toBe(true))
+    }
+
+    // **The negatives are chosen to be reachable by the criterion, not obviously outside it.**
+    // `deleteIssueComment` alone earned nothing: no rule anyone would write puts it in.
+    // `minimizeComment` is the one that costs something to refuse — it is a `*Comment*` name, it
+    // acts on a comment, and its input carries only `classifier`, so the schema is what says no.
+    // `dismissPullRequestReview` is its mirror: not a `*Comment*` name, and it carries `message`.
+    for (const op of ['minimizeComment', 'deleteIssueComment', 'addLabelsToLabelable']) {
+      it(`does not see ${op}`, () => expect(postsAComment(mutation(op)), op).toBe(false))
     }
 
     it('allows a query that only reads', () => {
@@ -148,7 +165,7 @@ describe('which commands post a comment', () => {
 
     // The prefilter half is asserted where the hook is spawned against a throwaway checkout — see
     // `the hook itself, spawned`. It cannot be done from here: this repo's own card lives under
-    // gitignored `.work/`, so a test that spawns the hook against this checkout passes on the
+    // gitignored `.internal/`, so a test that spawns the hook against this checkout passes on the
     // author's machine and allows the command in CI, where the card does not exist.
   })
 
@@ -211,34 +228,34 @@ describe('whether the card was read this session', () => {
 
   it('is false when the name only appears in prose', () => {
     // A gate satisfied by its own block message would never fire twice.
-    const mention = JSON.stringify({ message: { content: [{ type: 'text', text: 'read .work/COMMENT-CARD.md first' }] } })
+    const mention = JSON.stringify({ message: { content: [{ type: 'text', text: 'read .internal/COMMENT-CARD.md first' }] } })
     expect(withTranscript([mention], sawCard)).toBe(false)
   })
 
   it('is false for a card that is not this repository\'s', () => {
     // A filename match took any of these. The gate resolves a path; the check now compares it.
-    for (const fp of ['/tmp/COMMENT-CARD.md', '/other/repo/.work/COMMENT-CARD.md', '/repo/.work/NOT-COMMENT-CARD.md']) {
+    for (const fp of ['/tmp/COMMENT-CARD.md', '/other/repo/.internal/COMMENT-CARD.md', '/repo/.internal/NOT-COMMENT-CARD.md']) {
       expect(withTranscript([record('Read', { file_path: fp })], sawCard), fp).toBe(false)
     }
   })
 
   it('resolves a relative shell mention against the directory it ran in', () => {
-    // `cat .work/COMMENT-CARD.md` counted the same from anywhere, so a command that failed — or ran
+    // `cat .internal/COMMENT-CARD.md` counted the same from anywhere, so a command that failed — or ran
     // in a different checkout — satisfied the gate. Every transcript record carries the `cwd` the
     // call ran in; this project's carry 22 distinct ones, so the wrong-directory case is the common
     // one rather than a corner.
     const repo = path.dirname(path.dirname(CARD))
-    expect(withTranscript([bashAt(repo, 'cat .work/COMMENT-CARD.md')], sawCard), 'at the root').toBe(true)
-    expect(withTranscript([bashAt(path.join(repo, 'packages/relay'), 'cat .work/COMMENT-CARD.md')], sawCard),
+    expect(withTranscript([bashAt(repo, 'cat .internal/COMMENT-CARD.md')], sawCard), 'at the root').toBe(true)
+    expect(withTranscript([bashAt(path.join(repo, 'packages/relay'), 'cat .internal/COMMENT-CARD.md')], sawCard),
       'in a subdirectory, where it fails').toBe(false)
-    expect(withTranscript([bashAt('/somewhere/else', 'cat .work/COMMENT-CARD.md')], sawCard),
+    expect(withTranscript([bashAt('/somewhere/else', 'cat .internal/COMMENT-CARD.md')], sawCard),
       'in another checkout').toBe(false)
   })
 
   it('takes an absolute mention with no directory to resolve against', () => {
     const noCwd = JSON.stringify({ message: { content: [{ type: 'tool_use', name: 'Bash', input: { command: `cat ${CARD}` } }] } })
     expect(withTranscript([noCwd], sawCard)).toBe(true)
-    const relativeNoCwd = JSON.stringify({ message: { content: [{ type: 'tool_use', name: 'Bash', input: { command: 'cat .work/COMMENT-CARD.md' } }] } })
+    const relativeNoCwd = JSON.stringify({ message: { content: [{ type: 'tool_use', name: 'Bash', input: { command: 'cat .internal/COMMENT-CARD.md' } }] } })
     expect(withTranscript([relativeNoCwd], sawCard), 'a relative one has nothing to resolve with').toBe(false)
   })
 
@@ -268,7 +285,7 @@ describe('whether the card was read this session', () => {
     // and reading it through the shell all put it in front of the writer.
     expect(withTranscript([record('Write', { file_path: CARD, content: '#' })], sawCard)).toBe(true)
     expect(withTranscript([record('Edit', { replace_all: false, file_path: CARD })], sawCard)).toBe(true)
-    expect(withTranscript([bashAt(path.dirname(path.dirname(CARD)), 'cat .work/COMMENT-CARD.md')], sawCard)).toBe(true)
+    expect(withTranscript([bashAt(path.dirname(path.dirname(CARD)), 'cat .internal/COMMENT-CARD.md')], sawCard)).toBe(true)
   })
 
   it('survives an unparseable line', () => {
@@ -283,10 +300,10 @@ describe('whether the card was read this session', () => {
 describe('a contributor is unaffected even if this is wired for them', () => {
   it('allows the command outright when the card is absent', () => {
     // **Layer 3, and the only one that survives a mistake.** The card lives under gitignored
-    // `.work/` and the wiring under gitignored `settings.local.json`, so a contributor does not
+    // `.internal/` and the wiring under gitignored `settings.local.json`, so a contributor does not
     // reach this — but neither of those is a property of the code.
     const v = judge('gh pr comment 1 --body "x"', {
-      cardPath: '/repo/.work/COMMENT-CARD.md',
+      cardPath: '/repo/.internal/COMMENT-CARD.md',
       transcriptPath: '/nowhere.jsonl',
       exists: () => false,
     })
@@ -297,7 +314,7 @@ describe('a contributor is unaffected even if this is wired for them', () => {
     // The contrast is what makes the assertion above mean something: without it, "allows" could be
     // true for any reason at all.
     const v = judge('gh pr comment 1 --body "x"', {
-      cardPath: '/repo/.work/COMMENT-CARD.md',
+      cardPath: '/repo/.internal/COMMENT-CARD.md',
       transcriptPath: '/nowhere.jsonl',
       exists: () => true,
     })
@@ -315,8 +332,8 @@ describe('the hook itself, spawned', () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'card-repo-'))
     spawnSync('git', ['init', '-q', dir])
     if (card) {
-      mkdirSync(path.join(dir, '.work'), { recursive: true })
-      writeFileSync(path.join(dir, '.work/COMMENT-CARD.md'), '# card\n')
+      mkdirSync(path.join(dir, '.internal'), { recursive: true })
+      writeFileSync(path.join(dir, '.internal/COMMENT-CARD.md'), '# card\n')
     }
     mkdirSync(path.join(dir, 'scripts/lib'), { recursive: true })
     for (const f of ['comment-card-gate.mjs', 'lib/comment-card.mjs', 'lib/gh-command.mjs']) {
@@ -338,7 +355,7 @@ describe('the hook itself, spawned', () => {
   }
 
   it('does not accept a read of some other repository\'s card', () => {
-    // The fixture that used to pass this suite: a `Read` of `/repo/.work/COMMENT-CARD.md` while the
+    // The fixture that used to pass this suite: a `Read` of `/repo/.internal/COMMENT-CARD.md` while the
     // card actually lives in the throwaway checkout. Matching by filename accepted it.
     expect(inRepo('gh pr comment 701 --body "x"', { transcript: [READ_CARD] }).status).toBe(2)
   })
@@ -350,7 +367,7 @@ describe('the hook itself, spawned', () => {
   })
 
   it('allows it once the card has been read', () => {
-    const readItThere = (dir) => [record('Read', { file_path: path.join(dir, '.work/COMMENT-CARD.md') })]
+    const readItThere = (dir) => [record('Read', { file_path: path.join(dir, '.internal/COMMENT-CARD.md') })]
     expect(inRepo('gh pr comment 701 --body "x"', { transcript: readItThere }).status).toBe(0)
   })
 
@@ -392,7 +409,7 @@ describe('the hook itself, spawned', () => {
     // Asserted through the hook because the prefilter is the half a unit test cannot see.
     //
     // In a throwaway checkout, not this one: the card the gate needs lives under gitignored
-    // `.work/`, so spawning against this repo passes locally and allows the command in CI.
+    // `.internal/`, so spawning against this repo passes locally and allows the command in CI.
     expect(inRepo("gh api graphql -f query='mutation{addComment(input:{}){id}}'").status).toBe(2)
   })
 

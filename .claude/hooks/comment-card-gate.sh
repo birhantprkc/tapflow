@@ -8,7 +8,7 @@
 # prose will be more subtly wrong, not less.
 #
 # **Three independent reasons a contributor is unaffected**, and only the third survives a mistake:
-#   1. the card lives under `.work/`, which is gitignored — they do not have the file
+#   1. the card lives under `.internal/`, which is gitignored — they do not have the file
 #   2. the wiring lives in `settings.local.json`, which is gitignored — they do not load this hook
 #   3. `scripts/lib/comment-card.mjs` allows the command outright when the card is absent
 #

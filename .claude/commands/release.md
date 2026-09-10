@@ -130,6 +130,9 @@ model: claude-opus-5
 
 - lint / typecheck(pre-commit 훅이 잡지만 미리 확인 가능).
 - 내부 의존성이 `workspace:*`라 lockfile 변경은 없어야 정상 — 변경이 생겼으면 의심한다.
+- **수동 E2E 패스**: `.internal/MANUAL-E2E-CHECKLIST.md`. 자동 스위트가 닿지 않는 것 — 실제
+  시뮬레이터·에뮬레이터의 스트림, 입력, 녹화 — 만 담고 있고 릴리스마다 같은 항목을 돈다. 사용자
+  머신이 필요하므로 여기서 멈추고 결과를 받는다. 파일이 없는 클론이면(gitignore) 이 항목은 건너뛴다.
 
 ## 9. 커밋 → STOP
 
