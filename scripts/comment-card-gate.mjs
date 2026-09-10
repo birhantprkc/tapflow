@@ -8,7 +8,16 @@
 import path from 'node:path'
 import { judge } from './lib/comment-card.mjs'
 
-const CARD = '.work/COMMENT-CARD.md'
+// `.internal/`, not `.work/`. That directory is dated work logs — `YYYY-MM-DD-{topic}-{type}.md`
+// per its own CLAUDE.md — and the card is a standing register, not a log of anything. It sits
+// with the other local-only operating documents. Both directories are gitignored, so a
+// contributor's checkout has neither and the gate stays off for them either way.
+//
+// **Moving it is a two-file change with a silent failure mode**: `judge` returns `blocked: false`
+// when the card is absent, so a path that points at nothing turns the gate off rather than
+// breaking it. `commentCardGate.test.mjs` builds a throwaway checkout, puts the card where this
+// constant says, and runs the hook — pointing this back at `.work/` turns that suite red.
+const CARD = '.internal/COMMENT-CARD.md'
 
 const message = `Blocked: read ${CARD} before writing this comment.
 

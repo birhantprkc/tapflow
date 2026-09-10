@@ -81,6 +81,14 @@ function apiCommentInvocations(cmd) {
 const COMMENT_MUTATIONS = [
   'addComment', 'addPullRequestReview', 'addPullRequestReviewComment',
   'addDiscussionComment', 'updateIssueComment',
+  // **The five below were missing, and the gap was found by using it.** A session replied into review
+  // threads with `addPullRequestReviewThreadReply` a dozen times and the gate said nothing — the
+  // enumeration above is right about *why* it is an enumeration and was simply short. Checked against
+  // the live schema (`{ __type(name: "Mutation") { fields { name } } }`) rather than recalled, which
+  // is also how to grow it next time: every `add*`/`update*` whose name ends in `Comment` or `Review`,
+  // plus the two `ReviewThread` forms, and then judge each one against "does it publish prose".
+  'addPullRequestReviewThread', 'addPullRequestReviewThreadReply',
+  'updatePullRequestReview', 'updatePullRequestReviewComment', 'updateDiscussionComment',
 ]
 
 /** Every value given for one field name. Read by name, since only a `body` field is a body. */
@@ -135,7 +143,7 @@ function samePath(a, b) {
  *
  * **A relative mention is resolved against the record's own directory.** Every transcript record
  * carries the `cwd` the call ran in, and this project's carry 22 distinct ones. Without using it,
- * `cat .work/COMMENT-CARD.md` counted the same whether it ran at the repo root, in
+ * `cat .internal/COMMENT-CARD.md` counted the same whether it ran at the repo root, in
  * `packages/relay` where it fails, or in a different checkout entirely — so a command that never
  * read the card satisfied the gate. A record with no `cwd` cannot resolve a relative mention and
  * does not get one; the absolute form still counts, since it needs no directory to be unambiguous.
@@ -160,7 +168,7 @@ function namesCard(input, cardPath, relative, recordCwd) {
  * would otherwise let it fire exactly once ever.
  *
  * A floor, not a fence, and the boundary is narrower than it was: a command naming the card in the
- * directory that holds it counts whether or not it read anything — `ls .work/COMMENT-CARD.md` does.
+ * directory that holds it counts whether or not it read anything — `ls .internal/COMMENT-CARD.md` does.
  * Whether the read *succeeded* is not checked, because that needs the result rather than the call.
  * That direction costs a missed prompt for a cooperative reader, which is the threat model these
  * gates state.
