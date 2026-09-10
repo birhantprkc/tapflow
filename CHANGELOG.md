@@ -7,10 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-
-- **android-agent**: Log unexpected scrcpy server process exits with their exit code and signal as warnings, while expected exits from `stop()` log at debug level (#481).
-
 ### Security
 
 - `js-yaml` moved to 3.15.2 / 4.3.2 and `hono` to 4.13.7, closing **five Dependabot alerts across four advisories**, and `pnpm.overrides` stayed empty. The two counts differ because GHSA-2883-xcg3-v3hh is raised once for each of `js-yaml`'s affected version lines, 3.x and 4.x — the same shape as alerts #71 and #72 in the previous cycle. The four are GHSA-2883-xcg3-v3hh, GHSA-crvj-82cr-hjcx, GHSA-g6gw-c38x-mqfc and GHSA-gqvv-2mrq-wpjv. **Dependabot reported both as impossible** — `security_update_not_possible`, `latest-resolvable-version: 3.15.1` against a floor of 3.15.2, with `conflicting-dependencies: []` naming nothing that blocked it. Nothing did: `read-yaml-file` declares `^3.6.1`, which admits 3.15.2 freely, and `pnpm update` took all five with a fifteen-line lockfile change and no pin. That is the second time in two cycles that a bump reported as blocked was a lockfile which had never re-evaluated a range that already allowed the patch — see the entry under 0.20.0 below, which says the same thing about the previous `js-yaml` advisory.
@@ -18,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `hono` (GHSA-crvj-82cr-hjcx, GHSA-g6gw-c38x-mqfc, GHSA-gqvv-2mrq-wpjv) does sit in a published package's production tree, through `@modelcontextprotocol/sdk` inside `@tapflowio/mcp-server` — **and no hono code runs.** The SDK reaches it from `server/streamableHttp.js`, and tapflow's MCP server imports `server/mcp.js` and `server/stdio.js` and speaks over stdio. Verified by loading each entry point under a resolver hook rather than by reading imports: those two pull in nothing matching `hono`, while `streamableHttp.js` as a control pulls `@hono/node-server` and then `hono/ws`. So this is hygiene, not a hole being closed. It is worth stating plainly because the first attempt to establish it was a source grep for `from 'hono'`, which missed `@hono/node-server` entirely and would have called a first-class SDK export an example.
 
 ### Fixed
+
+- **android-agent**: Log unexpected scrcpy server process exits with their exit code and signal as warnings, while expected exits from `stop()` log at debug level (#481).
 
 - **Android and iOS now show the same unsupported-streaming status.** When the browser cannot decode the device stream, both viewers now report it through the shared status region instead of Android showing a Korean-only message and iOS showing nothing.
 
