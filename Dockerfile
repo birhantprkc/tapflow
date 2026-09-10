@@ -24,6 +24,11 @@ WORKDIR /app
 # `/app/out`, so the shipped image does not carry any of this.
 RUN apk add --no-cache git python3 make g++
 
+# TEMPORARY — forces the node-gyp path so this PR's CI proves the toolchain above can actually
+# compile better-sqlite3 on both architectures. Removed in the next commit; a permanent source
+# compile would cost minutes on every release build.
+ENV npm_config_build_from_source=true
+
 # Install pnpm
 RUN npm install -g pnpm@9.15.1
 
