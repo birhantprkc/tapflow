@@ -4,6 +4,26 @@ import reactHooks from 'eslint-plugin-react-hooks'
 import reactRefresh from 'eslint-plugin-react-refresh'
 
 const commonRules = {
+  // A file that does not end in a newline costs the *next* commit rather than this one: appending a
+  // line shows the unchanged closing brace as removed and re-added, and hands its blame to whoever
+  // made that later edit. Added when every file already complied, so it enforces the convention
+  // rather than starting a reformat — two files had drifted in an in-flight PR, which is what
+  // showed there was nothing holding it.
+  //
+  // **It reaches 522 of the 539 files `git ls-files` reports**, and the gap is worth knowing rather
+  // than closing here. One of the seventeen is the deliberate `typeAssertions.ts` exclusion above.
+  // The other sixteen are nobody's decision: `playground/` and `docs/` have no `lint` script; each
+  // package lints `src` only, so the `vitest.config.ts` files and `vitest.shared.ts` sit outside;
+  // and the `**/*.mjs` ignore catches `postcss.config.mjs`, one agent script, and **this file** —
+  // `!scripts/**` is anchored at the root, so it never reaches `packages/*/scripts/`. All seventeen
+  // comply today, and nothing holds them there.
+  //
+  // Deprecated in core since 8.53 and **removed in 11.0.0**, which is the next major rather than a
+  // distant one — the version is in the rule's own metadata. ESLint does report the use, in
+  // `usedDeprecatedRules`; the stylish formatter this repo runs simply does not print it, so a
+  // quiet `pnpm lint` is not evidence the rule is current. The replacement is `@stylistic/eol-last`,
+  // a new dependency for one rule and not worth adding before the upgrade needs it.
+  'eol-last': ['error', 'always'],
   '@typescript-eslint/no-explicit-any': 'error',
   '@typescript-eslint/no-unused-vars': ['warn', { argsIgnorePattern: '^_', varsIgnorePattern: '^_', caughtErrorsIgnorePattern: '^_' }],
 }
