@@ -154,7 +154,12 @@ export class ScrcpySession {
   }
 
   stop(serial: string): void {
-    this.stoppedProc = this.serverProc
+    // Keep the previous marker when there is nothing to mark — a stop() that finds serverProc
+    // already null would erase it, and the exit we caused would come back as unexpected. No
+    // caller does that today (both null the session immediately after stopping it), so this
+    // keeps the invariant in the class that owns it rather than in two call sites that happen
+    // to be written correctly.
+    if (this.serverProc) this.stoppedProc = this.serverProc
     this.serverProc?.kill()
     this.serverProc = null
     this.videoSocket?.destroy()

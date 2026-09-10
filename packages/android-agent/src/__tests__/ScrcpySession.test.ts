@@ -178,6 +178,49 @@ describe('ScrcpySession', () => {
     debugSpy.mockRestore()
   })
 
+  it('keeps the stopped marker when stop() runs a second time with nothing to stop', async () => {
+    // The guard in stop(): assigning `stoppedProc = this.serverProc` unconditionally would store
+    // `null` on the second call, and the exit from the process the FIRST call killed would then
+    // find no match and log as unexpected — the false positive the identity check exists to
+    // prevent, on the teardown path where a misleading log costs the most.
+    //
+    // **Mutation:** dropping the `if (this.serverProc)` guard must fail this test.
+    //
+    // No caller reaches this today — `cleanupDeviceState` and `restartVideoStream` both null the
+    // session immediately after stopping it — so this holds an invariant rather than a live bug.
+    vi.useFakeTimers()
+
+    const proc = makeFakeProc()
+    vi.mocked(spawn).mockReturnValue(proc as never)
+    vi.mocked(execFile)
+      .mockImplementationOnce(cbSuccess as never)
+      .mockImplementationOnce(cbFail(new Error('forward failed')) as never)
+      .mockImplementation(cbSuccess as never)
+
+    const { ScrcpySession } = await import('../scrcpy/ScrcpySession.js')
+    const session = new ScrcpySession()
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const debugSpy = vi.spyOn(console, 'debug').mockImplementation(() => {})
+
+    const startPromise = session.start('emulator-5554').catch(() => {})
+    await vi.advanceTimersByTimeAsync(0)
+
+    session.stop('emulator-5554')
+    session.stop('emulator-5554') // second call: serverProc is already null
+
+    proc.emit('exit', null, 'SIGTERM')
+
+    await vi.advanceTimersByTimeAsync(1500)
+    await startPromise
+
+    expect(warnSpy).not.toHaveBeenCalledWith(expect.stringContaining('unexpectedly'))
+    expect(debugSpy).toHaveBeenCalledWith(expect.stringContaining('signal=SIGTERM'))
+
+    warnSpy.mockRestore()
+    debugSpy.mockRestore()
+  })
+
   it('warns again on an unexpected exit after a restart following a clean stop', async () => {
     // Regression: `stopping` was set true in stop() but never reset, so after the FIRST
     // stop/restart cycle every later unexpected exit silently logged at debug forever --
