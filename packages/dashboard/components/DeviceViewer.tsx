@@ -707,6 +707,7 @@ export function DeviceViewer({ sessionId, deviceId, buildId, resetMode, onRecord
             joined={joined} fps={0} connected={connected}
             deviceReady={deviceReady} bootError={bootError}
             installing={installing} installError={installError}
+            decoderUnsupported={false}
             keyboardActive={false} agentAway={agentAway}
           />
         </div>

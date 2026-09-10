@@ -83,6 +83,7 @@ export function IOSViewer({
 
   const [deepLinkOpen, setDeepLinkOpen] = useState(false);
   const [canvasReady, setCanvasReady] = useState(false);
+  const [decoderUnsupported, setDecoderUnsupported] = useState(false);
   const [isLandscape, setIsLandscape] = useState(false);
   const [keyboardActive, setKeyboardActive] = useState(false);
   const [flashedButton, setFlashedButton] = useState<string | null>(null);
@@ -122,7 +123,7 @@ export function IOSViewer({
     binaryFrameHandlerRef,
     perfHookRef,
     frameCount,
-    onUnsupported: () => { /* iOS has no separate unsupported UI; the hook warns */ },
+    onUnsupported: () => setDecoderUnsupported(true),
     onResize: (size) => {
       const canvas = canvasRef.current
       if (canvas && (canvas.width !== size.width || canvas.height !== size.height)) {
@@ -806,6 +807,7 @@ export function IOSViewer({
           joined={joined} fps={fps} connected={connected}
           deviceReady={deviceReady} bootError={bootError}
           installing={installing} installError={installError}
+          decoderUnsupported={decoderUnsupported}
           keyboardActive={keyboardActive}
         />
       </div>

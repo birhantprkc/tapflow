@@ -585,13 +585,7 @@ export function AndroidViewer({
           className="relative"
           style={{ width: containerW, height: containerH, backgroundColor: '#010101', borderRadius: `${screenRadius}px`, overflow: 'hidden' }}
         >
-          {decoderUnsupported ? (
-            <div className="absolute inset-0 flex items-center justify-center p-4 text-center">
-              <span style={{ color: 'rgba(255,255,255,0.6)', fontSize: '0.875rem' }}>
-                이 환경에서는 스트리밍을 표시할 수 없습니다.<br />Chrome/Edge 또는 HTTPS 환경에서 다시 시도해 주세요.
-              </span>
-            </div>
-          ) : (
+          {!decoderUnsupported && (
             <>
               <div
                 ref={surfaceHostRef}
@@ -643,6 +637,7 @@ export function AndroidViewer({
           joined={joined} fps={fps} connected={connected}
           deviceReady={deviceReady} bootError={bootError}
           installing={installing} installError={installError}
+          decoderUnsupported={decoderUnsupported}
           keyboardActive={keyboardActive}
         />
       </div>
