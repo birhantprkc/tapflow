@@ -54,7 +54,8 @@ if (typeof transcript !== 'string' || !transcript) process.exit(0)
 // **The shell already resolved the root and `cd`-ed there**, so this is it. Re-deriving it from
 // `payload.cwd` looked equivalent and was not: that field is the session's working directory, which
 // is a subdirectory for most of a session's life — 26 distinct values in this project's transcripts,
-// exactly one of them the repo root. The gate then looked for the card under `packages/relay/.work/`,
+// exactly one of them the repo root. The gate then looked for the card under `packages/relay/.work/`
+// — the card lived there at the time —
 // found nothing, and allowed the command for the same reason a contributor's checkout allows it.
 const root = process.cwd()
 

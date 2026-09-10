@@ -93,22 +93,24 @@ describe('which commands post a comment', () => {
     // would catch `deleteIssueComment`, which publishes nothing, and miss `addPullRequestReview`,
     // which does.
     //
-    // The last five were missing and the gate said nothing while a session replied into review
-    // threads with `addPullRequestReviewThreadReply` a dozen times. They come from the live schema
-    // rather than from memory — `{ __type(name: "Mutation") { fields { name } } }`, then every
-    // `add*`/`update*` ending in `Comment` or `Review`, plus the two `ReviewThread` forms, judged
-    // against "does it publish prose".
+    // Nine of these were missing and the gate said nothing while a session replied into review
+    // threads with `addPullRequestReviewThreadReply` a dozen times. The last four are the ones a
+    // second attempt still missed, because it reached for another name rule — none of them starts
+    // with `add` or `update`. The test that matters is the negative pair below.
     for (const op of ['addComment', 'addPullRequestReview', 'addPullRequestReviewComment',
       'addDiscussionComment', 'updateIssueComment',
       'addPullRequestReviewThread', 'addPullRequestReviewThreadReply',
-      'updatePullRequestReview', 'updatePullRequestReviewComment', 'updateDiscussionComment']) {
+      'updatePullRequestReview', 'updatePullRequestReviewComment', 'updateDiscussionComment',
+      'submitPullRequestReview', 'dismissPullRequestReview', 'createDiscussion', 'updateDiscussion']) {
       it(`sees ${op}`, () => expect(postsAComment(mutation(op)), op).toBe(true))
     }
 
-    // The other half of the enumeration's claim: a mutation that touches a conversation without
-    // publishing prose stays out. Without these two the list could grow into a `*Comment*` pattern
-    // and nothing would notice.
-    for (const op of ['deleteIssueComment', 'addLabelsToLabelable']) {
+    // **The negatives are chosen to be reachable by the criterion, not obviously outside it.**
+    // `deleteIssueComment` alone earned nothing: no rule anyone would write puts it in.
+    // `minimizeComment` is the one that costs something to refuse — it is a `*Comment*` name, it
+    // acts on a comment, and its input carries only `classifier`, so the schema is what says no.
+    // `dismissPullRequestReview` is its mirror: not a `*Comment*` name, and it carries `message`.
+    for (const op of ['minimizeComment', 'deleteIssueComment', 'addLabelsToLabelable']) {
       it(`does not see ${op}`, () => expect(postsAComment(mutation(op)), op).toBe(false))
     }
 
@@ -163,7 +165,7 @@ describe('which commands post a comment', () => {
 
     // The prefilter half is asserted where the hook is spawned against a throwaway checkout — see
     // `the hook itself, spawned`. It cannot be done from here: this repo's own card lives under
-    // gitignored `.work/`, so a test that spawns the hook against this checkout passes on the
+    // gitignored `.internal/`, so a test that spawns the hook against this checkout passes on the
     // author's machine and allows the command in CI, where the card does not exist.
   })
 
@@ -298,7 +300,7 @@ describe('whether the card was read this session', () => {
 describe('a contributor is unaffected even if this is wired for them', () => {
   it('allows the command outright when the card is absent', () => {
     // **Layer 3, and the only one that survives a mistake.** The card lives under gitignored
-    // `.work/` and the wiring under gitignored `settings.local.json`, so a contributor does not
+    // `.internal/` and the wiring under gitignored `settings.local.json`, so a contributor does not
     // reach this — but neither of those is a property of the code.
     const v = judge('gh pr comment 1 --body "x"', {
       cardPath: '/repo/.internal/COMMENT-CARD.md',
@@ -407,7 +409,7 @@ describe('the hook itself, spawned', () => {
     // Asserted through the hook because the prefilter is the half a unit test cannot see.
     //
     // In a throwaway checkout, not this one: the card the gate needs lives under gitignored
-    // `.work/`, so spawning against this repo passes locally and allows the command in CI.
+    // `.internal/`, so spawning against this repo passes locally and allows the command in CI.
     expect(inRepo("gh api graphql -f query='mutation{addComment(input:{}){id}}'").status).toBe(2)
   })
 

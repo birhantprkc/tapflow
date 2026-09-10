@@ -81,15 +81,31 @@ function apiCommentInvocations(cmd) {
 const COMMENT_MUTATIONS = [
   'addComment', 'addPullRequestReview', 'addPullRequestReviewComment',
   'addDiscussionComment', 'updateIssueComment',
-  // **The five below were missing, and the gap was found by using it.** A session replied into review
-  // threads with `addPullRequestReviewThreadReply` a dozen times and the gate said nothing — the
-  // enumeration above is right about *why* it is an enumeration and was simply short. Checked against
-  // the live schema (`{ __type(name: "Mutation") { fields { name } } }`) rather than recalled, which
-  // is also how to grow it next time: every `add*`/`update*` whose name ends in `Comment` or `Review`,
-  // plus the two `ReviewThread` forms, and then judge each one against "does it publish prose".
+  // **The nine below were missing, and the gap was found by using it.** A session replied into review
+  // threads with `addPullRequestReviewThreadReply` a dozen times and the gate said nothing.
   'addPullRequestReviewThread', 'addPullRequestReviewThreadReply',
   'updatePullRequestReview', 'updatePullRequestReviewComment', 'updateDiscussionComment',
+  // Four more that a first attempt at this list missed, because that attempt reached for a name
+  // pattern again — "every `add*`/`update*` ending in `Comment` or `Review`". None of these four
+  // starts with `add` or `update`, and every one of them publishes: `submitPullRequestReview` and
+  // `createDiscussion`/`updateDiscussion` carry `body`, `dismissPullRequestReview` carries `message`
+  // onto the PR timeline. Its REST spelling is already caught by the path regex, so that one action
+  // was blocked one way and open the other.
+  'submitPullRequestReview', 'dismissPullRequestReview', 'createDiscussion', 'updateDiscussion',
 ]
+
+/**
+ * **How to grow the list, which is not by matching names.** Twice now a name rule has produced a
+ * short list — `*Comment*` first, then `add*`/`update*` ending in `Comment` or `Review`. The
+ * criterion is what the mutation *does*, and the schema answers it directly: an input type with a
+ * `body` or `message` field publishes prose, and one without does not. `minimizeComment` carries
+ * only `classifier` and belongs out; `dismissPullRequestReview` carries `message` and belongs in.
+ *
+ *   gh api graphql -f query='{ __type(name: "Mutation") { fields { name } } }'
+ *   gh api graphql -f query='{ __type(name: "<Name>Input") { inputFields { name } } }'
+ *
+ * Read the second for any candidate before adding or refusing it.
+ */
 
 /** Every value given for one field name. Read by name, since only a `body` field is a body. */
 const fieldValues = (words, name) =>
@@ -210,7 +226,7 @@ export function cardWasRead(transcriptPath, cardPath) {
  * @returns {{ blocked: boolean, reason?: 'card-not-read' }}
  *
  * **Three independent reasons a contributor is unaffected**, and the third is the one that matters:
- * the card lives under gitignored `.work/`, the wiring lives in gitignored `settings.local.json`,
+ * the card lives under gitignored `.internal/`, the wiring lives in gitignored `settings.local.json`,
  * and this returns `blocked: false` when the card is absent. The first two are "it was not wired for
  * them"; only the third survives someone wiring it by mistake.
  */
