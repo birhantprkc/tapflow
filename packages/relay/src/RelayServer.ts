@@ -2263,28 +2263,62 @@ export class RelayServer {
     const headers: Record<string, string> = { 'Content-Type': contentType }
 
     // Content-hashed build assets never change → cache them forever.
+    // HTML entry points must revalidate on every load so updates are picked up immediately.
     if (urlPath.startsWith('/assets/')) {
       headers['Cache-Control'] = 'public, max-age=31536000, immutable'
+    } else if (filePath.endsWith('index.html')) {
+      headers['Cache-Control'] = 'no-cache'
     }
 
-    // Serve the build-time .br sibling when accepted (precompressed → no runtime CPU on the stream path).
+    // Serve precompressed siblings (.br or .gz) when accepted (precompressed → no runtime CPU on the stream path).
     const acceptHeader = req.headers['accept-encoding']
     const accept = Array.isArray(acceptHeader) ? acceptHeader.join(',') : acceptHeader ?? ''
-    const brAccepted = accept.split(',').some((token) => {
-      const [name, ...params] = token.trim().split(';')
-      const coding = name.trim().toLowerCase()
-      if (coding !== 'br' && coding !== '*') return false
-      const qParam = params.map((p) => p.trim()).find((p) => p.startsWith('q='))
-      const q = qParam ? Number(qParam.slice(2)) : 1
-      return !Number.isNaN(q) && q > 0
-    })
+
+    // **An explicit coding outranks `*`, rather than being maxed with it.** RFC 9110 §12.5.3 gives
+    // the more specific match precedence, and taking the maximum across both meant
+    // `Accept-Encoding: br;q=0, *` answered 1 for `br` — serving brotli to a client that named it
+    // and refused it. The two are tracked apart and the wildcard is consulted only when the coding
+    // was never named.
+    const parseQuality = (codingName: string): number => {
+      let named = -1
+      let wildcard = -1
+      for (const token of accept.split(',')) {
+        const [name, ...params] = token.trim().split(';')
+        const coding = name.trim().toLowerCase()
+        if (coding !== codingName && coding !== '*') continue
+        // Lowercased because RFC 9110 §5.6.6 makes parameter names case-insensitive: `br;Q=0` was
+        // missed, fell through to the default weight of 1, and served brotli to a client that had
+        // refused it. The qvalue itself is numeric, so folding the whole token is safe.
+        const qParam = params.map((p) => p.trim().toLowerCase()).find((p) => p.startsWith('q='))
+        const q = qParam ? Number(qParam.slice(2)) : 1
+        if (Number.isNaN(q)) continue
+        if (coding === '*') wildcard = Math.max(wildcard, q)
+        else named = Math.max(named, q)
+      }
+      return named >= 0 ? named : wildcard
+    }
+
+    const brQ = parseQuality('br')
+    const gzQ = Math.max(parseQuality('gzip'), parseQuality('x-gzip'))
+
+    // **`Vary` unconditionally, and that is what lets the probes below be skipped.** It declares a
+    // cache key rather than describing this response: a shared cache that stored the uncompressed
+    // body without it would hand that body to the next client, which may accept brotli. Deriving it
+    // from "does a sibling exist" is what forced a `stat` on every static request even when the
+    // client asked for no encoding at all — a syscall per asset per request, on the path this exists
+    // to make cheaper. Set it always, and ask the filesystem only about codings that could be served.
+    headers['Vary'] = 'Accept-Encoding'
+
+    const hasBr = brQ > 0 && fs.existsSync(filePath + '.br')
+    const hasGz = gzQ > 0 && fs.existsSync(filePath + '.gz')
+
     let servePath = filePath
-    const hasBr = fs.existsSync(filePath + '.br')
-    // Vary whenever a compressed variant exists, even if raw is served, so caches don't cross-serve.
-    if (hasBr) headers['Vary'] = 'Accept-Encoding'
-    if (brAccepted && hasBr) {
+    if (brQ > 0 && hasBr && (gzQ <= 0 || !hasGz || brQ >= gzQ)) {
       servePath = filePath + '.br'
       headers['Content-Encoding'] = 'br'
+    } else if (gzQ > 0 && hasGz) {
+      servePath = filePath + '.gz'
+      headers['Content-Encoding'] = 'gzip'
     }
 
     res.writeHead(200, headers)

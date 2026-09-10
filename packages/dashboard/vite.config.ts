@@ -7,7 +7,7 @@ export default defineConfig({
   plugins: [
     react(),
     // Precompress text assets to .br at build time (brotli only) so the relay serves them with no runtime CPU.
-    compression({ include: /\.(js|css|html|svg|json)$/, algorithms: ['brotliCompress'], deleteOriginalAssets: false }),
+    compression({ include: /\.(js|css|html|svg|json)$/, algorithms: ['brotliCompress', 'gzip'], deleteOriginalAssets: false }),
   ],
   resolve: {
     alias: { '@': path.resolve(__dirname, '.') },
