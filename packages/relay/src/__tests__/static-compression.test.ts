@@ -85,6 +85,32 @@ describe('static asset compression', () => {
     expect(res.body).toBe('GZ_BYTES')
   })
 
+  it('honours an explicit rejection over a permissive wildcard', async () => {
+    // RFC 9110 §12.5.3: the more specific match wins. Taking the maximum across `br` and `*` — which
+    // is what the first version did — answered 1 for a client that named brotli and refused it.
+    //
+    // **Mutation:** returning `Math.max(named, wildcard)` from `parseQuality` instead of preferring
+    // the named coding must fail this test.
+    const res = await httpGet(port, '/assets/app.js', { 'Accept-Encoding': 'br;q=0, *;q=1' })
+    expect(res.status).toBe(200)
+    expect(res.headers['content-encoding']).not.toBe('br')
+    expect(res.body).not.toBe('BR_BYTES')
+  })
+
+  it('sets Vary on an asset with no compressed sibling at all', async () => {
+    // `Vary` is a cache-key declaration, not a description of this response: without it a shared
+    // cache can store the uncompressed body and hand it to a client that accepts brotli. Deriving
+    // it from "does a sibling exist" also cost a `stat` on every request, which is why it no longer
+    // is derived.
+    //
+    // **Mutation:** making the header conditional again — on a sibling existing, or on the client
+    // having accepted something — must fail this test.
+    const res = await httpGet(port, '/assets/plain.js', { 'Accept-Encoding': 'identity' })
+    expect(res.status).toBe(200)
+    expect(res.headers['content-encoding']).toBeUndefined()
+    expect(res.headers['vary']).toBe('Accept-Encoding')
+  })
+
   it('serves the raw asset when no encoding is accepted', async () => {
     const res = await httpGet(port, '/assets/app.js', { 'Accept-Encoding': 'identity' })
     expect(res.headers['content-encoding']).toBeUndefined()
