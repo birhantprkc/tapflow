@@ -3,8 +3,32 @@ FROM node:24-alpine AS builder
 
 WORKDIR /app
 
-# git is required by lefthook/prepare postinstall scripts that run during pnpm install.
-RUN apk add --no-cache git
+# `git` is required by lefthook/prepare postinstall scripts that run during pnpm install.
+#
+# **`python3 make g++` are for a fallback that could not run** (#773). `better-sqlite3` is a
+# production dependency of the relay and its own install script is
+# `prebuild-install || node-gyp rebuild --release`. Alpine ships none of node-gyp's toolchain, so
+# the right-hand side could never execute: any time `prebuild-install` did not produce a binary the
+# install failed, and the log named a missing Python rather than what actually went wrong.
+#
+# That is not hypothetical and it is not only about missing prebuilds. `prebuild-install` reports a
+# failed *download* as "No prebuilt binaries found", so a network blip reads as an absent artifact —
+# measured on one PR's arm64 leg while `main`'s leg fetched the same `linuxmusl-arm64` binary in
+# 0.15s from the same base image digest. Re-running was enough there; a release is not the place to
+# find that out.
+#
+# Removing the fallback instead was the other option and it is not available: that script belongs to
+# the dependency. The cost of this one is builder-stage size and, when the fallback does fire, a
+# source compile of a few minutes — so an unusually slow build here is worth reading as "the
+# download failed" rather than as a mystery. The runtime stage is a fresh image that copies only
+# `/app/out`, so the shipped image does not carry any of this.
+#
+# **Measured once rather than assumed**, because a normal build never exercises this: it was forced
+# with `npm_config_build_from_source=true` on one CI cycle of the PR that added it, and node-gyp
+# compiled `better_sqlite3.node` to `gyp info ok` on both architectures — 82s on amd64, 90s on
+# arm64, against a ~35s build when the prebuild is fetched. That commit was reverted; a permanent
+# source compile would spend those ninety seconds on every release.
+RUN apk add --no-cache git python3 make g++
 
 # Install pnpm
 RUN npm install -g pnpm@9.15.1
