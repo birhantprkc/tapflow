@@ -1,6 +1,6 @@
 ---
 description: AI 글쓰기 흔적(AI tells) 탐지·교정 — ko/en × detect/rewrite. 사람이 쓴 글의 자가점검(detect)이 기본. "세탁 도구"가 아니라 린트/게이트다. 마케팅·외부 포스트(HN/Reddit)엔 detect만.
-model: claude-sonnet-4-6
+model: claude-sonnet-5
 allowed-tools: Read, Edit, Write, Glob, Grep
 ---
 

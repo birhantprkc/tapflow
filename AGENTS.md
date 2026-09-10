@@ -117,6 +117,14 @@ Four measured shapes, each of which shipped a hole behind a fully green suite.
 
 The authoring session inherits its own assumptions, so before creating a PR the diff must be refuted by an **independent context** that has NOT seen the working conversation. Docs-only PRs may skip the review itself, but still write the record (with the skip reason) — the gate always requires it.
 
+- **A blocked hook stops the whole `Bash` command, not the part it objected to.** A `gh pr create`
+  written in the same command as the heredoc that built its `--body-file` leaves no body file behind
+  when the gate refuses: the file write never ran either. Write the file in one command and publish in
+  the next. Same for `gh issue create` and the comment gates.
+- **The gate resolves your work tree from the session's cwd**, which this harness resets to the project
+  root after every command — so a PR cannot be created from a worktree even though the hook supports
+  one. The way through is to bring the branch to the main checkout: stash what is there, remove the
+  worktree, check the branch out, create the PR, then restore.
 - **Record**: findings + dispositions (fixed, or skipped with a reason) go in `.work/reviews/<branch>.md` (slashes → `__`), including the **full 40-character HEAD hash** (`git rev-parse HEAD` — an abbreviated hash will not pass the gate). Mention the review in the PR body.
 - **Enforcement**: the PreToolUse hook `.claude/hooks/adversarial-review-gate.sh` blocks PR creation unless that record exists and references the current HEAD — any commit after the review invalidates the record until it is refreshed against the new diff.
 - **A change spanning two or more packages, or both platforms, needs a second, earlier review — of the design, before the code.** One adversarial pass over the plan, in addition to the pre-PR one.
@@ -176,6 +184,27 @@ Three things keep it honest, and none of them is remembering harder:
   nine above became unreachable from the issue they all came from. `.claude/hooks/issue-parent-gate.sh`
   blocks an issue that carries neither a `Parent:` line nor an explicit
   `<!-- standalone: reason -->`.
+
+**Re-grading is a step that leaves no trace, and steps like that get skipped** — one session later,
+three issues filed and all three closed again (#754, #755, #756). Not one needed to exist. Nothing was
+missing: each reviewer had supplied its reasoning, and each was re-graded correctly in well under a
+minute once somebody asked. The bullet above was already in this file and was read; the step just
+never happened, the way any step with no artifact does not happen. In the same session mutation
+testing was run every single time, because `run-tests.sh --mutate` prints a line per mutation and
+fails loudly.
+
+A candidate answer is **not more emphasis on that bullet** — writing a lesson down reads as having
+applied it ([test-and-guard-coverage.md](./contributing/test-and-guard-coverage.md) rule 1). It is to
+ask the reviewer for facts instead of a verdict: **a reaching path** (a concrete consumer or sequence,
+or "none found"), **the fix in lines**, and **which lens it needs**. No reaching path is not an issue,
+it is a comment beside the code. The three fields are defined in
+[adversarial-review.md](./contributing/adversarial-review.md).
+
+**Nothing above changes yet.** The `now`/`later` column and the budget stay exactly as the three
+bullets describe them, and a reviewer prompt should still ask for them — that shape has nine measured
+issues behind it and this one has three, from one author in one area. It is written down because the
+count is worth knowing, not because it has earned a replacement. What decides it is the next few
+reviews: fewer issues that close within the hour, or the same rate with a longer prompt.
 
 And the parent keeps a checklist. Asked whether #607 was finished, nobody could answer — the feature's
 remaining surface existed only as unlinked rows in a tracker sorted by date.
@@ -265,7 +294,7 @@ pnpm dev:down          # stops relay / agents / vite for THIS checkout
 `concurrently -k` cleans up on a normal exit, not when the terminal goes away or the machine sleeps.
 
 ### Changesets
-A PR that changes published source needs a changeset. The CI `changeset` job fails without one, and it is a required status check on the `protect-main` ruleset, so that failure blocks the merge. Note that the job is *skipped* for bot PRs, and a skipped required check counts as passing — the gate is deliberately not applied to them. Opt out only by writing the reason in the PR body, on its own line:
+A PR that changes published source needs a changeset. The CI `changeset` job fails without one, and it is a required status check on the `protect-main` ruleset, so that failure blocks the merge. **The same job also demands an entry in the root `CHANGELOG.md`** under `## [Unreleased]`, in one of the sections CONTRIBUTING lists — the per-package changelogs are generated and cannot be forgotten, the root one is hand-written and is what a self-hoster reads to decide whether to upgrade. A changeset with no changelog entry fails the job, which reads as "no changeset" and sends you looking in the wrong place; #733 lost a CI cycle to exactly that. Opt out only for a change nobody can observe, with `<!-- changelog: internal — reason -->` in the changeset. Note that the job is *skipped* for bot PRs, and a skipped required check counts as passing — the gate is deliberately not applied to them. Opt out only by writing the reason in the PR body, on its own line:
 ```
 <!-- no-changeset: comment-only follow-up to #123 -->
 ```
@@ -277,9 +306,12 @@ A dashboard change names **`@tapflowio/relay`**, never `@tapflowio/dashboard`. T
 
 Reach for `pnpm.overrides` last: try `pnpm update <pkg>` first, which usually takes the patch with no
 permanent entry to maintain, because the problem is normally a stale lockfile rather than a
-forbidding range — measured on 2026-08-06, all fourteen entries in the block were inert.
-`pnpm overrides:audit` judges the entries that are already there — still needed, correct, reaching
-production — so run it before adding a fifteenth, and when one is added, plan to remove it. **Derive the
+forbidding range. **The block is empty, and that is the finished state rather than a gap**: it held
+fourteen entries on 2026-08-06 and eight on 2026-09-03, and on both dates every one of them was
+inert. They were retired once the audit could say so — deleting them and resolving cold moved no
+resolved version, and every package they named was already at or above its advisory floor.
+`pnpm overrides:audit` judges whatever is there — still needed, correct, reaching production — so run
+it before adding the first one back, and when one is added, plan to remove it. **Derive the
 override key from the GHSA advisory, never from the Dependabot alert**, and scope both the key and
 its replacement to one major line.
 

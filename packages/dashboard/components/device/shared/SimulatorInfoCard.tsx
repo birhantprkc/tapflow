@@ -23,6 +23,10 @@ interface SimulatorInfoCardProps {
   bootError: string | null;
   installing: boolean;
   installError: string | null;
+  /** H.264 decode path is unavailable in this browser — the viewer can render the device chrome but
+   *  no stream (#748). Routed through this shared status region so Android and iOS converge on the
+   *  same one-sentence English copy instead of each viewer shipping its own overlay. */
+  decoderUnsupported: boolean;
   keyboardActive: boolean;
   /** The relay is holding this session open while its agent is gone (#426). Outranks every other
    *  status: the rest describe a device this viewer cannot currently reach. */
@@ -30,7 +34,7 @@ interface SimulatorInfoCardProps {
 }
 
 function getStatusText(props: SimulatorInfoCardProps): string | null {
-  const { connected, joined, bootError, deviceReady, installing, installError, agentAway } = props;
+  const { connected, joined, bootError, deviceReady, installing, installError, agentAway, decoderUnsupported } = props;
   if (!connected) return 'Connecting…';
   if (!joined) return 'Joining session…';
   if (agentAway) return 'The agent went away — waiting for it to come back…';
@@ -39,6 +43,7 @@ function getStatusText(props: SimulatorInfoCardProps): string | null {
   if (!deviceReady) return 'Starting device…';
   if (installing) return 'Installing app…';
   if (installError) return `Install failed: ${installError}`;
+  if (decoderUnsupported) return 'Streaming is not supported in this environment.';
   return null;
 }
 
@@ -142,7 +147,7 @@ export function SimulatorInfoCard(props: SimulatorInfoCardProps) {
           mounting it early. */}
       <div role="status" className={statusText ? undefined : 'sr-only'}>
       {statusText && (
-        <p className="text-[12px] text-muted-foreground leading-relaxed break-all">{statusText}</p>
+        <p className="text-[12px] text-muted-foreground leading-relaxed break-words">{statusText}</p>
       )}
       </div>
 

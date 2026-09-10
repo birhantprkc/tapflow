@@ -24,7 +24,10 @@ describe('loadOrCreateAccountKey', () => {
     const k1 = await loadOrCreateAccountKey(fp, create)
     expect(k1).toBe('ACCOUNT-KEY-1')
     expect(creates).toBe(1)
-    expect(fs.statSync(fp).mode & 0o777).toBe(0o600)
+    // Windows ACLs do not map to POSIX permission bits.
+    if (process.platform !== 'win32') {
+      expect(fs.statSync(fp).mode & 0o777).toBe(0o600)
+    }
 
     const k2 = await loadOrCreateAccountKey(fp, create)
     expect(k2).toBe('ACCOUNT-KEY-1') // 디스크에서 재사용

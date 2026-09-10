@@ -61,6 +61,36 @@ ios-netfilter/
   전달까지 **55ms 이하**(실측). 다만 `saveToPreferences`의 성공은 저장이 받아들여졌다는 뜻뿐이고
   확인 응답이 없다. **"XPC mach service가 등록에 실패했다"고 적혀 있던 것은 틀렸다** — 리스너는
   1ms 안에 답한다(실측 0.26–0.74ms). **그래서 이제 확인은 XPC로 한다** — 아래 `--confirm`.
+- **이름 해석(포트 53)은 룰과 무관하게 통과시킨다.** UDP를 drop하면 발신자에게 아무 에러도 안 가서,
+  질의가 막힌 리졸버는 자기 타임아웃까지 매달린다. 실측(오프라인 시뮬): 캐시에 있는 이름은 연결이
+  **6ms**에 실패하는데, 해석이 필요한 이름은 `curl` **25초**, Safari는 **35초를 넘겨도 흰 화면**이었다.
+  테스터는 그걸 토글이 안 먹은 것으로 읽는다. 통과시키면 모든 경우가 첫 번째가 된다 — 이름은 풀리고
+  연결이 6ms에 죽는다. **적용 후에는 요청 하나가 자기 이름 해석에 드는 만큼 든다** — 여러 실행에서
+  `curl` 0.3~0.6초, Safari 에러 페이지 2초. 범위로 적은 것이 측정 결과다. 흔들리는 것이 해석 시간이라
+  단일 값을 박아두면 다음 사람이 재현했을 때 어긋난다.
+
+  **UDP·아웃바운드만이다.** TCP/53은 안 연다 — drop된 TCP flow는 이미 6ms에 실패하므로 얻는 게 없고,
+  오프라인이라고 보고된 기기가 53번을 듣는 아무 호스트와 양방향 연결을 유지하게 된다(DNS 터널의 모양).
+  인바운드도 안 연다 — 그쪽에서 remote port는 **보낸 쪽**의 포트라, source port 53으로 보내면 오프라인
+  기기에 도달한다.
+
+  **충실도 손실이 처음 적었던 것보다는 크다.** 2층이 후킹한 것은 POSIX `getaddrinfo` 하나이고,
+  **`URLSession`은 그 경로를 안 탄다** — Network.framework으로 해석한다(실측: 2층 무장 상태에서
+  프로브의 `URLSession`이 `-1001`로 타임아웃했고, 그게 POSIX 훅이 그 경로에 없다는 증거였다). 그래서
+  `URLSession` 앱은 이제 이름이 풀리고 connect에서 실패한다. "이름이 풀리면 온라인"으로 판정하는 앱은
+  아무것도 못 하는 기기 위에 온라인 배너를 그린다. `network-hook.m`이 그 훅에 대해 "specific failure는
+  관측 불가라 아무것도 주장하지 않는다"고 적어 뒀고, 이 문단이 나머지 문서가 대신 주장하지 않게 막는다.
+
+  모호하지 않게 참인 쪽은 반대편이다 — 2층이 아예 못 닿는 프로세스(WebKit과 시뮬 안의 다른 앱들)는
+  25~35초 매달리던 것이 2초에 실패한다.
+
+  포트는 `NEFilterSocketFlow.remoteEndpoint`에서 읽는다 — iOS 26.4에서 **판독 가능함을 실측**했고
+  (`unreadable` 0건), 로그가 어느 프로퍼티가 답했는지까지 남긴다. 판별 자체는
+  `Extension/FlowIdentity.swift`의 순수 함수이고 Swift 테스트가 붙어 있다.
+
+  **암호화 DNS는 안 덮는다.** DoT(853)는 포트가 있어 열 수 있고 DoH(443)는 못 가린다. 둘 다 안 넣은
+  이유는 호스트가 그렇게 설정된 맥에서 시뮬이 실제로 그걸 쓰는지 **아무도 측정하지 않았기 때문**이다.
+  추측으로 구멍을 넓히지 않는다.
 - **loopback은 예외 코드가 필요 없다**: content filter가 루프백 flow를 아예 받지 않는다(실측 —
   offline 지정된 시뮬의 `127.0.0.1` 요청 5회 전부 성공, 같은 구간 `handleNewFlow` 0건). Metro dev
   서버와 XCUITest tree runner가 이 경로다.
@@ -100,7 +130,8 @@ $B --confirm                    # 실행 중인 provider가 뭘 집행 중인지
 | 7 | `--confirm`이 provider에게서 답을 못 받았다 |
 | 8 | 이 빌드가 모르는 인자. 룰은 건드리지 않는다 — 모르는 인자를 무시하고 진행하면 읽기 의도의 호출이 룰을 지운다 |
 
-디바이스가 실제로 오프라인인지는 **1층은 `--confirm`, 2층은 dylib이 남긴 verdict**로 판단한다.
+디바이스가 실제로 오프라인인지는 **1층은 `--confirm`, 답이 없으면 provider의 상태 파일, 2층은
+dylib이 남긴 verdict**로 판단한다. 폴백이 붙은 이유는 아래 "교체 뒤에는 이 채널이 사라진다"에 있다.
 
 ### `--confirm` — 실행 중인 provider에게 직접 묻는다
 
@@ -108,7 +139,7 @@ $B --confirm                    # 실행 중인 provider가 뭘 집행 중인지
 $B --confirm    # {"enforcing":true,"rule":["<udid>",…],"pid":1234}
 ```
 
-**exit 0이 못 하는 말을 하는 유일한 채널이다.** 저장이 받아들여진 것과 실행 중인 provider가 그 룰을
+**exit 0이 못 하는 말을 하는 채널이다. 다른 하나는 provider가 쓰는 상태 파일이고, CLI의 설치 확인과 `tapflow doctor ios`는 그쪽을 읽는다.** 저장이 받아들여진 것과 실행 중인 provider가 그 룰을
 들고 있는 것은 다르고, 그 사이에 확인이 돌아오지 않는다. 왕복은 0.26–0.74ms.
 
 **`enforcing`이 따로 있는 이유**: `rule: []`은 "오프라인 기기가 없다"와 "필터가 정지했다" 둘 다다.
@@ -122,6 +153,25 @@ $B --confirm    # {"enforcing":true,"rule":["<udid>",…],"pid":1234}
 **읽기 전용이다.** mach 서비스는 이름만 알면 아무 프로세스나 붙을 수 있고 피어 검증은 아직 없다.
 집행 채널은 `vendorConfiguration` 하나뿐이며, 프로브에 있던 `setRule`은 출시본에 없다.
 
+#### 교체 뒤에는 이 채널이 사라진다 (2026-09-03 실측)
+
+시스템 확장을 교체하면 물러난 쪽이 `[terminated waiting to uninstall on reboot]`로 남아 **mach 이름을
+계속 쥔다.** 그래서 새 provider의 `NSXPCListener.resume()`이 실패한다.
+
+```text
+listener failed to activate: xpc_error=[1: Operation not permitted]
+invalidated after a failed init
+```
+
+`resume()`은 `void`라서 아무것도 던지지 않는다. 필터는 정상 집행 중이고 하트비트도 신선한데
+`--confirm`만 9ms 만에 `no listener`로 exit 7을 낸다. `IPCListener`는 프로세스당 한 번만 리스너를
+만들고 provider는 `--off`/`--install`을 거쳐도 같은 pid로 살아남으므로 **재시도가 없다.** 그 프로세스가
+사는 동안 계속 없다.
+
+그래서 `SimulatorNetwork`는 `--confirm`이 실패하면 상태 파일을 읽는다. 그리고 provider는 시작할 때
+자기 이름에 붙어보고 답한 pid가 자기 것인지 확인한 결과를 로그에 남긴다 — 물러난 확장이 대신 답할 수
+있으므로 연결 성공만으로는 판단하지 않는다.
+
 ## provider가 남기는 상태 파일
 
 `/Library/Application Support/tapflow/tapflow-netfilter-state.json` — root 소유, 644.
@@ -129,7 +179,7 @@ $B --confirm    # {"enforcing":true,"rule":["<udid>",…],"pid":1234}
 
 ```json
 {"at":1787503422,"pulseSeconds":1,"rule":["<udid>"],
- "flows":{"simulator":116,"host":90,"unresolved":0,"dropped":24},
+ "flows":{"simulator":116,"host":90,"unresolved":0,"dropped":24,"idle":0,"dnsAllowed":12},
  "attribution":{"walks":206,"avgMicros":319.7}}
 ```
 
@@ -159,6 +209,9 @@ fail-open이다. 15초 임계값은 그 구멍을 **덮는 게 아니라 못 본
 - `rule` — **실행 중인 provider가 실제로 들고 있는 offline 집합.** 저장된 설정이 아니라 집행 중인
   것이라, exit code가 못 하는 말을 한다. 이게 없으면 필터가 죽어도 컨트롤은 "조종 가능"이라고 한다.
 - `unresolved` — 귀속이 **실패한** flow. 호스트 flow와 다르다. 여전히 allow하지만(아래) 셀 수 있다.
+- `dnsAllowed` — 오프라인 기기인데 이름 해석이라 통과시킨 flow. **`dropped`와 따로 센다**: 섞으면
+  "집행 중"의 증거가 흐려진다. `dropped`가 0인데 `dnsAllowed`만 오르는 것은 앱이 이름만 풀고 아직
+  연결을 안 한 정상 상태다.
 - `avgMicros` — flow당 부모 walk 비용. 캐시를 붙일지 판단하려면 이 숫자가 먼저다.
 
 **해결 불가 flow는 allow한다.** `sysctl` 일시 오류에 fail-closed하면 사용자 브라우저를 끊는다 — 이
@@ -170,6 +223,26 @@ error 레벨로 로그하고 세는 것이다.
 ```bash
 export DEVELOPMENT_TEAM=<10자리 Team ID>
 ./build.sh
+```
+
+**한 번에 하나만 돌린다.** 두 번째 `build.sh`는 `build/Build/…/XCBuildData/build.db`가 잠겨 있어
+실패한다(`database is locked. Possibly there are two concurrent builds running in the same filesystem
+location`). 그 자체는 명확한 에러인데, **부르는 쪽 셸에 `pipefail`이 없으면 `./build.sh | tail`의
+종료 코드가 `tail`의 것이라 실패가 exit 0으로 보고된다.** 스크립트 안의 `set -euo pipefail`은 자기
+파이프라인에만 걸리지 부르는 쪽에는 영향이 없다 — zsh와 bash 모두 기본이 꺼져 있으므로 이게 보통의
+경우다.
+
+그리고 실패한 실행도 `plutil -replace`까지는 이미 지나갔으므로, `Extension/Info.plist`와
+`Host/Info.plist`에 **빌드된 적 없는 `CFBundleVersion`이 박힌 채 남는다** — `shipped.json`과 어긋나고,
+그 상태로 커밋하면 아티팩트 신선도 가드가 잡는다(잡히는 것이 다행인 쪽이다).
+
+복구는 `rm -rf build` 후 한 번만 다시 돌리는 것이다. **다만 지우기 전에 다른 빌드가 끝났는지
+확인한다** — 잠금을 만든 쪽은 보통 아직 살아 있고, `-derivedDataPath build`라 그 디렉터리가 그
+빌드의 작업 공간이다. 살아 있는 것 밑을 지우는 셈이 된다.
+
+```bash
+pgrep -fl 'xcodebuild|build\.sh' || true   # 비어 있어야 한다
+rm -rf build && ./build.sh
 ```
 
 **교체가 무응답으로 끝나면 delegate가 수거된 것이다.** `submitRequest`가 반환하고 delegate가 한 번도
@@ -191,7 +264,8 @@ log show --last 5m --debug --predicate 'process == "sysextd"' | grep -i conflict
 둘 다 도움이 될 수 없었다.
 
 교체마다 이전 버전이 재부팅까지 대기 상태로 남는 건 사실이므로, 편집마다 빌드하지 말고 묶는 편이
-낫다. 자가호스터는 릴리스당 한 번 설치하므로 이걸 만나지 않는다 — `ios-netfilter`를 건드리는 기여자가
+낫다. #724 이후로는 `Host/`만 고친 빌드가 교체를 일으키지 않으므로 이 조언은 확장을 건드리는 편집에만
+해당한다. 자가호스터는 릴리스당 한 번 설치하므로 이걸 만나지 않는다 — `ios-netfilter`를 건드리는 기여자가
 만난다.
 
 `build.sh` 헤더에 one-time 셋업(App ID + NE capability, notarytool 자격증명)이 있다.
@@ -199,8 +273,38 @@ log show --last 5m --debug --predicate 'process == "sysextd"' | grep -i conflict
 **★설치할 때 두 가지를 반드시 지킨다** — 둘 다 어기면 증상이 같다(새 빌드인데 옛 코드가 조용히 돈다):
 
 1. **`CFBundleVersion`을 올린다.** 버전이 같으면 activation이 `result 0`을 돌려주면서도 번들 교체를
-   조용히 건너뛴다. `build.sh`가 매 빌드 유니크 버전을 주입한다(xcodegen이 버전을 리터럴로 박아
-   build setting override가 안 먹으므로 generate 후 `plutil` 필수).
+   조용히 건너뛴다. xcodegen이 버전을 리터럴로 박아 build setting override가 안 먹으므로 generate 후
+   `plutil`이 필수다.
+
+   **호스트와 확장이 각각 다른 규칙을 따른다**(#724). 호스트 앱은 매 빌드 새 epoch을 받는다. 확장은
+   자기 입력이 안 바뀌었으면 **버전을 유지한다** — 그래야 `Host/`만 고친 릴리스가 사용자 맥의
+   provider를 교체하지 않는다. 교체는 맥의 모든 새 연결을 그 사이 멈추게 하므로 공짜가 아니다.
+
+   확장 입력은 열거된 넷이다 — `Extension/`, `Shared/`, `project.yml`, `build.sh`. 여기에 프로비저닝
+   프로파일과 툴체인(`DTXcodeBuild`/`DTSDKBuild`)이 더해진다(#728). "`Host/`가 아니면 전부"가 아니다:
+   `README.md`·`shipped.json`·`TapflowNetFilter.xcodeproj/`는 입력이 아니다. `project.pbxproj`는
+   xcodegen이 매번 새 식별자로 다시 쓰기 때문에 의도적으로 제외돼 있다.
+
+   `Extension/`이나 `Shared/`를 고쳤다면 버전은 자동으로 오른다. `Host/`만 고쳤다면 안 오른다.
+   **그것이 의도한 동작이다** — 확장 바이너리가 같으므로 교체할 것이 없다.
+
+   **`ios-netfilter/` 최상위에 파일을 새로 놓는다면 그것만으로는 입력이 되지 않는다.** 확장 바이너리를
+   바꾸는 파일이라면 `scripts/lib/netfilter-artifact.mjs`의 `EXT_SOURCE_FILES`에 이름을 추가해야 한다.
+
+   서명 주체가 바뀌는 경우는 프로파일이 잡는다. 확장 프로파일 안에 `TeamIdentifier`와
+   `DeveloperCertificates`가 들어 있어서, 팀을 옮기거나 Developer ID를 교체하면 프로파일이 재발급되고
+   바이트가 달라진다. 호스트 쪽 서명이 바뀌는 것은 확장 번들을 건드리지 않는다 — 중첩 서명은 한
+   방향이라 호스트가 확장을 봉인하지 그 반대가 아니고, 호스트 앱은 어차피 매 릴리스 교체된다.
+
+   그래도 판정이 못 보는 것이 남을 수 있다. 레포에도 프로파일에도 툴체인에도 안 나타나는 변화라면
+   강제한다.
+
+   ```bash
+   FORCE_EXT_BUMP=1 ./build.sh
+   ```
+
+   판정 자체는 `scripts/netfilter-stamp-version.mjs`가 하고, 답을 못 내면 새 버전을 만든다. 불필요한
+   교체는 몇 초를 쓰지만, 바뀐 확장에 버전을 재사용하면 macOS가 교체를 조용히 건너뛰기 때문이다.
 2. **컨테이너 앱을 먼저 죽인다.** 이미 실행 중인 앱에 `open`/exec을 하면 `main`을 다시 안 타므로
    `OSSystemExtensionRequest` 자체가 발생하지 않는다.
    ```bash
@@ -209,6 +313,12 @@ log show --last 5m --debug --predicate 'process == "sysextd"' | grep -i conflict
 
 확인 세 가지: `systemextensionsctl list`의 활성 버전이 방금 빌드한 값인가, provider pid가 바뀌었나,
 `/tmp/tapflow-netfilter-host.log` 마지막 줄 시각이 방금인가.
+
+**단, 확장 버전을 재사용한 빌드에서는 앞의 둘이 안 바뀌는 것이 정상이다.** `Host/`만 고쳤다면 macOS가
+activation을 건너뛰므로 활성 버전도 provider pid도 그대로다. 위 ★ 항목의 "새 빌드인데 옛 코드가 조용히
+돈다"와 증상이 같지만 원인이 반대다 — 확장을 안 고쳤으니 돌아야 할 옛 코드가 곧 새 코드다. 확장을
+고쳤는데도 둘이 안 바뀌었다면 그때가 진짜 문제다. `build.sh` 출력의 `(extension …)` 값이 직전 빌드와
+같은지부터 본다.
 
 앱은 `/Applications`에 있어야 activation `code=3`을 피한다. `ditto`로 복사한다(서명 보존).
 
@@ -237,7 +347,10 @@ log show --start "<시각>" --predicate 'subsystem == "dev.tapflow.netfilter"' -
 ## Open Questions
 
 - **배포 매체** — `bin/` committed prebuilt vs CI release asset.
-- **에러 코드** — 1층이 주는 것은 `-1005`(연결이 끊김)이고 신호 없는 실기는 `-1009`(인터넷 없음)다.
-  앱의 오프라인 분기가 후자로 쓰여 있으면 다른 가지를 탄다.
+- ~~**에러 코드**~~ — **닫혔다(조사 결과).** 1층이 주는 것은 `-1005`이고 실기는 `-1009`인데, 그 차이는
+  좁힐 수 없다. `-1009`는 커널 NECP가 만들고, NECP 세션을 여는 `necp_session_open`은
+  **platform binary만** 통과시킨다(XNU `bsd/net/necp.c`). Developer ID + notarize는 그 플래그를 영원히
+  못 얻으므로 엔타이틀먼트로 열리는 문제가 아니다. 실제로 앱이 받는 errno는 `-1005`보다도 나쁜
+  `EBADF`인데(실측), CFIL이 connect 도중 소켓을 헐어버리는 타이밍 부수효과다.
 - **`NENetworkRule` init** — macOS 15에서 deprecated. 지금은 룰 없이 `defaultAction: .filterData`로
   전량을 `handleNewFlow`에 받으므로 쓰지 않는다. 룰 기반으로 좁힐 때 최신 API를 확인할 것.

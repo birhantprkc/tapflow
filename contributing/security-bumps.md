@@ -16,7 +16,20 @@ patch — it is that the **lockfile does not re-evaluate ranges**. The patch nea
 inside the same major, the declaring range is a caret, and `pnpm update <pkg>` takes it with no
 permanent entry to maintain. An override is a workaround for a stale lockfile, and it outlives the
 problem: measured on 2026-08-06, all fourteen entries in the block were inert — removing the whole
-thing and resolving cold produced a byte-identical tree.
+thing and resolving cold produced a byte-identical tree. Measured again on 2026-09-03 with eight
+entries left: same answer, and they were retired then. **`pnpm.overrides` is empty today**, so an
+entry added now is the only one, and nothing else in the block will hide it going stale.
+
+Stale is the failure mode to watch for, because it does not look like one. **Three of those eight
+were `fast-uri`, one per major line, and every one of them had gone stale** — 2.4.4 where 2.4.5 was
+required, 3.1.5 where 3.1.6 was, 4.1.2 where 4.1.3 was. Had any fired it would have landed on a
+version that was still affected, while reading — to anyone scanning the block — like the matter was
+handled.
+
+An entry can also be wrong in a way that is not staleness: `axios@>=1.15.2 <1.18.0` named a line with
+no patched version anywhere, which no replacement range can rescue. The audit separates the two, and
+the distinction is worth keeping — a stale floor is fixable by editing the entry, and that one was
+never fixable at all.
 
 `pnpm overrides:audit` judges each entry: still needed, correct, and whether it reaches a published
 package's production tree. Run it before adding an entry, and when one is added, plan to remove it.

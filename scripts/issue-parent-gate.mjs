@@ -30,8 +30,8 @@ own decision".`
 
 const NO_BODY = `Blocked: no body could be read from this issue creation.
 
-The gate reads --body, --body-file, or the heredoc behind \`--body-file -\`. It found none of them,
-or found several heredocs and will not guess which one is the body.
+The gate reads --body, --body-file, or the heredoc or here-string behind \`--body-file -\`. It found
+none of them, or found several and will not guess which one is the body.
 
 Nothing has been decided about the Parent: line — the body was never read.`
 
@@ -61,10 +61,24 @@ ${why}
 Nothing has been decided about the Parent: line — the body was never read.`
 }
 
+const PROCESS_SUBSTITUTION = `Blocked: the body is a process substitution.
+
+\`--body-file <(…)\` hands gh a file descriptor, and its text exists only while the command runs.
+The gate cannot read it without running the command, so it cannot tell whether the body names a
+parent.
+
+Write the body to a file, or pass it inline:
+
+    --body-file body.md
+    --body-file - <<< "Parent: #607"
+
+Nothing has been decided about the Parent: line — the body was never read.`
+
 const MESSAGES = {
   'no-parent': () => NO_PARENT,
   'no-body': () => NO_BODY,
   'unreadable-body-file': unreadableBodyFile,
+  'process-substitution': () => PROCESS_SUBSTITUTION,
 }
 
 let raw = ''
@@ -78,12 +92,17 @@ let cmd
 let cwd
 try {
   const payload = JSON.parse(raw)
-  cmd = payload?.tool_input?.command ?? ''
+  cmd = payload?.tool_input?.command
+  // **A payload with no `command` is judged on the whole payload**, which is what the prefilter in
+  // the shell half already does. `?? ''` made a missing key indistinguishable from an empty command,
+  // and an empty command matches nothing, so an unexpected payload shape switched the gate off in
+  // silence. Reading more than was asked for costs a false block; reading nothing costs the gate.
+  if (typeof cmd !== 'string' || !cmd) cmd = raw
   // The directory the command would run in. The hook itself runs from the repository root, so
   // without this a relative --body-file is looked for in the wrong tree and reported as missing.
   cwd = typeof payload?.cwd === 'string' && payload.cwd ? payload.cwd : process.cwd()
 } catch { process.exit(0) }
-if (typeof cmd !== 'string' || !cmd) process.exit(0)
+if (!cmd) process.exit(0)
 
 let verdict
 try { verdict = judge(cmd, undefined, cwd) } catch { process.exit(0) }
@@ -93,4 +112,7 @@ if (!verdict.blocked) process.exit(0)
 // without a message here should still block, since blocking is what the verdict said.
 const message = (MESSAGES[verdict.reason] ?? MESSAGES['no-parent'])(verdict)
 process.stderr.write(`${message}\n`)
-process.exit(2)
+// `exitCode` rather than `exit(2)`: writes to a pipe are asynchronous on Windows, and `exit`
+// discards whatever is still queued — the status would block but the reason could arrive cut off.
+// Nothing is pending after the stdin loop, so the process still ends here.
+process.exitCode = 2

@@ -57,6 +57,8 @@
 | `TAPFLOW_VERCEL_TOKEN` | — | *(비어있음)* | `tls.dnsProvider`가 `vercel`일 때 쓰는 Vercel API 토큰. |
 | `TAPFLOW_VERCEL_TEAM_ID` | — | *(비어있음)* | 도메인이 팀 스코프에 속할 때 필요한 Vercel 팀 ID. |
 | `TAPFLOW_ACME_EMAIL` | — | *(비어있음)* | Let's Encrypt 계정 연락 이메일(선택). |
+| `TAPFLOW_ADMIN_EMAIL` | — | *(비어있음)* | 릴레이가 부팅하면서 만드는 첫 Admin 계정의 이메일. `TAPFLOW_ADMIN_PASSWORD`와 **함께** 설정합니다. 이미 소유자가 있는 설치에서는 아무 일도 하지 않습니다. |
+| `TAPFLOW_ADMIN_PASSWORD` | — | *(비어있음)* | 그 계정의 비밀번호. 최소 8자입니다. |
 | `SMTP_HOST` | `smtp.host` | `` | SMTP 호스트 |
 | `SMTP_PORT` | `smtp.port` | `587` | SMTP 포트 |
 | `SMTP_SECURE` | `smtp.secure` | `false` | TLS 사용 여부 (`true` 문자열로 설정) |
@@ -81,6 +83,60 @@ openssl rand -hex 32
 
 프록시나 터널로 노출하는 경우 공개 URL(`tunnel.publicUrl` 또는 `relay.url`)도 함께 설정하세요. 설정하지 않으면 CORS/CSRF 허용 목록이 loopback만 남아, 대시보드의 cross-origin 요청이 차단될 수 있습니다.
 :::
+
+## Docker 컨테이너에서 첫 관리자 계정 만들기 (`TAPFLOW_ADMIN_EMAIL`)
+
+두 변수를 설정하면 릴레이가 시작하면서 첫 Admin 계정을 만듭니다. 브라우저 온보딩과 `tapflow admin init`이 모두 닿지 않는 Docker 설치를 위한 경로입니다.
+
+평소에는 브라우저에서 `/setup` 페이지로 첫 계정을 만듭니다. 브라우저를 쓸 수 없는 서버에서는 `tapflow admin init`이 그 자리를 대신합니다. 컨테이너에서는 둘 다 막힙니다. `/setup`은 루프백에서 온 요청에만 응답하는데 컨테이너는 브리지 게이트웨이를 거쳐서 그 검사에 걸립니다. 그리고 릴레이 전용 이미지에는 CLI가 들어 있지 않습니다.
+
+동작은 이렇습니다.
+
+- **이미 소유자가 있으면 아무 일도 하지 않습니다.** 계정이 덮어써지지 않고 재시작할 때마다 반복되지도 않습니다. 아래 세 가지도 이때는 검사하지 않습니다.
+- 소유자가 없는 설치에서는 두 변수를 함께 설정해야 합니다. 하나만 있으면 릴레이가 시작하지 않습니다.
+- 비밀번호는 8자 이상이어야 합니다. 짧으면 역시 시작하지 않습니다.
+- 요청한 계정이 만들어지지 않으면 릴레이가 시작하지 않습니다. 소유자 없는 릴레이는 루프백에 닿는 무엇이든 차지할 수 있어서 그대로 서비스하는 것보다 멈추는 편이 안전합니다.
+
+두 변수를 비워두면 아무것도 달라지지 않습니다.
+
+값을 둘 자리는 두 곳이고 **둘을 섞으면 안 됩니다.** 컴포즈는 보간할 값을 셸이나 컴포즈 파일 옆의 `.env`에서 찾습니다. 릴레이는 볼륨 안의 `.tapflow/data/.env`를 읽습니다. 서로 다른 파일입니다.
+
+### 컴포즈에 두는 경우
+
+```yaml
+services:
+  relay:
+    image: tapflow/tapflow:latest
+    environment:
+      - TAPFLOW_ADMIN_EMAIL=admin@yourteam.com
+      - TAPFLOW_ADMIN_PASSWORD=${TAPFLOW_ADMIN_PASSWORD:?set this before starting}
+```
+
+`${...:?}`는 값이 없으면 컴포즈가 시작을 거부하는 문법입니다. 리터럴을 적어두면 그대로 복사돼 알려진 비밀번호가 됩니다. 값은 셸 환경변수로 넣거나 컴포즈 파일 옆의 `.env`에 적습니다.
+
+### 릴레이의 `.env`에 두는 경우
+
+`environment:`에서 두 줄을 빼고 이미 마운트하고 있는 볼륨 안에 적습니다. 비밀번호가 컴포즈 파일과 셸 히스토리 양쪽에서 빠집니다.
+
+```ini
+# 비밀번호는 = 뒤에 직접 적습니다. 비워 두면 릴레이가 시작하지 않습니다.
+TAPFLOW_ADMIN_EMAIL=admin@yourteam.com
+TAPFLOW_ADMIN_PASSWORD=
+```
+
+직접 만든 파일은 권한을 좁혀 주세요.
+
+```sh
+chmod 600 .tapflow/data/.env
+```
+
+`tapflow init`은 이 파일을 0600으로 만들지만 릴레이 전용 이미지에는 CLI가 없어서 컨테이너 운영자는 자기 umask로 직접 파일을 만들게 됩니다. 릴레이는 시작할 때 모드를 확인하고 다른 사용자가 읽을 수 있으면 경고합니다.
+
+```text
+.tapflow/data/.env is readable by other users (mode 644). Run: chmod 600 .tapflow/data/.env
+```
+
+경고일 뿐 시작을 막지는 않습니다.
 
 ## 스트리밍 튜닝 (에이전트)
 

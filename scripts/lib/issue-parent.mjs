@@ -1,6 +1,7 @@
 import path from 'node:path'
 import { proseLines } from './prose-lines.mjs'
-import { ghInvocations, bodyFileArg, bodyArg, heredocs, heredocWrittenTo, readBodyFile } from './gh-command.mjs'
+import { ghInvocations, bodyFileArg, bodyArg, stdinBodies, heredocWrittenTo, readBodyFile, isProcessSubstitution }
+  from './gh-command.mjs'
 
 /**
  * Does an issue split out of other work name what it came from?
@@ -52,7 +53,8 @@ export function hasStandalone(body) {
  * @param {string} cmd the Bash command the tool was asked to run
  * @param {(p: string) => string} [readFile] injected for the tests
  * @param {string} [cwd] the directory the command would run in, from the hook payload
- * @returns {{ blocked: boolean, reason?: 'unreadable-body-file' | 'no-body' | 'no-parent', detail?: string,
+ * @returns {{ blocked: boolean, reason?: 'unreadable-body-file' | 'no-body' | 'no-parent'
+ *             | 'process-substitution', detail?: string,
  *             file?: string, resolved?: string, code?: string | null }}
  *
  * **`reason` exists because the caller printed one message for three outcomes.** A body file the
@@ -70,6 +72,17 @@ export function judge(cmd, readFile = readBodyFile, cwd = process.cwd()) {
     let body = null
     let unreadable = null
     const file = bodyFileArg(words)
+    // **A process substitution is a shape, not a path.** `--body-file <(…)` and `>(…)` leave the
+    // parser a bare `<` or `>`, and resolving either produced a report naming a file the author
+    // never wrote (`could not read the body file at /tmp/>`). The text cannot be had without running
+    // the command, so the honest answer names the shape and stops.
+    if (file !== null && isProcessSubstitution(file)) {
+      return {
+        blocked: true,
+        reason: 'process-substitution',
+        detail: 'the body comes from a process substitution, which cannot be read without running it',
+      }
+    }
     if (file && file !== '-') {
       // **Resolved against the session's directory, not the gate's.** The hook runs from the
       // repository root while `gh` runs where the session is, so resolving here is what lets a
@@ -87,7 +100,9 @@ export function judge(cmd, readFile = readBodyFile, cwd = process.cwd()) {
     // title-side heredoc satisfied a check about the body — so the payload is extracted, and an
     // ambiguous command is blocked rather than guessed at.
     if (body === null && file === '-') {
-      const docs = heredocs(cmd)
+      // A heredoc or a here-string reaches `--body-file -`; both put the text in the command and
+      // nowhere else, and counting only one of them answered "no body" for a command that has one.
+      const docs = stdinBodies(cmd)
       body = docs.length === 1 ? docs[0] : null
     }
 

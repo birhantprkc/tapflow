@@ -7,6 +7,10 @@
 
 input=$(cat)
 cmd=$(printf '%s' "$input" | jq -r '.tool_input.command // ""')
+# A payload with no `command` key is not an empty command -- `// ""` made the two identical and the
+# gate passed at exit 0. Judge the whole payload instead, the way the sibling gates do; the
+# command-position rule below still applies, so an ordinary payload is unaffected.
+[ -n "$cmd" ] || cmd=$input
 # Match the PR-create invocation only in command position: line start, after
 # ; && |, inside $( ) capture, or after then/do. A plain substring match would
 # false-positive on commit messages / docs that merely mention the command.

@@ -1,5 +1,5 @@
 import { execSync, spawnSync } from 'node:child_process'
-import { installNetFilter, isNetFilterCurrent, readNetFilterState } from './net-filter.js'
+import { installNetFilter, isFilterEnforcing, isNetFilterCurrent, readNetFilterState, CONFIRM_DEADLINE_MS, NET_FILTER_APP } from './net-filter.js'
 import { existsSync, readFileSync, appendFileSync, readdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -167,8 +167,15 @@ export async function runSetupIos(): Promise<SetupStepResult[]> {
  */
 async function setUpNetFilter(): Promise<SetupStepResult> {
   // Asking about an install that would do nothing is noise, so the no-op case answers before the
-  // prompt. `isNetFilterCurrent` is the installer's own comparison, not a second copy of it.
-  if (process.platform === 'darwin' && isNetFilterCurrent(readNetFilterState())) {
+  // prompt.
+  //
+  // **Both halves of the installer's condition, not just the version one.** This used to call
+  // `isNetFilterCurrent` alone and describe itself as "the installer's own comparison, not a second
+  // copy of it" — true when written, and false the moment `installNetFilter` started requiring the
+  // filter to be running as well. A Mac left with a disabled filter matches on every version, so the
+  // half that was missing is exactly the half that would have sent it to the install that repairs it.
+  if (process.platform === 'darwin'
+      && isNetFilterCurrent(readNetFilterState()) && isFilterEnforcing()) {
     return { label: 'Network filter', ok: true, state: 'found' }
   }
   if (process.platform === 'darwin') {
@@ -208,6 +215,25 @@ async function setUpNetFilter(): Promise<SetupStepResult> {
         warn: true,
         detail: 'This tapflow install carries no usable filter app, so iOS network control cannot be set up. Reinstalling tapflow restores it.',
       }
+    case 'installed-unconfirmed':
+      // Installed, so setup did its job; unverified, so it must not report a clean state. `doctor ios`
+      // asks the same question from the same place, which is why it is the thing to run next.
+      return {
+        label: 'Network filter',
+        ok: false,
+        warn: true,
+        detail: `Installed, but no filter reported itself as running within ${CONFIRM_DEADLINE_MS / 1000} seconds. Check with \`tapflow doctor ios\`; if new connections on this Mac have stopped, run \`${NET_FILTER_APP}/Contents/MacOS/TapflowNetFilter --off\` to take the filter out of the path.`,
+      }
+    case 'refused-host-unknown':
+      // The extension is enforcing and the app it came from is gone, so nothing says whether this
+      // Mac's host binary is newer than the one here. Setup does not guess: it would be replacing a
+      // working install for someone who is not at this keyboard.
+      return {
+        label: 'Network filter',
+        ok: false,
+        warn: true,
+        detail: `Left alone — extension ${outcome.activated} is running but /Applications/TapflowNetFilter.app is gone, so tapflow cannot tell whether this Mac's filter is newer than this one. Reinstall from the tapflow whose version matches, or clear it: systemextensionsctl uninstall 6FBS3QP893 dev.tapflow.netfilter.ext`,
+      }
     case 'refused-downgrade':
       // Not a failure of this machine: it is set up for a newer tapflow than this one.
       return {
@@ -216,12 +242,23 @@ async function setUpNetFilter(): Promise<SetupStepResult> {
         warn: true,
         detail: `Left alone — this Mac runs ${outcome.installed} and this tapflow carries ${outcome.shipped}. Upgrading this checkout is the fix; reinstalling the filter would break the newer one.`,
       }
+    case 'refused-devices-busy':
+      // Setup is not the place to force it: someone running `setup ios` is preparing a Mac, not
+      // repairing one, and the devices in the list may be another person's session.
+      return {
+        label: 'Network filter',
+        ok: true,
+        warn: true,
+        detail: `Skipped — replacing it interrupts every new connection on this Mac, and these are running: ${outcome.busy.join(', ')}. Stop them, then: tapflow migrate net-filter`,
+      }
     case 'needs-approval':
       return {
         label: 'Network filter',
         ok: false,
         warn: true,
-        detail: 'Installed, waiting for approval. Open System Settings → General → Login Items & Extensions → Network Extensions and switch tapflow on.',
+        detail: outcome.filterLeftDisabled
+          ? 'Installed, waiting for approval — and the filter is switched off until you give it. Open System Settings → General → Login Items & Extensions → Network Extensions and switch tapflow on.'
+          : 'Installed, waiting for approval. Open System Settings → General → Login Items & Extensions → Network Extensions and switch tapflow on.',
       }
     case 'needs-reboot':
       return {
@@ -231,7 +268,13 @@ async function setUpNetFilter(): Promise<SetupStepResult> {
         detail: 'Installed. Restart the Mac to finish replacing the previous version — until then the old one keeps running.',
       }
     case 'failed':
-      return { label: 'Network filter', ok: false, detail: `Could not install it (exit ${outcome.code}): ${outcome.detail}` }
+      return {
+        label: 'Network filter',
+        ok: false,
+        detail: outcome.filterLeftDisabled
+          ? `Could not install it (exit ${outcome.code}): ${outcome.detail}. The filter is switched OFF — your network works, iOS network control does not. Run \`tapflow migrate net-filter\` to turn it back on.`
+          : `Could not install it (exit ${outcome.code}): ${outcome.detail}`,
+      }
   }
 }
 

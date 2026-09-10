@@ -29,8 +29,13 @@ cmd=$(printf '%s' "$input" | jq -r '.tool_input.command // ""' 2>/dev/null)
 squashed=${cmd//[\"\']/}
 squashed=${squashed//\\/}
 
+# **`graphql` is its own arm rather than a case-insensitive widening of the others.** A comment
+# posted through the API is spelled `addComment`, which no lowercase `*comment*` pattern matches, and
+# folding the whole filter to case-insensitive would make `*gh*` mean "contains gh" — that is the
+# cost this prefilter exists to avoid, measured once already when matching the payload rather than
+# the command. `graphql` is a subcommand and is always lowercase, so one more literal arm covers it.
 case "$squashed" in
-  *gh*comment*|*gh*review*|*gh*replies*) ;;
+  *gh*comment*|*gh*review*|*gh*replies*|*gh*api*graphql*) ;;
   *) exit 0 ;;
 esac
 
@@ -43,5 +48,12 @@ fi
 cd "$root" 2>/dev/null || exit 0
 
 [ -f scripts/comment-card-gate.mjs ] || exit 0
+command -v node >/dev/null 2>&1 || exit 0
 
+# **Only status 2 is a verdict.** node's own failures are not — a missing binary exits 127, an
+# import error exits 1 — and propagating those made every matching command in the session report a
+# hook error while blocking nothing, which is the opposite of the fail-open promise above.
 printf '%s' "$input" | node scripts/comment-card-gate.mjs
+status=$?
+[ "$status" -eq 2 ] && exit 2
+exit 0

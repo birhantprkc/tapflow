@@ -1,5 +1,6 @@
 import path from 'node:path'
-import { ghInvocations, titleArg, bodyArg, bodyFileArg, heredocs, heredocWrittenTo, readBodyFile } from './gh-command.mjs'
+import { ghInvocations, titleArg, bodyArg, bodyFileArg, stdinBodies, heredocWrittenTo, readBodyFile }
+  from './gh-command.mjs'
 
 /**
  * Are this PR's or issue's title and body in English, as AGENTS.md requires?
@@ -105,11 +106,12 @@ function* textsReachingGitHub(words, cmd, readFile, cwd) {
     }
   }
   if (file === '-') {
-    const docs = heredocs(cmd)
-    // Stdin has no redirection target to match on, so the sole-heredoc rule still applies here.
+    const docs = stdinBodies(cmd)
+    // Stdin has no redirection target to match on, so the sole-body rule still applies here — to
+    // heredocs and here-strings alike, since both put their text in the command and nowhere else.
     // Several means the command builds text elsewhere too and picking would be guessing — the parent
     // gate blocks on that ambiguity because a wrong guess there is permissive; here a wrong guess
     // would refuse someone else's prose, so it is left alone.
-    if (docs.length === 1) yield ['the heredoc body', docs[0]]
+    if (docs.length === 1) yield ['the body on stdin', docs[0]]
   }
 }

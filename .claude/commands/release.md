@@ -1,6 +1,6 @@
 ---
 description: 릴리즈 절차 — 버전 추천부터 릴리즈 PR까지 (changesets, 가이드형)
-model: claude-opus-4-8
+model: claude-opus-5
 ---
 
 다음 npm 릴리즈를 준비한다. 인자로 bump 레벨(`major`/`minor`/`patch`)을 줄 수 있고, 없으면 근거를 모아 직접 추천한다: **$ARGUMENTS**

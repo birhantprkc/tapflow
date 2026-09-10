@@ -7,13 +7,40 @@ cd "$(dirname "$0")"
 PROFILE="${NOTARY_PROFILE:-tapflow-notary}"
 
 xcodegen generate >/dev/null
-# Every build gets a unique, increasing CFBundleVersion — OSSystemExtension activation skips the
-# replace (keeping the old bundle + running provider) when the version matches, returning result 0
-# while nothing changed. See project.yml. xcodegen bakes the version in as a LITERAL, so a build
-# setting can't override it — patch both Info.plists after generate.
+# The host app gets a unique, increasing CFBundleVersion on every build. xcodegen bakes the version
+# in as a LITERAL, so a build setting can't override it — patch the Info.plists after generate.
 BUILD_VERSION="$(date +%s)"
-echo "CFBundleVersion=$BUILD_VERSION"
-plutil -replace CFBundleVersion -string "$BUILD_VERSION" Extension/Info.plist
+# **The extension keeps its version when nothing about the extension changed** (#724).
+#
+# OSSystemExtension compares versions: a new number makes macOS replace the running provider, which
+# interrupts every new connection on the Mac until the replacement is up. Three of the six rebuilds
+# so far touched nothing but `Host/`, and each one paid that for nothing. The helper answers with the
+# version the committed app already declares when the extension's inputs are unchanged, and with
+# nothing when they are not — in which case both halves take the same fresh epoch, exactly as before.
+#
+# Silence is the safe answer: an unnecessary replace costs seconds, while reusing a version for an
+# extension that *did* change is a replace macOS skips SILENTLY, leaving users on the old provider
+# with every check green. See project.yml.
+#
+# **The helper always exits 0 and answers on stdout, so an empty answer is the only fallback path.**
+# It catches its own failures deliberately: a probe that cannot run is doubt, and doubt mints a fresh
+# version here rather than stopping a release. It says which on stderr — a silent probe failure and a
+# real change produce the same stdout, so without that line this mechanism can stop working with no
+# symptom but replaces coming back.
+#
+# `FORCE_EXT_BUMP=1` is the escape hatch for what the helper cannot see: the sysext embeds a
+# provisioning profile and a Developer ID signature that live on this Mac, not in the repo. Renewing
+# the profile changes the shipped extension with no file here moving, and a reused version would then
+# be skipped on every Mac that already has it. Set it when the signing material changed.
+if [ -n "${FORCE_EXT_BUMP:-}" ]; then
+  EXT_VERSION=""
+  echo "FORCE_EXT_BUMP set — minting a new extension version"
+else
+  EXT_VERSION="$(node ../../../scripts/netfilter-stamp-version.mjs)"
+fi
+[ -n "$EXT_VERSION" ] || EXT_VERSION="$BUILD_VERSION"
+echo "CFBundleVersion=$BUILD_VERSION (extension $EXT_VERSION)"
+plutil -replace CFBundleVersion -string "$EXT_VERSION" Extension/Info.plist
 plutil -replace CFBundleVersion -string "$BUILD_VERSION" Host/Info.plist
 # --timestamp: notarize needs a secure timestamp. INJECT_BASE_ENTITLEMENTS=NO: strip get-task-allow.
 xcodebuild -project TapflowNetFilter.xcodeproj -scheme TapflowNetFilter -configuration Release \

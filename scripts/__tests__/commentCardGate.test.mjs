@@ -36,8 +36,10 @@ describe('which commands post a comment', () => {
     'an issue comment': 'gh issue comment 700 --body "x"',
     'a review with a body': 'gh pr review 701 --comment --body "x"',
     'an inline reply through the API': 'gh api repos/o/r/pulls/701/comments/1/replies -F body=@r.md',
+    'a body behind an attached shorthand': 'gh api repos/o/r/issues/1/comments -fbody=hi',
     'behind a separator': 'git status && gh pr comment 701 --body "x"',
     'with the command word broken by quotes': 'g"h" pr comment 701 --body "x"',
+    'a GraphQL mutation': "gh api graphql -f query='mutation{addComment(input:{subjectId:\"X\",body:\"hi\"}){clientMutationId}}'",
   }
   for (const [name, cmd] of Object.entries(POSTS)) {
     it(`sees ${name}`, () => {
@@ -79,6 +81,75 @@ describe('which commands post a comment', () => {
       'gh api repos/o/r/issues/1/comments --paginate',
       'gh api repos/o/r/issues/1/comments --jq ".[].body"',
     ]) expect(postsAComment(c), c).toBe(false)
+  })
+
+  describe('a GraphQL mutation is identified by its contents, not its path', () => {
+    // Every other form the gate knows names what it acts on in the URL. Here the path is the
+    // constant `graphql` and the operation is a string passed as a field value, so the endpoint
+    // check is the cheap half and the mutation name is the decision.
+    const mutation = (op) => `gh api graphql -f query='mutation{${op}(input:{}){clientMutationId}}'`
+
+    // The list is GitHub's rather than ours, which is why it is enumerated: a `*Comment*` pattern
+    // would catch `deleteIssueComment`, which publishes nothing, and miss `addPullRequestReview`,
+    // which does.
+    for (const op of ['addComment', 'addPullRequestReview', 'addPullRequestReviewComment',
+      'addDiscussionComment', 'updateIssueComment']) {
+      it(`sees ${op}`, () => expect(postsAComment(mutation(op)), op).toBe(true))
+    }
+
+    it('allows a query that only reads', () => {
+      // The same distinction `--method GET` draws on the REST path: it publishes nothing.
+      expect(postsAComment("gh api graphql -f query='query{viewer{login}}'")).toBe(false)
+    })
+
+    it('sees the full-URL spelling of the endpoint', () => {
+      // gh routes any endpoint containing `://` verbatim, so this reaches the same place — and it is
+      // the spelling a docs page hands you. The check was exact string equality; every other
+      // endpoint rule in this file was already a substring regex.
+      expect(postsAComment(`gh api https://api.github.com/graphql ${"-f query='mutation{addComment(input:{}){id}}'"}`)).toBe(true)
+    })
+
+    it('sees the query behind an attached shorthand', () => {
+      // pflag takes `-Fquery=…` as well as `-F query=…`.
+      expect(postsAComment("gh api graphql -Fquery='mutation{addComment(input:{}){id}}'")).toBe(true)
+    })
+
+    it('allows a mutation that publishes no prose', () => {
+      expect(postsAComment(mutation('addLabelsToLabelable'))).toBe(false)
+      expect(postsAComment(mutation('deleteIssueComment'))).toBe(false)
+    })
+
+    it('reads a query written to a file', () => {
+      // The same question `--input` raised on the REST path, answered the same way: a query long
+      // enough to be written to a file is the one someone took care over.
+      const dir = mkdtempSync(path.join(tmpdir(), 'graphql-'))
+      const file = path.join(dir, 'q.graphql')
+      writeFileSync(file, 'mutation { addComment(input: {body: "hi"}) { clientMutationId } }')
+      try {
+        expect(postsAComment(`gh api graphql -F query=@${file}`, { cwd: dir })).toBe(true)
+        expect(postsAComment(`gh api graphql --input ${file}`, { cwd: dir })).toBe(true)
+      } finally { rmSync(dir, { recursive: true, force: true }) }
+    })
+
+    it('reads a query fed through stdin', () => {
+      const cmd = "gh api graphql -F query=@- <<'EOF'\nmutation { addComment(input: {}) { id } }\nEOF"
+      expect(postsAComment(cmd)).toBe(true)
+    })
+
+    it('allows a file it cannot read rather than blocking on it', () => {
+      // This gate allows what it cannot judge — the posture every other rule here takes.
+      expect(postsAComment('gh api graphql -F query=@/nonexistent/q.graphql')).toBe(false)
+    })
+
+    it('does not fire on the words in prose', () => {
+      expect(postsAComment('echo "gh api graphql addComment"')).toBe(false)
+      expect(postsAComment('cat > n.md <<EOF\ngh api graphql -f query=mutation{addComment}\nEOF')).toBe(false)
+    })
+
+    // The prefilter half is asserted where the hook is spawned against a throwaway checkout — see
+    // `the hook itself, spawned`. It cannot be done from here: this repo's own card lives under
+    // gitignored `.work/`, so a test that spawns the hook against this checkout passes on the
+    // author's machine and allows the command in CI, where the card does not exist.
   })
 
   it('sees a body that arrives without a field flag', () => {
@@ -312,6 +383,23 @@ describe('the hook itself, spawned', () => {
 
   it('allows an unrelated command without paying for node', () => {
     expect(inRepo('git status --short').status).toBe(0)
+  })
+
+  it('the prefilter lets a GraphQL mutation reach the parser', () => {
+    // **Both halves missed it at once.** The path matcher looks for a `/comments` segment and the
+    // path here is `graphql`; the shell prefilter matches `*gh*comment*` in lowercase while the
+    // mutation is spelled `addComment`, so node was never spawned and the parser never got a chance.
+    // Asserted through the hook because the prefilter is the half a unit test cannot see.
+    //
+    // In a throwaway checkout, not this one: the card the gate needs lives under gitignored
+    // `.work/`, so spawning against this repo passes locally and allows the command in CI.
+    expect(inRepo("gh api graphql -f query='mutation{addComment(input:{}){id}}'").status).toBe(2)
+  })
+
+  it('the prefilter still ignores a command that is neither', () => {
+    // `*gh*api*graphql*` was added as one more literal arm rather than making the filter
+    // case-insensitive, because that would widen what pays for a node process on every Bash call.
+    expect(inRepo('gh api graphql -f query="query{viewer{login}}"').status).toBe(0)
   })
 
   it('fails open on a payload it cannot parse', () => {

@@ -50,7 +50,76 @@ final class IPCListener: NSObject, NSXPCListenerDelegate, NetFilterControl {
 
     func start() {
         listener.resume()
-        os_log("xpc listener resumed on %{public}@", log: log, type: .default, netFilterMachServiceName)
+        // **`resume()` reports nothing, so this line used to be a claim rather than an observation** —
+        // and on 2026-09-03 it was measured making a false one. XPC logged
+        // `listener failed to activate: xpc_error=[1: Operation not permitted]` and
+        // `invalidated after a failed init`, and one millisecond later this said "resumed". The only
+        // trace of the truth was in Apple's subsystem; ours said the opposite.
+        //
+        // It fails for a reason that arrives with every release: a replaced system extension leaves
+        // the retired one `[terminated waiting to uninstall on reboot]`, still owning this mach name,
+        // so the new provider cannot claim it. `--confirm` then answers `no listener` while the filter
+        // is enforcing normally. The listener is vended once per process and the provider survives
+        // `--off`/`--install` on the same pid, so nothing retries: it is gone until this process is.
+        probeListener()
+    }
+
+    /**
+     * Ask the name whether *this* process is behind it.
+     *
+     * **Reaching the service is not the question, and answering only that would be the same mistake
+     * one flavour milder.** The name may be held by the extension being retired, which is alive
+     * enough to reply — so a probe that merely connected would log a green earned by the provider the
+     * kernel is no longer consulting. The reply already carries `pid`; compare it.
+     */
+    private func probeListener() {
+        let mine = ProcessInfo.processInfo.processIdentifier
+        let conn = NSXPCConnection(machServiceName: netFilterMachServiceName, options: [])
+        conn.remoteObjectInterface = NSXPCInterface(with: NetFilterControl.self)
+
+        // Every outcome below is terminal and several can race — an error handler and the deadline,
+        // for instance — so the first one to arrive is the one reported.
+        let lock = NSLock()
+        var reported = false
+        let settle: (String, OSLogType) -> Void = { [log] message, type in
+            lock.lock()
+            let first = !reported
+            reported = true
+            lock.unlock()
+            guard first else { return }
+            os_log("%{public}@", log: log, type: type, message)
+            conn.invalidate()
+        }
+
+        let name = netFilterMachServiceName
+        conn.invalidationHandler = { settle("xpc listener UNREACHABLE on \(name) — no listener answered", .error) }
+        conn.interruptionHandler = { settle("xpc listener probe interrupted on \(name)", .error) }
+        conn.resume()
+
+        let proxy = conn.remoteObjectProxyWithErrorHandler { err in
+            settle("xpc listener UNREACHABLE on \(name): \(err.localizedDescription)", .error)
+        } as? NetFilterControl
+        guard let proxy else {
+            settle("xpc listener UNREACHABLE on \(name) — no proxy", .error)
+            return
+        }
+        proxy.ping { data in
+            let answered = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])??["pid"] as? Int
+            if answered == Int(mine) {
+                settle("xpc listener reachable on \(name), answering from this provider (pid \(mine))", .default)
+            } else {
+                settle("xpc listener on \(name) answered from pid \(answered.map(String.init) ?? "?"), "
+                       + "NOT this provider (pid \(mine)) — a retired extension still owns the name, "
+                       + "so --confirm reports someone else's rule", .error)
+            }
+        }
+
+        // The handlers above do not all fire. A name held by launchd for a process that is away
+        // neither invalidates nor errors — it blocks, which is the same measurement `--confirm`'s
+        // deadline exists for. Without this, that case logs nothing at all.
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 5) {
+            settle("xpc listener probe got no reply within 5s on \(name)", .error)
+        }
     }
 
     // MARK: - NSXPCListenerDelegate

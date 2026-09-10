@@ -18,7 +18,11 @@ if (record.appFileCount === 0) {
 // that is perfectly consistent with itself and wrong. If the sources moved and the app did not, the
 // app was not rebuilt, and saying so here is the difference between a guard and a formality.
 const previous = readRecord(repo)
-if (previous && previous.sources !== record.sources && previous.app === record.app) {
+// Both halves, and a record written before the split counts as different — which is right: the split
+// arrived with a `build.sh` change, and that is a source change like any other.
+const sourcesMoved = previous
+  && (previous.extSources !== record.extSources || previous.hostSources !== record.hostSources)
+if (previous && sourcesMoved && previous.app === record.app) {
   console.error(
     'The extension sources changed but the app did not — it has not been rebuilt.\n'
     + '  Run ios-netfilter/build.sh, which rebuilds, installs into the package and records in one step.\n'
@@ -27,4 +31,7 @@ if (previous && previous.sources !== record.sources && previous.app === record.a
   process.exit(1)
 }
 fs.writeFileSync(path.join(repo, RECORD), `${JSON.stringify(record, null, 2)}\n`)
-console.log(`recorded ${RECORD}: ${record.sourceFileCount} sources, ${record.appFileCount} app files, build ${record.bundleVersion}`)
+console.log(
+  `recorded ${RECORD}: ${record.sourceFileCount} sources, ${record.appFileCount} app files,`
+  + ` host ${record.hostBundleVersion}, extension ${record.extBundleVersion}`,
+)

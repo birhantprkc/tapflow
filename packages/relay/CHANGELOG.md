@@ -1,5 +1,36 @@
 # @tapflowio/relay
 
+## 0.20.1
+
+### Patch Changes
+
+- 3d2aade: **A Docker install can now create its first account.** Until now it could not, at all. The bootstrap endpoint `POST /api/v1/auth/init` only answers a local client — that check is what stops a stranger claiming a public instance between first boot and the owner setting a password — and a container is always behind its bridge gateway, so the call answered 403 from the host's own browser and from the LAN alike. The error text points at `tapflow admin init`, but the image is relay-only by design and carries no CLI to run it. `docker compose up` therefore ended at a login screen nobody could get past.
+
+  Set `TAPFLOW_ADMIN_EMAIL` and `TAPFLOW_ADMIN_PASSWORD` and the relay creates that first Admin while it boots, before it serves anything. They can go in `<dataDir>/.env` instead of the compose file, which keeps the password out of your shell history and inside the volume you already mount — but **`chmod 600` it yourself**. `tapflow init` creates that file 0600 and the relay-only image has no CLI, so a container operator writes it under their own umask; the relay now warns at boot when it is readable by others.
+
+  It runs on every boot and does nothing when an owner already exists — your account is never replaced and nothing is logged, so a long-running relay does not collect a line per restart. **A password under 8 characters, or one variable without the other, stops the relay starting.** That only happens when an admin was asked for and there is none: an install that already has an owner returns before those checks, so a typo cannot strand a relay that is already serving. Serving anyway would leave the install ownerless and claimable by anything that can reach loopback, for as long as nobody notices — and an ownerless relay is not a working service to begin with. The password is never written to the log on any path, and is removed from the environment once used.
+
+  Nothing changes for an install that does not set them, including the 403 above, which is still the right answer for a browser reaching a relay it has not been given.
+
+  **Deploying tapflow with Docker is not documented yet** ([#352](https://github.com/jo-duchan/tapflow/issues/352)): there is no Compose file in the repository and no deployment guide, so this removes the wall that stood at the end of that path rather than opening the path. It is released as a fix for that reason.
+
+- 07d4b40: Backfills: #739
+
+  tapflow no longer pins any transitive dependency. The `pnpm.overrides` block is empty.
+
+  Nothing you install changes: every package the block named already resolves at or above its security floor without it, verified by resolving the workspace both ways and comparing — `hono` 4.13.0, `axios` 1.18.1, `undici` 7.29.0, `body-parser` 2.3.0, `protobufjs` 7.6.5, `fast-uri` 3.1.7, `qs` 6.16.0, identical either way.
+
+  It is recorded because three of the eight entries had gone stale in a way that mattered. Each pinned `fast-uri` up to a floor its advisories have since moved past — 2.4.4 where 2.4.5 is required, 3.1.5 where 3.1.6 is, 4.1.2 where 4.1.3 is — so had any of them ever taken effect it would have landed on a version that was still affected, while reading, to anyone scanning the block, as though the matter were handled. A fourth named a line with no patched version anywhere, which no override can rescue.
+
+- da07ac4: The record button keeps keyboard focus while a recording is processed and saved, and announces both outcomes to assistive technology. It used `disabled` for those states, which took the focused button out of the tab order the moment "Stop recording" was activated, so focus fell to the page body and the name that changed to say what happened was read to nobody. It now stays focusable, refuses a click on its own while busy, and carries the outcome in a live region beside it.
+- ea2b5cc: **The resource charts no longer reserve space for time that has not happened.** The window's right edge was rounded up to the next round tick so the tick labels would stay on clean times, which left up to a full step of axis that no sample can ever reach — an hour of empty chart on the 6h range, and 63 pixels of 504 on 7d. Empty because it is in the future, which reads as a gap in the data rather than as the edge of the window. The window now ends at the moment of the reading and the ticks are counted down from the last round step at or before it, so the labels stay round and the newest sample sits at the right edge. The same strip existed at both ends for a second reason — the plot was padded 16px inside the gridlines that frame it — so the window's own edges are now the grid's edges and the chart is filled from one side to the other.
+
+  **The device viewer no longer draws a box around itself while you type.** Clicking the phone put the browser's focus on the whole viewer, and a focus has to be shown — so a ring appeared around everything at once, the phone and the buttons and the status card, and it came back mid-sentence on the keystrokes you were sending to the device. The viewer no longer takes focus at all. Nothing depended on it: tapflow starts forwarding your keys when you click the screen, not when the browser focuses something, so typing at the phone works exactly as before. The one place that focus was doing real work is kept — restart a device and you are put back on the restart button when it comes back, instead of at the top of the page.
+
+- 916b02a: Add a stable page-level heading to Mac Resources, expose the selected Mac and its online/offline state to assistive technology via aria-current, and announce file-attachment validation errors tied to the attach button.
+  - @tapflowio/protocol@0.20.1
+  - @tapflowio/agent-core@0.20.1
+
 ## 0.20.0
 
 ### Minor Changes

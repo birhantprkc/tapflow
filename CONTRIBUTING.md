@@ -1,6 +1,6 @@
 # Contributing to tapflow
 
-> Common rules: [AGENTS.md](./AGENTS.md) | Full index: [INDEX.md](./INDEX.md)
+> Common rules: [AGENTS.md](./AGENTS.md) | Full index: [INDEX.md](./INDEX.md) | Community standards: [Code of Conduct](./CODE_OF_CONDUCT.md)
 
 ## Development setup
 
@@ -169,6 +169,8 @@ Run the tests for any changed packages before opening a PR. New behavior must be
 **No flaky tests.** Use `vi.useFakeTimers()` instead of `setTimeout` waits. Fix `Date.now()` with `vi.setSystemTime()`. Clean up global state in `beforeEach`/`afterEach`. Never depend on real network ports or file paths.
 
 **Mock only at system boundaries** — real network, OS calls, external processes. Internal module interactions run against real code.
+
+**Name the mutation.** For every test, know the production change that would make it fail. For a test asserting that something does *not* happen, make that change and watch it fail before you commit — an absence assertion passes when nothing happens at all, so a green run on its own is not evidence it holds anything. [test-and-guard-coverage.md](./contributing/test-and-guard-coverage.md) collects the cases where that went wrong, including a guard bypassed four ways with the whole suite green.
 
 ## Technical internals
 

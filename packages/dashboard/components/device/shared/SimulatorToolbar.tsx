@@ -9,7 +9,7 @@ import {
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { cn } from '@/lib/utils';
 import { useId, useState } from 'react';
-import type { ReactNode } from 'react';
+import type { MutableRefObject, ReactNode } from 'react';
 import type { NetworkUnavailableReason } from '@tapflowio/protocol';
 import { Kbd, KbdGroup } from '@/components/ui/kbd';
 
@@ -63,8 +63,12 @@ interface SimulatorToolbarProps {
    *
    * `onReboot` is called only after the tester confirms; the dialog is here rather than at the caller
    * so every platform gets the same wording for the same irreversible thing.
+   *
+   * `buttonRef` is how focus finds its way back. The restart is the only control here that unmounts
+   * the toolbar it was pressed from, so a keyboard user is left on `document.body` while the device
+   * comes back; `DeviceViewer` puts them on this button again once it returns.
    */
-  reboot?: { pending: boolean; onReboot: () => void };
+  reboot?: { pending: boolean; onReboot: () => void; buttonRef?: MutableRefObject<HTMLButtonElement | null> };
 }
 
 export interface NetworkControl {
@@ -331,6 +335,7 @@ export function SimulatorToolbar({
   // toolbar at a time and cannot see that.
   const descId = useId();
   const rebootStatusId = useId();
+  const recordStatusId = useId();
   // Controlled rather than an `AlertDialogTrigger`, because the button it would wrap is already
   // wrapped by a `TooltipTrigger asChild` — two libraries cloning the same child and both wanting to
   // own its ref and its handlers. `BuildRow` drives its dialog the same way.
@@ -415,6 +420,7 @@ export function SimulatorToolbar({
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button
+                  ref={reboot.buttonRef}
                   variant="ghost"
                   size="icon"
                   className="h-8 w-8"
@@ -467,7 +473,7 @@ export function SimulatorToolbar({
           <TooltipTrigger asChild>
             <Button
               variant="ghost" size="icon"
-              className={cn('h-8 w-8', recordState === 'recording' && 'text-red-500 hover:text-red-500')}
+              className={cn('h-8 w-8 aria-disabled:opacity-50', recordState === 'recording' && 'text-red-500 hover:text-red-500')}
               // The name carries the state, so `aria-pressed` would say it twice — "Stop recording,
               // pressed" states the same fact in two grammars and reads as a contradiction. Pick one:
               // this button flips its name, so it is a plain action button.
@@ -482,8 +488,16 @@ export function SimulatorToolbar({
                     : recordState === 'done' ? 'Recording saved'
                       : 'Start recording'
               }
-              disabled={recordState === 'uploading' || recordState === 'done'}
-              onClick={onRecordToggle}
+              aria-busy={recordState === 'uploading'}
+              // `aria-disabled`, not `disabled`: activating "Stop recording" turned the focused
+              // button non-focusable, so focus fell to `<body>` and the name change was announced
+              // to nobody. Same shape as the restart and network controls; the guard is below.
+              aria-disabled={recordState === 'uploading' || recordState === 'done'}
+              // Both on purpose: the live region fires once, when the state changes; the description
+              // is what a user who tabs to the button afterwards gets. Some screen readers read both
+              // while the button is focused, which is the cheaper failure.
+              aria-describedby={recordStatusId}
+              onClick={() => { if (recordState === 'idle' || recordState === 'recording') onRecordToggle(); }}
             >
               {recordState === 'uploading'
                 ? <Loader2 className="h-4 w-4 animate-spin" />
@@ -501,9 +515,18 @@ export function SimulatorToolbar({
               // the two channels disagreeing for `done` — "Recording saved" read out, "Processing…"
               // on screen — which is stale for a sighted user and a Label-in-Name mismatch the moment
               // this trigger becomes hoverable (#624).
-              : recordState === 'done' ? 'Recording saved' : 'Processing…'}
+              : recordState === 'done' ? 'Recording saved' : 'Processing the recording'}
           </TooltipContent>
         </Tooltip>
+        {/* `uploading` and `done` arrive asynchronously, and a name change on a focused button is not
+            re-announced — so without this a screen-reader user hears the recording start and never
+            hears that it was saved. Mounted unconditionally with only the text toggled, as the
+            network control's region is. */}
+        <span id={recordStatusId} role="status" className="sr-only">
+          {recordState === 'recording' ? 'Recording.'
+            : recordState === 'uploading' ? 'Processing the recording.'
+              : recordState === 'done' ? 'Recording saved.' : ''}
+        </span>
 
         </div>
 

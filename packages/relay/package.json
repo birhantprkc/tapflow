@@ -1,6 +1,6 @@
 {
   "name": "@tapflowio/relay",
-  "version": "0.20.0",
+  "version": "0.20.1",
   "description": "WebSocket relay server for tapflow — NAT traversal, session routing, JWT auth, bundled dashboard",
   "keywords": [
     "tapflow",
@@ -58,9 +58,9 @@
     "better-sqlite3": "^12.11.1",
     "busboy": "^1.6.0",
     "jsonwebtoken": "^9.0.3",
-    "nodemailer": "^9.0.5",
+    "nodemailer": "^9.1.1",
     "ws": "^8.21.3",
-    "zod": "^4.4.3"
+    "zod": "^4.5.4"
   },
   "devDependencies": {
     "@tapflowio/test-utils": "workspace:*",

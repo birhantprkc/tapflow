@@ -1,4 +1,5 @@
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
+import { execFileSync } from 'child_process'
+import { appendFileSync, chmodSync, chownSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -48,6 +49,10 @@ function fakeHostBinary(dir: string, log: string, sleepMs = 0, failNth = 0): str
     + `  [ -e "${dir}/NO_CONFIRM" ] && exit 7\n`
     + `  [ -e "${dir}/CONFIRM_HANG" ] && sleep 5\n`
     + `  if [ -e "${dir}/NOT_ENFORCING" ]; then printf '{"enforcing":false,"rule":[],"pid":1}\\n'; exit 0; fi\n`
+    // Enforcing, and holding something other than what the caller just wrote — the one shape that
+    // reaches the mismatch branch *through XPC*. Without it only the file channel ever disagrees,
+    // so the channel name in that warning could be wrong for the path 99% of traffic takes.
+    + `  [ -e "${dir}/CONFIRM_EMPTY" ] && { printf '{"enforcing":true,"rule":[],"pid":7}\\n'; exit 0; }\n`
     + `  R=$(cat "${dir}/rule" 2>/dev/null || echo "")\n`
     + `  printf '{"enforcing":true,"rule":%s,"pid":1}\\n' "$(echo "$R" | ${ruleToJson})"\n`
     + `  exit 0\n`
@@ -94,7 +99,26 @@ function fakeHostBinary(dir: string, log: string, sleepMs = 0, failNth = 0): str
     // case #654's episode boundary exists for — and a test written against it passed on a device that
     // had no drops at all.
     + `DROPS=$(cat "${dir}/drops.json" 2>/dev/null || echo '{}')\n`
-    + `printf '{"at":%s,"pulseSeconds":1,"rule":%s,"droppedByDevice":%s}\\n' "$(date +%s)" "$(printf '%s' "$OUT" | ${ruleToJson})" "$DROPS" > "$S.state" && mv "$S.state" "${dir}/state.json"\n`
+    // `NO_STATE` suppresses the file the way `NO_CONFIRM` suppresses the answer, and the pair is what
+    // a refusal now needs. The two channels are independent since the file became the fallback for a
+    // provider whose XPC listener a replacement took away — so `NO_CONFIRM` alone no longer means
+    // "could not find out", and a test that still assumes it does is asserting the old contract.
+    // `pid` is published because the provider publishes it: two of them are briefly alive during a
+    // replace, both writing this path, and a reader has no other way to say whose rule it read.
+    + `if [ ! -e "${dir}/NO_STATE" ]; then\n`
+    // `IGNORE_RULE` publishes the rule as it was *before* this delta — a provider holding
+    // something other than what the caller just wrote, which is what a second writer looks like
+    // from here. Without it the disagreement branch cannot fire: this fake always applies the
+    // delta it was given, so its file always agrees with the request that produced it.
+    + `  PUB="$OUT"; [ -e "${dir}/IGNORE_RULE" ] && PUB="$CUR"\n`
+    // **`printf '%s\\n'`, and the newline is the whole of a harness defect that hid for months.**
+    // `awk` runs its block per input *record*, and `printf '%s'` of an empty rule writes zero bytes —
+    // no record, no output, so the substitution was empty and the line rendered `"rule":,` — invalid
+    // JSON. `readFilterState` cannot tell a bad file from no file, so every test whose published rule
+    // was empty was reading *absence* and agreeing with itself. The trailing newline gives awk one
+    // empty record, which is what renders `[]`.
+    + `  printf '{"at":%s,"pid":1,"pulseSeconds":1,"rule":%s,"droppedByDevice":%s}\\n' "$(date +%s)" "$(printf '%s\\n' "$PUB" | ${ruleToJson})" "$DROPS" > "$S.state" && mv "$S.state" "${dir}/state.json"\n`
+    + `fi\n`
     + `rm -f "$S.rem" "$S.all"\n`
     // argv goes to its own file: the log line still carries the **resulting rule**, which is what the
     // assertions below are about, and argv is available separately for the tests that are about what
@@ -133,7 +157,7 @@ describe('SimulatorNetwork', () => {
   /** Every device this test reported as no longer enforced. */
   let lost: string[]
 
-  const make = (hostBinary?: string) => {
+  const make = (hostBinary?: string, confirmDeadlineMs?: number, stateFiles?: string[]) => {
     const n = new SimulatorNetwork(simctl, {
       filterHostBinary: hostBinary ?? fakeHostBinary(dir, log),
       conditionDir: dir,
@@ -142,9 +166,11 @@ describe('SimulatorNetwork', () => {
       // **Pointed at this test's own directory, and that is not only hygiene.** The default is the
       // path the real provider writes on this Mac, so a suite left on the default would read whatever
       // the developer's own filter happens to be enforcing — green or red depending on the machine.
-      filterStateFiles: [join(dir, 'state.json')],
+      filterStateFiles: stateFiles ?? [join(dir, 'state.json')],
       onEnforcementLost: (udid) => { lost.push(udid) },
       livenessIntervalMs: 20,
+      // Only set where a test is about the fallback running out of time; the default is 3s.
+      ...(confirmDeadlineMs === undefined ? {} : { filterConfirmDeadlineMs: confirmDeadlineMs }),
     })
     made.push(n)
     return n
@@ -823,12 +849,358 @@ describe('SimulatorNetwork', () => {
     it('refuses when the provider does not answer', async () => {
       armed()
       writeFileSync(join(dir, 'NO_CONFIRM'), '')
-      const net = make()
+      writeFileSync(join(dir, 'NO_STATE'), '')
+      // Short, because this test is about the verdict rather than the wait; the wait itself is
+      // covered above, against the real default.
+      const net = make(undefined, 200)
 
       await expect(net.setOffline(UDID, true)).resolves.toEqual({
         offline: false, available: false, reason: 'filter-unavailable',
       })
       nothingApplied()
+    })
+
+    it('confirms from the state file when the XPC listener is gone', async () => {
+      // **The state every system-extension replace leaves behind.** The retired extension sits
+      // `[terminated waiting to uninstall on reboot]` still owning the mach name, so the new
+      // provider's `NSXPCListener.resume()` fails with `Operation not permitted` — silently, since
+      // `resume()` returns void — and `--confirm` answers `no listener` in 9ms while the filter is
+      // enforcing normally and publishing a fresh state file. Measured 2026-09-03, and the provider
+      // survives `--off`/`--install` on the same pid, so nothing re-vends it: the loss lasts as long
+      // as the provider does.
+      //
+      // Reading that as "not confirmed" is what put `filter-unavailable` in front of a tester whose
+      // filter was working, on every Mac that had upgraded.
+      armed()
+      writeFileSync(join(dir, 'NO_CONFIRM'), '')
+      const net = make()
+
+      await expect(net.setOffline(UDID, true)).resolves.toEqual({ offline: true, available: true })
+      expect(existsSync(conditionPath(UDID)), 'layer 2 was withheld over a layer 1 that did land').toBe(true)
+    })
+
+    /**
+     * A state file in a directory anyone on the Mac can write to, which is what `/tmp` is.
+     *
+     * `chmod` after the `mkdir`, because the umask takes the world-writable bit off the mode passed
+     * to `mkdir` — and the assertion on the directory is what keeps this from silently becoming a
+     * test of a private directory, which the class trusts.
+     */
+    const forgedState = (rule: string[], mode = 0o1777) => {
+      const open = join(dir, 'open')
+      mkdirSync(open)
+      chmodSync(open, mode)
+      expect(statSync(open).mode & 0o022, 'the directory is writable by its owner only').not.toBe(0)
+      const path = join(open, 'state.json')
+      writeFileSync(path, JSON.stringify({ at: Math.floor(Date.now() / 1000), pid: 1, pulseSeconds: 1, rule }))
+      // Under root the file this test wrote would be root-owned, which is the one thing the class
+      // trusts here — so it is handed to `nobody`, the way an attacker's file would be.
+      if (process.getuid?.() === 0) chownSync(path, 65534, 65534)
+      expect(statSync(path).uid, 'the forged file is root-owned, so it would be trusted').not.toBe(0)
+      return path
+    }
+
+    it('refuses a state file that anyone could have written', async () => {
+      // The protected file is absent and the XPC listener is gone: the exact state in which a forged
+      // `/tmp` file used to confirm a rule write and let layers 2 and 3 go on (#734).
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      armed()
+      writeFileSync(join(dir, 'NO_CONFIRM'), '')
+      writeFileSync(join(dir, 'NO_STATE'), '')
+      const forged = forgedState([UDID])
+      const net = make(undefined, 300, [join(dir, 'state.json'), forged])
+
+      await expect(net.setOffline(UDID, true)).resolves.toEqual({
+        offline: false, available: false, reason: 'filter-unavailable',
+      })
+      nothingApplied()
+      // Said once, not on each of the polls the deadline is made of.
+      const said = warn.mock.calls.filter((c) => String(c[0]).includes(forged))
+      expect(said, 'the refused file was not named, or was named on every poll').toHaveLength(1)
+      warn.mockRestore()
+    })
+
+    it('refuses a state file from a directory the group can write to', async () => {
+      // Neither shipped path can tell this mask from the world-writable one: the protected directory
+      // is 0755 and `/private/tmp` is 1777. A 0775 directory is not an odd shape on macOS, where every
+      // local account is in `staff`, and it is the only case that fails if the mask narrows to 0o002.
+      armed()
+      writeFileSync(join(dir, 'NO_CONFIRM'), '')
+      writeFileSync(join(dir, 'NO_STATE'), '')
+      const forged = forgedState([UDID], 0o775)
+      const net = make(undefined, 300, [join(dir, 'state.json'), forged])
+
+      await expect(net.setOffline(UDID, true)).resolves.toEqual({
+        offline: false, available: false, reason: 'filter-unavailable',
+      })
+      nothingApplied()
+    })
+
+    // **The directory the link sits in is what decides whether root is needed, and the first version
+    // of this got that backwards.** `readIfProviderWrote` stats `dirname(path)` — the *link's*
+    // directory. Put the link somewhere only its owner can write and the ownership half of the guard
+    // never runs at all, so refusing to follow is the only thing left that can decide. That needs no
+    // root: the target can belong to whoever runs the suite.
+    it('refuses a symlink even where nothing else would refuse the file it points at', async () => {
+      armed()
+      writeFileSync(join(dir, 'NO_CONFIRM'), '')
+      writeFileSync(join(dir, 'NO_STATE'), '')
+
+      // `dir` is a `mkdtemp`, 0700. `(mode & 0o022) === 0`, so the guard stands aside on its own
+      // terms and the target below would be believed if it were ever read.
+      expect(statSync(dir).mode & 0o022, 'the temp directory is writable by its owner only').toBe(0)
+      const target = join(dir, 'real.json')
+      writeFileSync(target, JSON.stringify({
+        at: Math.floor(Date.now() / 1000), pid: 1, pulseSeconds: 1, rule: [UDID],
+      }))
+      const link = join(dir, 'linked.json')
+      symlinkSync(target, link)
+
+      const net = make(undefined, 300, [join(dir, 'state.json'), link])
+      await expect(net.setOffline(UDID, true)).resolves.toEqual({
+        offline: false, available: false, reason: 'filter-unavailable',
+      })
+      nothingApplied()
+    })
+
+    // **The same refusal from the other side, where the directory gives the guard nothing.** With the
+    // link in a world-writable directory the ownership half does run, so the target has to be one the
+    // guard would trust on its own — root-owned and writable by nobody else — and only root can build
+    // that. Pointing at one that already exists (`/etc/hosts`) does not help: the content fails to
+    // parse and `readFilterState` swallows that silently, so both outcomes are `filter-unavailable`
+    // and nothing has been observed.
+    it.skipIf(process.getuid?.() !== 0)(
+      'refuses a symlink at the fallback path even when it points at a file it would trust (root only)',
+      async () => {
+        armed()
+        writeFileSync(join(dir, 'NO_CONFIRM'), '')
+        writeFileSync(join(dir, 'NO_STATE'), '')
+
+        // The target is what the guard trusts: root-owned, writable by nobody else, carrying a
+        // live-looking publication that names the device. Its own directory is not part of that —
+        // `readIfProviderWrote` stats the *link's* directory — so it goes straight in `dir`. Without
+        // `O_NOFOLLOW` the checks run on this file, every one of them passes, and the class believes
+        // a state file the provider never wrote.
+        const target = join(dir, 'root-owned.json')
+        writeFileSync(target, JSON.stringify({
+          at: Math.floor(Date.now() / 1000), pid: 1, pulseSeconds: 1, rule: [UDID],
+        }))
+        chownSync(target, 0, 0)
+        chmodSync(target, 0o644)
+
+        const open = join(dir, 'symlinked')
+        mkdirSync(open)
+        chmodSync(open, 0o1777)
+        const link = join(open, 'state.json')
+        symlinkSync(target, link)
+        expect(statSync(link).uid, 'through the link the target reads as root-owned').toBe(0)
+
+        const net = make(undefined, 300, [join(dir, 'state.json'), link])
+        await expect(net.setOffline(UDID, true)).resolves.toEqual({
+          offline: false, available: false, reason: 'filter-unavailable',
+        })
+        nothingApplied()
+      })
+
+    // **Only root can build this, and skipping is the honest answer rather than a weaker case.** The
+    // condition is `file.uid !== 0 || (file.mode & 0o022) !== 0`: for anyone but root the first half
+    // is already true, so the second never decides anything and no test running as a normal user can
+    // reach it. Named so a skip reads as a skip in the output rather than as a pass.
+    it.skipIf(process.getuid?.() !== 0)(
+      'refuses a root-owned state file that anyone can write to (root only)', async () => {
+        armed()
+        writeFileSync(join(dir, 'NO_CONFIRM'), '')
+        writeFileSync(join(dir, 'NO_STATE'), '')
+
+        const open = join(dir, 'rootowned')
+        mkdirSync(open)
+        chmodSync(open, 0o1777)
+        const path = join(open, 'state.json')
+        writeFileSync(path, JSON.stringify({
+          at: Math.floor(Date.now() / 1000), pid: 1, pulseSeconds: 1, rule: [UDID],
+        }))
+        // Root-owned, so the first half of the condition passes — and world-writable, which is what
+        // the second half is for. An attacker who cannot own the file can still rewrite it.
+        chownSync(path, 0, 0)
+        chmodSync(path, 0o666)
+        expect(statSync(path).uid, 'the file is root-owned, so only the mode can refuse it').toBe(0)
+
+        const net = make(undefined, 300, [join(dir, 'state.json'), path])
+        await expect(net.setOffline(UDID, true)).resolves.toEqual({
+          offline: false, available: false, reason: 'filter-unavailable',
+        })
+        nothingApplied()
+      })
+
+    it('returns from a FIFO at the fallback path rather than blocking on it', async () => {
+      // Opening a FIFO read-only waits for a writer, and the check that refuses a non-regular file
+      // runs after the open. Without `O_NONBLOCK` this held the agent's whole thread — no timer can
+      // fire, so the race below never resolved and the run had to be killed by hand.
+      armed()
+      writeFileSync(join(dir, 'NO_CONFIRM'), '')
+      writeFileSync(join(dir, 'NO_STATE'), '')
+      const open = join(dir, 'openfifo')
+      mkdirSync(open)
+      chmodSync(open, 0o1777)
+      const fifo = join(open, 'state.json')
+      execFileSync('mkfifo', [fifo])
+      const net = make(undefined, 300, [join(dir, 'state.json'), fifo])
+
+      const raced = await Promise.race([
+        net.setOffline(UDID, true).then(() => 'returned'),
+        new Promise((r) => setTimeout(() => r('hung'), 4000)),
+      ])
+      expect(raced, 'openSync on the FIFO blocked the event loop').toBe('returned')
+      nothingApplied()
+    })
+
+    it('believes the same file from a directory only its owner can write', async () => {
+      // The positive control for the refusal above: the one thing that differs is the directory.
+      armed()
+      writeFileSync(join(dir, 'NO_CONFIRM'), '')
+      writeFileSync(join(dir, 'NO_STATE'), '')
+      writeFileSync(join(dir, 'state.json'), JSON.stringify({
+        at: Math.floor(Date.now() / 1000), pid: 1, pulseSeconds: 1, rule: [UDID],
+      }))
+      const net = make(undefined, 300)
+
+      await expect(net.setOffline(UDID, true)).resolves.toEqual({ offline: true, available: true })
+      expect(existsSync(conditionPath(UDID)), 'layer 2 was withheld over a file the provider wrote').toBe(true)
+    })
+
+    it('does not let a forged file stand in for a provider that stopped', async () => {
+      // The liveness watcher reads the same files, so the same forgery would keep a device looking
+      // enforced after the provider removed its file — the other half of #734's acceptance.
+      armed()
+      const forged = forgedState([UDID])
+      const net = make(undefined, undefined, [join(dir, 'state.json'), forged])
+      await expect(net.setOffline(UDID, true)).resolves.toEqual({ offline: true, available: true })
+
+      rmSync(join(dir, 'state.json'))
+      await vi.waitFor(() => expect(lost).toEqual([UDID]))
+    })
+
+    it('waits out a file written before the request rather than calling it a disagreement', async () => {
+      // The ordinary state for up to a pulse after every toggle: the file is fresh and correct and
+      // about the *previous* rule, because the provider has not published since. `checkLivenessLocked`
+      // says the same thing about the same window. Answering from it would refuse every toggle.
+      armed()
+      writeFileSync(join(dir, 'NO_CONFIRM'), '')
+      writeFileSync(join(dir, 'NO_STATE'), '')
+      const at = Math.floor(Date.now() / 1000)
+      writeFileSync(join(dir, 'state.json'), JSON.stringify({ at, pid: 1, pulseSeconds: 1, rule: [] }))
+      // **The production deadline on purpose, and it is the only test that uses it.** Every other case
+      // here injects its own, which left `FILTER_FILE_CONFIRM_DEADLINE_MS` observed by nothing —
+      // measured: cutting it to 1ms, which turns the documented loop back into a single read, passed
+      // all 83 tests. The good file lands at 600ms, so any default under about 700ms fails this.
+      const net = make()
+
+      const began = Date.now()
+      const settling = net.setOffline(UDID, true)
+      // **Comfortably past the first poll, and that margin is the test.** Two subprocess launches sit
+      // between the call and the first read, so a delay tuned close to them lets the good file arrive
+      // before the stale one is ever looked at — and then a fallback that answered from *any* fresh
+      // file would pass this too. Measured: at 150ms it did.
+      setTimeout(() => {
+        writeFileSync(join(dir, 'state.json'),
+          JSON.stringify({ at: at + 1, pid: 1, pulseSeconds: 1, rule: [UDID] }))
+      }, 600)
+
+      await expect(settling).resolves.toEqual({ offline: true, available: true })
+      expect(Date.now() - began, 'it answered before the provider had published anything').toBeGreaterThan(500)
+    })
+
+    it('refuses a file the provider stopped updating, even when it names the device', async () => {
+      // The one a freshness check exists for, and the only shape of stale file that is dangerous: it
+      // *agrees*. A provider killed twenty seconds ago left a file saying this device is offline, and
+      // the kernel has been passing its traffic the whole time — measured at about 5.8s per restart,
+      // 23–27 requests through each occurrence.
+      armed()
+      writeFileSync(join(dir, 'NO_CONFIRM'), '')
+      writeFileSync(join(dir, 'NO_STATE'), '')
+      // **Four seconds, not sixty.** The bound under test is `3 * pulseSeconds`, so a file an order of
+      // magnitude past it leaves every wider bound passing too — measured: `3 *` widened to `20 *` was
+      // green. Four is one second past the real threshold and still refused, and the measured hazard it
+      // stands for is a provider gone for about 5.8s while the kernel passes that device's traffic.
+      writeFileSync(join(dir, 'state.json'), JSON.stringify({
+        at: Math.floor(Date.now() / 1000) - 4, pid: 1, pulseSeconds: 1, rule: [UDID],
+      }))
+      const net = make(undefined, 200)
+
+      await expect(net.setOffline(UDID, true)).resolves.toEqual({
+        offline: false, available: false, reason: 'filter-unavailable',
+      })
+      nothingApplied()
+    })
+
+    it('refuses a file dated in the future, however well it agrees', async () => {
+      // **The dangerous direction of a clock that moved backwards**, and the reason the freshness test
+      // is two comparisons rather than one: `now - at` goes negative and passes any threshold, so a
+      // provider that died before an NTP correction or a VM restore leaves a frozen file that reads as
+      // perfect for as long as the skew lasts. `checkLivenessLocked` refuses the same reading and says
+      // so; this channel is its twin and has to agree.
+      armed()
+      writeFileSync(join(dir, 'NO_CONFIRM'), '')
+      writeFileSync(join(dir, 'NO_STATE'), '')
+      writeFileSync(join(dir, 'state.json'), JSON.stringify({
+        at: Math.floor(Date.now() / 1000) + 600, pid: 1, pulseSeconds: 1, rule: [UDID],
+      }))
+      const net = make(undefined, 200)
+
+      await expect(net.setOffline(UDID, true)).resolves.toEqual({
+        offline: false, available: false, reason: 'filter-unavailable',
+      })
+      nothingApplied()
+    })
+
+    it('names the channel as xpc when the provider itself disagrees', async () => {
+      // **The twin of the file case below, and the one the diagnostic field is mostly for.** XPC is the
+      // channel almost every confirmation takes, so a `from` that is only ever asserted on the fallback
+      // can be wrong exactly where it matters — measured: labelling the XPC answer `'file'` passed all
+      // 83 tests. The state file here is fresh and correct; it is not consulted, because the ask
+      // answered.
+      armed()
+      writeFileSync(join(dir, 'CONFIRM_EMPTY'), '')
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      const net = make()
+
+      await expect(net.setOffline(UDID, true)).resolves.toEqual({
+        offline: false, available: false, reason: 'filter-unavailable',
+      })
+      const said = warn.mock.calls.flat().join(' ')
+      warn.mockRestore()
+      expect(said, 'the disagreement did not name the provider that answered').toContain('provider 7')
+      expect(said, 'an answer from XPC was reported as coming from the file').toContain('read over xpc')
+    })
+
+    it('names the provider and the channel when the published rule disagrees', async () => {
+      // A rule that landed as something else — a second writer, or a provider still holding the
+      // previous one. The log is the only place this is visible, and it has to carry *what was read*
+      // and *where from*: two agents writing the same rule are each internally consistent, and after
+      // a replace two providers are briefly publishing to the same path.
+      armed()
+      writeFileSync(join(dir, 'NO_CONFIRM'), '')
+      writeFileSync(join(dir, 'IGNORE_RULE'), '')
+      // **The baseline has to sit in an earlier second than the publish, and that is a real limit of
+      // this channel rather than a fixture convenience.** The file stamps whole seconds, so a
+      // disagreeing publish landing in the same second as the previous one is indistinguishable from
+      // one that has not happened yet — and the safe reading of that is "not yet", so it waits and
+      // refuses on the deadline instead. Same verdict for the caller, less specific log. This models
+      // a provider that published five seconds ago and again after the write, still holding the old
+      // rule.
+      writeFileSync(join(dir, 'state.json'), JSON.stringify({
+        at: Math.floor(Date.now() / 1000) - 5, pid: 1, pulseSeconds: 1, rule: [],
+      }))
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      const net = make()
+
+      await expect(net.setOffline(UDID, true)).resolves.toEqual({
+        offline: false, available: false, reason: 'filter-unavailable',
+      })
+      const said = warn.mock.calls.flat().join(' ')
+      warn.mockRestore()
+      expect(said, 'the disagreement did not say which provider held the rule').toContain('provider 1')
+      expect(said, 'the disagreement did not say which channel answered').toContain('read over file')
     })
 
     it('refuses when the provider answers that it is not enforcing', async () => {
@@ -869,7 +1241,12 @@ describe('SimulatorNetwork', () => {
       // gone for about 5.8s, so this is what a toggle during any restart runs into.
       armed()
       writeFileSync(join(dir, 'CONFIRM_HANG'), '')
-      const net = make()
+      // **And no state file either, because the two go together.** A call that blocks is launchd
+      // holding the mach name for a process that is *away*, and a process that is away publishes
+      // nothing. A fake that hung the ask while still refreshing the heartbeat would be modelling a
+      // Mac that cannot exist, and the file fallback would rightly answer from it.
+      writeFileSync(join(dir, 'NO_STATE'), '')
+      const net = make(undefined, 200)
 
       const began = Date.now()
       await expect(net.setOffline(UDID, true)).resolves.toEqual({
@@ -889,6 +1266,7 @@ describe('SimulatorNetwork', () => {
       await net.setOffline(UDID, true)
 
       writeFileSync(join(dir, 'NO_CONFIRM'), '')
+      writeFileSync(join(dir, 'NO_STATE'), '')
       await expect(net.setOffline(UDID, false)).resolves.toEqual({
         offline: true, available: false, reason: 'filter-unavailable',
       })
@@ -901,7 +1279,10 @@ describe('SimulatorNetwork', () => {
       // above answered `false`.
       armed()
       writeFileSync(join(dir, 'NO_CONFIRM'), '')
-      const net = make()
+      writeFileSync(join(dir, 'NO_STATE'), '')
+      // Short, because this test is about the verdict rather than the wait; the wait itself is
+      // covered above, against the real default.
+      const net = make(undefined, 200)
       await net.setOffline(UDID, true)
 
       expect(net.state(UDID)).toEqual({ offline: false, available: false, reason: 'filter-unavailable' })
@@ -1396,11 +1777,15 @@ describe('SimulatorNetwork', () => {
       // permanently `filter-unavailable` after one refusal, with the whole suite green.
       armed()
       writeFileSync(join(dir, 'NO_CONFIRM'), '')
-      const net = make()
+      writeFileSync(join(dir, 'NO_STATE'), '')
+      // Short, because this test is about the verdict rather than the wait; the wait itself is
+      // covered above, against the real default.
+      const net = make(undefined, 200)
       await net.setOffline(UDID, true)
       expect(net.state(UDID).available).toBe(false)
 
       rmSync(join(dir, 'NO_CONFIRM'), { force: true })
+      rmSync(join(dir, 'NO_STATE'), { force: true })
 
       await expect(net.setOffline(UDID, true)).resolves.toEqual({ offline: true, available: true })
       expect(net.state(UDID)).toEqual({ offline: true, available: true })

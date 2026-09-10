@@ -236,7 +236,7 @@ Full docs: **[www.tapflow.dev](https://www.tapflow.dev)**
 
 ## Contributing
 
-tapflow is actively developed and PRs are welcome — see [CONTRIBUTING.md](https://github.com/jo-duchan/tapflow/blob/main/CONTRIBUTING.md) for branch strategy, commit conventions, and an architecture overview. For deep dives, the [contributor notes](https://github.com/jo-duchan/tapflow/blob/main/CONTRIBUTING.md#technical-internals) cover the SimulatorKit reverse-engineering and the streaming render pipeline.
+tapflow is actively developed and PRs are welcome — see [CONTRIBUTING.md](https://github.com/jo-duchan/tapflow/blob/main/CONTRIBUTING.md) for branch strategy, commit conventions, and an architecture overview. For deep dives, the [contributor notes](https://github.com/jo-duchan/tapflow/blob/main/CONTRIBUTING.md#technical-internals) cover the SimulatorKit reverse-engineering and the streaming render pipeline. Everyone taking part is expected to follow the [Code of Conduct](https://github.com/jo-duchan/tapflow/blob/main/CODE_OF_CONDUCT.md).
 
 **Requirements**: Node.js ≥ 22, pnpm ≥ 9
 
