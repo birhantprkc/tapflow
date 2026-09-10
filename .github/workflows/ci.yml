@@ -7,6 +7,83 @@ on:
     branches: [main]
 
 jobs:
+  # **What `test-swift` reads, decided once so two places cannot disagree about it.**
+  #
+  # That job is the repository's only macOS job and its longest by an order of magnitude: measured at
+  # 969s against 276s for `test` and 100s for the Docker build, so it alone sets how long a PR waits.
+  # Ten of the last thirty merges touched `ios-netfilter`; the other twenty paid sixteen minutes for a
+  # suite that could not have been affected.
+  #
+  # The isolation is real rather than assumed: `run-tests.sh` references nothing outside its own
+  # directory, and `tests.yml` compiles only files under it. `ci.yml` is watched too, because this job
+  # is where the pinned xcodegen version and its digest live — a change to the job has to run the job.
+  #
+  # **Failing safe means running it.** Every path that cannot answer the question — a missing base, a
+  # commit this checkout does not have, a `git` that errored — leaves `netfilter` at `true`.
+  changes:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      netfilter: ${{ steps.filter.outputs.netfilter }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: filter
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          changed=true
+
+          # **`HEAD^1` on a pull request, because the checkout is the merge commit.**
+          # `actions/checkout` gives `refs/pull/N/merge` for a `pull_request` event, whose first
+          # parent is the base branch as it stands now and whose second is the PR's head. Diffing
+          # against the first parent is exactly this PR's changes. `base.sha` from the payload is a
+          # snapshot from when the event fired, so anything main gained since would be counted as
+          # part of the PR — safe, but it inflates how often the Swift job runs, which is the whole
+          # point of this gate.
+          # **A `git` that errors is another way of not knowing, and `set -e` made it the one way that
+          # did not fail safe.** The paragraph above promises that anything unanswerable leaves
+          # `netfilter` at `true`; without these the step would die before writing the output, `changes`
+          # would fail, and a required check would go red over a transient error instead of just
+          # running the job. Every one of them falls through to the default.
+          base=""
+          if git rev-parse --verify --quiet HEAD^2 >/dev/null; then
+            base=$(git rev-parse HEAD^1) || base=""
+          elif [ -n "${BASE:-}" ] && git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
+            base=$(git merge-base "$BASE" HEAD) || base=""
+          fi
+
+          if [ -n "$base" ]; then
+            # **Collected before it is matched, and three things live in that decision.**
+            #
+            #  - `git … | grep -q` under `pipefail` reports a MATCH as no-match: `grep` exits at the
+            #    first hit, `git` takes SIGPIPE and returns 141, and the pipeline's status is 141, so
+            #    the `else` branch runs. Measured: with `.github/workflows/ci.yml` 39th in a listing
+            #    of 3,001 paths, `changed` came out `false` and the step exited 0. That is a PR
+            #    editing this job and skipping this job.
+            #  - `--no-renames`, because rename detection prints only the destination. Moving a file
+            #    OUT of `ios-netfilter/` otherwise produces no matching line at all, and `tests.yml`
+            #    globs `Tests`, so the bundle would silently lose a case.
+            #  - `core.quotePath=false`, because git quotes non-ASCII paths — `"packages/…/té.swift"`
+            #    with a leading double quote, which `^packages/` cannot match.
+            if files=$(git -c core.quotePath=false diff --name-only --no-renames "$base" HEAD); then
+              if grep -qE '^(packages/ios-agent/ios-netfilter/|\.github/workflows/ci\.yml$)' <<<"$files"; then
+                changed=true
+              else
+                changed=false
+              fi
+            else
+              echo "git diff failed against $base — running the Swift job rather than guessing"
+            fi
+          else
+            echo "no usable base (${BASE:-unset}) — running the Swift job rather than guessing"
+          fi
+          echo "netfilter=$changed" | tee -a "$GITHUB_OUTPUT"
+
   # 22 is the floor `engines.node` declares; 24 is what Docker and the release job run. Testing
   # both is what keeps the floor honest — `>=20.12.0` was declared for a year and never exercised
   # on 20.12, which is how it drifted below what undici already required.
@@ -52,6 +129,186 @@ jobs:
 
       - run: pnpm test
 
+      # **The injected library's decisions, mutated.** Several of those cases assert that something is
+      # *not* loopback, *not* blocking, *not* activated, and a test asserting absence passes when
+      # nothing happens. Sixteen seconds on this runner — it compiles a header with `cc` and needs no
+      # simulator SDK, which is the whole reason these tests are here rather than on `test-swift`.
+      #
+      # Only on one leg of the matrix: the mutations judge C, and nothing about them varies with the
+      # Node version.
+      - if: matrix.node == 24
+        run: packages/ios-agent/mutate-nethook.sh
+
+      # **Two guard cases that only root can build, run where root is available.**
+      #
+      # `readIfProviderWrote` believes a file in a world-writable directory only when root owns it and
+      # nobody else can change it. The two halves of that — the symlink refusal and the mode check —
+      # change the answer only for a *root-owned* target, and a suite running as a normal user cannot
+      # create one. Both `skipIf` themselves off everywhere else, so without this step they would be
+      # coverage that never executes.
+      #
+      # **Counting them is the point.** `vitest -t` exits 0 when its filter matches nothing and when
+      # every match skips, so the step would pass silently if a rename broke the filter or `skipIf`
+      # went the wrong way. Requiring that two tests actually passed is what makes a silent skip loud.
+      #
+      # **Read out of the JSON reporter, not out of the summary line.** Parsing that line failed here
+      # three times: `Tests ` matched a skipped suite, `Tests +[0-9]+ failed` matched on macOS and
+      # nothing on ubuntu, and `Tests +2 passed` missed because the runner's output carries ANSI
+      # colour — `Tests \e[22m \e[1m\e[32m2 passed`. A review had cleared that last one after
+      # measuring zero escape bytes locally, which is exactly the shape of assumption that keeps
+      # costing this repository a CI cycle. `numPassedTests` is a field rather than a rendering.
+      #
+      # Last in the job: it runs as root and leaves root-owned cache under `node_modules`, which
+      # nothing after it has to read. Only on one leg — this is about filesystem ownership, not Node.
+      - name: The state-file guard cases that only root can build
+        if: matrix.node == 24
+        run: |
+          set -euo pipefail
+          sudo -E env "PATH=$PATH" pnpm --filter @tapflowio/ios-agent exec \
+            vitest run -t 'root only' --reporter=default --reporter=json --outputFile=/tmp/root-only.json
+          node -e '
+            const r = require("/tmp/root-only.json")
+            if (r.numPassedTests !== 2) {
+              console.error(`expected exactly two "root only" tests to pass, got ${r.numPassedTests}` +
+                            ` of ${r.numTotalTests} — if you added or renamed one, this count moves with it`)
+              process.exit(1)
+            }
+          '
+
+  # **The Swift the job above cannot touch — named for the language, not for today's one suite.**
+  #
+  # Swift is spread across this repo (`ios-netfilter`, `xctest-runner`, `netprobe`, the helper
+  # binaries in `ios-agent/src`) and any of it that grows tests needs Xcode, so it needs this runner.
+  # Naming the job after the one component that has them today would mean a second macOS job per
+  # component, on the scarcest runner there is.
+  #
+  # **It runs one suite, and that is worth saying rather than implying breadth it does not have.**
+  # The other test-looking Swift in the tree, `xctest-runner/TreeRunner/TreeServerTest.swift`, is a
+  # UI-test target that drives a booted simulator — a heavier proposition than a logic suite, and a
+  # decision of its own rather than another line here.
+  #
+  # `#690` reads as "the network filter's Swift has no tests, and that is ours rather than the
+  # platform's". Half of that was a missing runner rather than missing tests: the sources under test
+  # import nothing but `Foundation`, but `run-tests.sh` drives `xcodegen` and `xcodebuild`, so it needs
+  # Xcode. **Free for a public repository**, which is why it was worth looking at twice.
+  #
+  # **`--mutate`, not a plain run.** Many of the tests assert that something is *not* allowed, and a
+  # test asserting absence passes when nothing happens — that is its definition. The flag breaks the
+  # sources eighty-two ways and requires each one to fail a test, which is the only thing that makes
+  # a green run evidence (`contributing/test-and-guard-coverage.md` rule 2). It builds and runs the
+  # suite once per mutation plus a baseline.
+  #
+  # **What is pinned, and what a pinned label does not cover.** `macos-15` fixes the OS; it does not
+  # fix Xcode, which GitHub rolls forward inside a label. So the toolchain here will move without this
+  # file changing, and that is worth knowing rather than claiming otherwise — a newer Xcode dropping a
+  # symbol is caught by `doctor`'s SDK check against the developer's own SDK, not by this job.
+  # `xcodegen` **is** pinned, to a release binary rather than `brew install`: unpinned, a formula bump
+  # changes how `tests.yml` is read on a morning nobody chose, and there would be no line to review.
+  #
+  # **No `paths:` filter, and not for the reason a first draft gave.** It claimed a skipped run would
+  # count as passing — the opposite of what `ci` below does, which asserts on this job's `result` and
+  # so fails on `skipped`. `paths:` is a workflow-level key anyway, so filtering would skip `ci` too
+  # and leave the required check unreported, which blocks the merge instead of waving it through.
+  # Either way the filter buys nothing, and the cost it would save is real but modest.
+  test-swift:
+    needs: changes
+    if: needs.changes.outputs.netfilter == 'true'
+    runs-on: macos-15
+    # The suite is two Swift files and their tests, but the job is `brew`-free installs plus
+    # eighty-three `swiftc` build-and-run cycles — one baseline and one per mutation — and then one
+    # `xcodebuild build` that compiles the shipping targets. **That number is still the thing to watch
+    # when adding a mutation**: it was sixteen when the job was written, and every entry in
+    # `run-tests.sh` is a cost paid on every run of this job. Count them with `grep -cE '^mutate "'`,
+    # not `grep -c '^mutate '`, which counts the function definition and is how one version of this
+    # comment said thirty-six when it was thirty-four.
+    #
+    # **The engine was swapped, and that is where the headroom came from.** Every launch used to be an
+    # `xcodebuild test`, which was the entire cost: measured on the same sources, `xcodegen` is 0.02s,
+    # while `xcodebuild` was ~13.5s a launch here — sixteen took 2m35s–3m08s, forty-two 9m27s,
+    # eighty-three 17m29s, and 18m03s for the whole job. Building the identical XCTest files with
+    # `swiftc` and running them under `xcrun xctest` is **1.9s a cycle**, and the full mutation set
+    # went from 1049s to 222–246s across three local runs. Dropping mutations was the alternative and
+    # it was the wrong one: nothing about the coverage had to change.
+    #
+    # **The remaining floor is one mutation, and it does not move.** `walk: no bound` removes a bound,
+    # so it does not fail an assertion — it spins until `run`'s watchdog kills it at 20s. Everything
+    # else got seven times faster and that one did not, which is the shape to expect from any future
+    # bound; the spread in the range above is `cache: no lock` sometimes landing there too.
+    #
+    # **Fifteen, and the number came from a run here rather than from a laptop.** The first green run
+    # of the new engine took **5m29s** for the whole job against 18m03s before it, so this is 2.7x —
+    # more headroom than the 1.94x the old ceiling settled for, which is deliberate while there is
+    # only one measurement. A draft of this change set it to 20 from local numbers on a 12-core
+    # machine for a job that runs on a 3-core one, in the same commit that deleted the paragraph
+    # saying *extrapolate from the slowest, not the luckiest*. The old 1.25x CI-to-local ratio would
+    # not have helped either: it measured a workload dominated by `xcodebuild`'s fixed launch
+    # overhead, and this one is compile-bound, where core count is the variable.
+    #
+    # **When that stops being enough, the answer is not to raise it**: the honest options are dropping
+    # mutations that no longer aim at a decision, or running `--mutate` on a narrower trigger than
+    # every PR update and leaving the plain suite here. Bounded at all because the default is 360
+    # minutes and this is the repository's only macOS job — a hung run would otherwise hold the
+    # required check for six hours.
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # `tests.yml` is a spec, not a project: the `.xcodeproj` is generated on every run, so a
+      # test-only edit cannot bump the extension's `CFBundleVersion`.
+      # **The digest, not just the version.** A release asset can be replaced under an existing tag,
+      # so pinning the URL pins what to ask for and not what arrives — and what arrives is unpacked
+      # and run with `sudo`. Checked before anything is extracted. Bumping the version means bumping
+      # this line too, which is the point: the pair is what gets reviewed.
+      - name: Install xcodegen (pinned)
+        env:
+          XCODEGEN_VERSION: 2.46.0
+          XCODEGEN_SHA256: 4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/xcodegen.zip \
+            "https://github.com/yonaskolb/XcodeGen/releases/download/$XCODEGEN_VERSION/xcodegen.zip"
+          echo "$XCODEGEN_SHA256  /tmp/xcodegen.zip" | shasum -a 256 -c -
+          unzip -q /tmp/xcodegen.zip -d /tmp/xcodegen
+          sudo /tmp/xcodegen/xcodegen/install.sh
+          xcodegen --version
+
+      - run: packages/ios-agent/ios-netfilter/run-tests.sh --mutate
+
+      # **The step above never compiles the shipping targets.** `tests.yml` builds a bundle out of
+      # the two pure sources and `Tests/`; `Provider.swift`, `IPCListener.swift`, both `main.swift`
+      # and `Shared/` are in neither test bundle. So a name that collides between a pure file and one
+      # of those breaks `build.sh` on the maintainer's Mac at release time with the whole suite and
+      # every mutation green — and the pure files now export eleven declarations across two targets,
+      # where they exported three from one.
+      #
+      # **Measured, because a guard that has not been seen to fire is not a guard.** Appending
+      # `func pulseSeconds(enforcing: Bool) -> TimeInterval { 0 }` to `Shared/NetFilterXPC.swift` in a
+      # copy of the directory left the test bundle at `43 tests, 0 failures` and made this step exit
+      # 65 with `invalid redeclaration of 'pulseSeconds(enforcing:)'`.
+      #
+      # `xcodegen generate` without `--spec` resets both `Info.plist` `CFBundleVersion`s to `1`,
+      # which would be a version regression in a working tree. Harmless here because the checkout is
+      # ephemeral and nothing is committed from it — but that is the reason this step is last.
+      #
+      # **`Release`, because that is what `build.sh` ships.** The generated project defaults to
+      # `Debug`, and a step whose whole point is "compile what goes out" must not compile something
+      # else. It changes nothing measurable today — there is no `#if DEBUG` anywhere under
+      # `Extension/`, `Host/` or `Shared/` — which is exactly why it is worth pinning now rather than
+      # after the first one arrives. Release is also whole-module, so it is the configuration that
+      # can raise a diagnostic `Debug` does not. Measured at 6s.
+      - name: Compile the shipping targets
+        working-directory: packages/ios-agent/ios-netfilter
+        run: |
+          set -euo pipefail
+          xcodegen generate >/dev/null
+          xcodebuild build -project TapflowNetFilter.xcodeproj -scheme TapflowNetFilter \
+            -configuration Release \
+            -destination 'platform=macOS,arch=arm64' CODE_SIGNING_ALLOWED=NO | tail -5
+
   # `protect-main` requires the status check named `ci`. A matrix reports per-leg contexts
   # (`test (22)`, `test (24)`) and never one called `ci`, so the matrix lives in `test` and this
   # job carries the required name. Changing the matrix stays a code change — the ruleset, which
@@ -62,7 +319,7 @@ jobs:
   # exactly how the `changeset` job below exempts bot PRs. Without the assertion it has no step
   # that can fail, so it always succeeds. Either omission makes the gate decorative.
   ci:
-    needs: [test]
+    needs: [changes, test, test-swift]
     if: always()
     runs-on: ubuntu-latest
     permissions:
@@ -70,9 +327,31 @@ jobs:
     steps:
       # `needs.test.result` rolls up the whole matrix: it is `success` only if every leg was.
       # `failure`, `cancelled` and `skipped` all fail the assertion, so every path fails safe.
+      #
+      # Index syntax for the macOS job. `needs.test-swift.result` also works — Actions allows a
+      # hyphen in property position — so this is a preference for a form that cannot be misread as
+      # subtraction, not a correctness fix. An earlier comment here claimed it was one.
+      #
+      # **The macOS job is asserted the same way and from its first commit.** Waiting for it to prove
+      # itself before wiring it in would have shipped exactly the decorative gate the comment above
+      # this job warns about — and a runner that cannot build the project is something a PR should
+      # fail on, which is what a PR is for.
       - run: |
-          echo "test result: ${{ needs.test.result }}"
+          echo "changes result:  ${{ needs.changes.result }} (netfilter=${{ needs.changes.outputs.netfilter }})"
+          echo "test result:     ${{ needs.test.result }}"
+          echo "test-swift result: ${{ needs['test-swift'].result }}"
+          [ "${{ needs.changes.result }}" = "success" ]
           [ "${{ needs.test.result }}" = "success" ]
+          # **A skipped `test-swift` is accepted only when the gate says why.** Loosening this to
+          # `success || skipped` would be the hole the paragraph above warns about, one job over: a
+          # cancelled runner, a dependency that failed, or a mistyped `if:` all produce `skipped`, and
+          # every one of them would then read as a pass on a required check. The gate's own output has
+          # to say the netfilter did not move, and `changes` itself has to have succeeded — asserted
+          # above, because a failed gate leaves this output empty.
+          if [ "${{ needs['test-swift'].result }}" != "success" ]; then
+            [ "${{ needs['test-swift'].result }}" = "skipped" ]
+            [ "${{ needs.changes.outputs.netfilter }}" = "false" ]
+          fi
 
   changeset:
     permissions:

@@ -27,6 +27,14 @@ import { RatholeTunnel } from '../../lib/rathole-tunnel.js'
 import { TailscaleTunnel } from '../../lib/tailscale-tunnel.js'
 import { cmdRelayStart } from '../../commands/relay-start.js'
 
+function agentConnectLine(output: string[]): string {
+  const start = output.findIndex((entry) => entry.includes('tapflow agent start --relay'))
+  expect(start).toBeGreaterThanOrEqual(0)
+  const end = output.findIndex((entry, index) => index >= start && entry.includes('--token <agent-PAT>'))
+  expect(end).toBeGreaterThanOrEqual(start)
+  return output.slice(start, end + 1).join(' ')
+}
+
 describe('cmdRelayStart', () => {
   let output: string[]
   let exitSpy: MockInstance
@@ -115,6 +123,42 @@ describe('cmdRelayStart', () => {
 
     expect(resolveRelayDisplayHost).toHaveBeenCalledWith(config.tls, 'CERT', expect.any(Function))
     expect(output.join('\n')).toContain('https://relay.example.com:4000')
+  })
+
+  it('TLS agent-connect 안내에 인증서 host를 사용', async () => {
+    vi.mocked(config).tls = { mode: 'import-cert', certPath: '/cert.pem', keyPath: '/key.pem' }
+    vi.mocked(createCertProvider).mockReturnValue({
+      ensureCert: vi.fn().mockResolvedValue({ cert: 'CERT', key: 'KEY' }),
+    } as never)
+    vi.mocked(resolveRelayDisplayHost).mockReturnValue('relay.example.com')
+
+    await cmdRelayStart({ port: 4321 })
+
+    const line = agentConnectLine(output)
+    expect(line).toContain('wss://relay.example.com:4321')
+    expect(line).not.toContain('<host>')
+  })
+
+  it('HTTP agent-connect 안내는 host placeholder를 유지', async () => {
+    await cmdRelayStart({})
+
+    const line = agentConnectLine(output)
+    expect(line).toContain('ws://<host>:4000')
+    expect(line).not.toContain('ws://localhost:4000')
+  })
+
+  it.each(['localhost', 'Localhost'])('TLS host가 %s로 fallback되면 agent-connect 안내는 placeholder를 유지', async (displayHost) => {
+    vi.mocked(config).tls = { mode: 'import-cert', certPath: '/cert.pem', keyPath: '/key.pem' }
+    vi.mocked(createCertProvider).mockReturnValue({
+      ensureCert: vi.fn().mockResolvedValue({ cert: 'CERT', key: 'KEY' }),
+    } as never)
+    vi.mocked(resolveRelayDisplayHost).mockReturnValue(displayHost)
+
+    await cmdRelayStart({})
+
+    const line = agentConnectLine(output)
+    expect(line).toContain('wss://<host>:4000')
+    expect(line).not.toContain(`wss://${displayHost}:4000`)
   })
 
   it('Connect Mac agents 안내에 --token PAT와 발급처가 포함됨', async () => {

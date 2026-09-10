@@ -3,7 +3,7 @@ import fs from 'fs'
 import os from 'os'
 import path from 'path'
 import { WebSocket } from 'ws'
-import { RelayServer, IDR_REQUEST_THROTTLE_MS, NETWORK_STATE_REQUEST_THROTTLE_MS, ownerKeyFor } from '../RelayServer'
+import { RelayServer, IDR_REQUEST_THROTTLE_MS, ownerKeyFor } from '../RelayServer'
 import { signJwt, hashPat } from '../middleware/auth'
 import type { JoinResult } from '../SessionManager'
 import { initDb, closeDb, getDb } from '../db'
@@ -351,6 +351,15 @@ describe('session ownership seam', () => {
     return seen
   }
 
+  type NetworkRequester = (() => void) & { dispose(): void }
+
+  function networkRequesterFor(sessionId: string): NetworkRequester | undefined {
+    const requesters = (server as unknown as {
+      networkStateRequesters: Map<string, NetworkRequester>
+    }).networkStateRequesters
+    return requesters.get(sessionId)
+  }
+
   /** Join, then make the agent announce a ready device — `readySent` is what gates the request.
    *
    *  Deliberately stops before re-joining: the request rides the *replay* to a viewer that comes back,
@@ -404,91 +413,56 @@ describe('session ownership seam', () => {
     agent.close(); browser.close()
   })
 
-  it('coalesces a burst of re-joins onto one trailing request, rather than dropping them', async () => {
-    // **The difference from the IDR block, and the reason this slice exists.** A viewer whose request
-    // is dropped inside the window has no other producer of `network:state` and renders "unknown" for
-    // the life of the session. The trailing edge fires after the last join in the burst, and the relay
-    // addresses the reply to whichever socket holds the session when it arrives.
-    //
-    // Mutation: `idrRequester`'s `if (now - lastAt < WINDOW) return` in place of the coalescing body
-    // leaves this at 1.
-    //
-    // `Date` only, as above: `setTimeout` stays real so the sockets and the relay's timers are
-    // untouched, and the trailing edge is then a real ~400ms wait.
-    vi.useFakeTimers({ toFake: ['Date'] })
-    try {
-      const { agent, sessionIds } = await registerAgent('seam-net-3', 1, NETWORK_AGENT)
-      const sessionId = sessionIds[0]!
-      const seen = watchRequests(agent)
-      const browser = await browserSocket()
-      await joinReady(sessionId, agent, browser)
-      await rejoin(sessionId, browser)
-      await barrier(agent)
-      expect(seen).toHaveLength(1)
+  it('keeps one requester across repeated re-joins', async () => {
+    // The deterministic helper test owns the timing policy. This integration seam proves each re-join
+    // reaches the same per-session requester, rather than silently making a new budget each time.
+    const { agent, sessionIds } = await registerAgent('seam-net-3', 1, NETWORK_AGENT)
+    const sessionId = sessionIds[0]!
+    const browser = await browserSocket()
+    await joinReady(sessionId, agent, browser)
+    await rejoin(sessionId, browser)
 
-      vi.setSystemTime(Date.now() + Math.floor(NETWORK_STATE_REQUEST_THROTTLE_MS / 5))
-      for (let i = 0; i < 3; i++) await rejoin(sessionId, browser)
-      await barrier(agent)
-      // Still one: the burst has not reached the trailing edge yet. This is also what says the three
-      // did not each send — a leading-edge-per-join would read 4 here.
-      expect(seen, 'the window does not hold').toHaveLength(1)
+    const requester = networkRequesterFor(sessionId)
+    expect(requester).toBeDefined()
 
-      await vi.waitFor(() => expect(seen).toHaveLength(2), { timeout: 4_000, interval: 25 })
-      // Exactly one more, not three. Arming a timer per call inside the window is the other way to
-      // coalesce wrongly — and **the settle is what makes that mutation die reliably**: `waitFor`
-      // resolves on the first poll that sees 2, so three frames milliseconds apart can be read as two
-      // if the poll lands between them.
-      await new Promise((r) => setTimeout(r, 150))
-      expect(seen).toHaveLength(2)
+    const reached = vi.fn()
+    const requesters = (server as unknown as {
+      networkStateRequesters: Map<string, NetworkRequester>
+    }).networkStateRequesters
+    const observedRequester = Object.assign(
+      () => { reached(); requester!() },
+      { dispose: () => requester!.dispose() },
+    )
+    requesters.set(sessionId, observedRequester)
 
-      agent.close(); browser.close()
-    } finally {
-      vi.useRealTimers()
-    }
+    await rejoin(sessionId, browser)
+    await rejoin(sessionId, browser)
+    expect(reached).toHaveBeenCalledTimes(2)
+    expect(networkRequesterFor(sessionId)).toBe(observedRequester)
+
+    agent.close(); browser.close()
   })
 
-  it('disposes a pending request when the session is forgotten, instead of only dropping the map entry', async () => {
-    // **The blocker this contract exists for.** `forgetSessionState` used to be four `.delete()` calls,
-    // which is enough for `idrRequester` because its closure is stateless — a coalescing requester owns
-    // a timer, and deleting a map entry does not cancel one. A `session:leave` inside the window then
-    // leaves the orphan armed, and the re-join builds a fresh requester whose leading edge fires at
-    // once: two requests for one session, which is the second budget the map exists to prevent.
-    //
-    // Mutation: dropping the `dispose()` line from `forgetSessionState` reads 3 at the end.
-    vi.useFakeTimers({ toFake: ['Date'] })
-    try {
-      const { agent, sessionIds } = await registerAgent('seam-net-4', 1, NETWORK_AGENT)
-      const sessionId = sessionIds[0]!
-      const seen = watchRequests(agent)
-      const browser = await browserSocket()
-      await joinReady(sessionId, agent, browser)
-      await rejoin(sessionId, browser)
-      await barrier(agent)
-      expect(seen).toHaveLength(1)
+  it('disposes a requester when the session is forgotten', async () => {
+    // The helper's unit test proves that dispose cancels a pending trailing edge. This seam holds the
+    // RelayServer half: every session-removal path must invoke that method before dropping the map entry.
+    const { agent, sessionIds } = await registerAgent('seam-net-4', 1, NETWORK_AGENT)
+    const sessionId = sessionIds[0]!
+    const browser = await browserSocket()
+    await joinReady(sessionId, agent, browser)
+    await rejoin(sessionId, browser)
 
-      // Inside the window, so this one coalesces and arms the trailing edge.
-      vi.setSystemTime(Date.now() + Math.floor(NETWORK_STATE_REQUEST_THROTTLE_MS / 5))
-      await rejoin(sessionId, browser)
-      await barrier(agent)
-      expect(seen).toHaveLength(1)
+    const requester = networkRequesterFor(sessionId)
+    expect(requester).toBeDefined()
+    const dispose = vi.spyOn(requester!, 'dispose')
 
-      // …and now the armed timer is orphaned. `clearBrowser` leaves `readySent` alone, so the re-join
-      // below reaches the request again with a requester built from scratch.
-      browser.send(JSON.stringify({ type: 'session:leave', sessionId }))
-      await barrier(agent)
-      await rejoin(sessionId, browser)
-      await barrier(agent)
-      expect(seen, 'a fresh requester should fire at once').toHaveLength(2)
+    browser.send(JSON.stringify({ type: 'session:leave', sessionId }))
+    await barrier(browser)
 
-      // Long enough for the orphan to have fired if it were still armed. Real time, because the timer
-      // is real — `toFake: ['Date']` does not touch it.
-      await new Promise((r) => setTimeout(r, NETWORK_STATE_REQUEST_THROTTLE_MS + 200))
-      expect(seen, 'a disposed timer fired anyway').toHaveLength(2)
+    expect(dispose).toHaveBeenCalledTimes(1)
+    expect(networkRequesterFor(sessionId)).toBeUndefined()
 
-      agent.close(); browser.close()
-    } finally {
-      vi.useRealTimers()
-    }
+    agent.close(); browser.close()
   })
 
   it('asks nothing of an agent that never claimed it could do this', async () => {
@@ -515,51 +489,41 @@ describe('session ownership seam', () => {
   it('serves a viewer that comes back on a new socket after a dirty disconnect', async () => {
     // **The path this whole slice exists for, and the one the other tests do not walk.** They re-join
     // on the same live socket (#515), which `session:leave` and a clean close both clear. A browser
-    // that dies in its close handler runs `clearBrowser` and *not* `forgetSessionState`, so `lastAt`
-    // survives into the re-join — and that is the ordinary case: a laptop lid, a Wi-Fi blip, a tab
-    // reloaded.
-    //
-    // Two mutations, and neither is caught by anything above. Replacing the coalescing body with the
-    // IDR drop policy leaves the new viewer at one request forever — it renders "unknown" for the life
-    // of the session, because nothing else produces a `network:state`. And adding
-    // `forgetSessionState` to the browser-close path — a plausible edit, since the doc above that map
-    // calls its own leak "ordinary" — builds a fresh requester whose leading edge fires at once, which
-    // this reads as a request arriving *before* the window has elapsed.
-    vi.useFakeTimers({ toFake: ['Date'] })
-    try {
-      const { agent, sessionIds } = await registerAgent('seam-net-blip', 1, NETWORK_AGENT)
-      const sessionId = sessionIds[0]!
-      const seen = watchRequests(agent)
+    // that dies in its close handler runs `clearBrowser` and *not* `forgetSessionState`, so its
+    // requester survives into the re-join. That is the ordinary case: a laptop lid, a Wi-Fi blip, a
+    // tab reload. The deterministic helper test owns the timing policy; this one pins that lifecycle.
+    const { agent, sessionIds } = await registerAgent('seam-net-blip', 1, NETWORK_AGENT)
+    const sessionId = sessionIds[0]!
+    const first = await browserSocket('same-client')
+    await joinReady(sessionId, agent, first)
+    await rejoin(sessionId, first)
 
-      const first = await browserSocket('same-client')
-      await joinReady(sessionId, agent, first)
-      await rejoin(sessionId, first)
-      await barrier(agent)
-      expect(seen).toHaveLength(1)
+    const requesters = (server as unknown as {
+      networkStateRequesters: Map<string, NetworkRequester>
+    }).networkStateRequesters
+    const retained: NetworkRequester = Object.assign(vi.fn(), { dispose: vi.fn() })
+    requesters.set(sessionId, retained)
 
-      // Dies without saying goodbye. `terminate` rather than `close` so no close frame is negotiated.
-      vi.setSystemTime(Date.now() + Math.floor(NETWORK_STATE_REQUEST_THROTTLE_MS / 5))
-      first.terminate()
+    // Dies without saying goodbye. `terminate` rather than `close` so no close frame is negotiated.
+    const closed = new Promise<void>((resolve) => first.once('close', resolve))
+    first.terminate()
+    await closed
 
-      const second = await browserSocket('same-client')
-      await rejoin(sessionId, second)
-      await barrier(agent)
-      // Not yet — the burst is still inside the window. A fresh requester would have fired already.
-      expect(seen, 'the re-join was served from a new budget').toHaveLength(1)
+    const second = await browserSocket('same-client')
+    await rejoin(sessionId, second)
 
-      await vi.waitFor(() => expect(seen).toHaveLength(2), { timeout: 4_000, interval: 25 })
-      // And the reply reaches the socket that is *holding* the session now, which is the payoff the
-      // trailing edge is chosen for — a leading edge fired for the first viewer cannot promise it.
-      agent.send(JSON.stringify({
-        type: 'network:state', sessionId, payload: { offline: true, available: true },
-      }))
-      const state = await waitForType(second, 'network:state')
-      expect(state['payload']).toEqual({ offline: true, available: true })
+    expect(retained).toHaveBeenCalledTimes(1)
+    expect(networkRequesterFor(sessionId)).toBe(retained)
 
-      agent.close(); second.close()
-    } finally {
-      vi.useRealTimers()
-    }
+    // The reply belongs to whichever socket holds the session when it arrives, not the one that armed
+    // the requester before the dirty disconnect.
+    agent.send(JSON.stringify({
+      type: 'network:state', sessionId, payload: { offline: true, available: true },
+    }))
+    const state = await waitForType(second, 'network:state')
+    expect(state['payload']).toEqual({ offline: true, available: true })
+
+    agent.close(); second.close()
   })
 
   async function runIdrCount() {

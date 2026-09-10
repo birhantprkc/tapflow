@@ -41,6 +41,7 @@ export async function cmdRelayStart(opts: RelayStartOptions): Promise<void> {
   }
   const httpScheme = tls ? 'https' : 'http'
   const wsScheme = tls ? 'wss' : 'ws'
+  const agentConnectHost = tls && displayHost.toLowerCase() !== 'localhost' ? displayHost : '<host>'
 
   const proxyWarning = proxyWithoutPublicUrlWarning(config)
   if (proxyWarning) warn(proxyWarning)
@@ -72,7 +73,7 @@ export async function cmdRelayStart(opts: RelayStartOptions): Promise<void> {
   banner('success', 'TAPFLOW RELAY READY', [
     `Relay  : ${httpScheme}://${displayHost}:${port}`,
     ...(publicUrl ? [`Public : ${publicUrl}`] : []),
-    `Connect Mac agents:  tapflow agent start --relay ${wsScheme}://<host>:${port} --token <agent-PAT>`,
+    `Connect Mac agents:  tapflow agent start --relay ${wsScheme}://${agentConnectHost}:${port} --token <agent-PAT>`,
     `  Issue an 'agent'-scope token in the dashboard (Settings → Tokens).`,
     'Press Ctrl+C to stop.',
   ])

@@ -1,6 +1,6 @@
 {
   "name": "@tapflowio/flow-runner",
-  "version": "0.19.0",
+  "version": "0.20.1",
   "description": "Deterministic YAML flow runner for tapflow — replay UI test flows against simulators/emulators with zero LLM calls",
   "keywords": [
     "tapflow",
@@ -57,6 +57,6 @@
     "@types/node": "^22.20.1",
     "@types/ws": "^8.0.0",
     "typescript": "^5.0.0",
-    "vitest": "^4.1.10"
+    "vitest": "^4.1.11"
   }
 }

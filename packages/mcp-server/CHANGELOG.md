@@ -1,5 +1,25 @@
 # @tapflowio/mcp-server
 
+## 0.20.1
+
+### Patch Changes
+
+- @tapflowio/protocol@0.20.1
+- @tapflowio/flow-runner@0.20.1
+
+## 0.20.0
+
+### Patch Changes
+
+- Updated dependencies [3f18f70]
+- Updated dependencies [cb04a51]
+- Updated dependencies [5e2fcc5]
+- Updated dependencies [faeaae9]
+- Updated dependencies [4901c8c]
+- Updated dependencies [d238c34]
+  - @tapflowio/protocol@0.20.0
+  - @tapflowio/flow-runner@0.20.0
+
 ## 0.19.0
 
 ### Minor Changes

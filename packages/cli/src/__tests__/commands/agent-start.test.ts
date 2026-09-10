@@ -4,10 +4,18 @@ import type { AgentConnectOpts } from '@tapflowio/agent-core'
 vi.mock('node:child_process')
 vi.mock('@tapflowio/ios-agent', () => ({ requestAudioPermission: vi.fn(), isAudioSupported: vi.fn(() => true) }))
 vi.mock('@tapflowio/android-agent', () => ({}))
+// The singleton claim is a real socket held for the life of the process, so one claim inside a vitest
+// worker would refuse every later test in the file. These tests are about connecting and about the
+// token; `agentSingleton.test.ts` is what exercises the claim itself, against a real temp directory.
+vi.mock('../../lib/agent-singleton.js', () => ({
+  claimAgentSlot: vi.fn(async () => ({ held: true, release: () => {} })),
+  claimPath: vi.fn((p: string) => `/tmp/tapflow-agent-${p}.sock`),
+}))
 
 import { execSync } from 'node:child_process'
 import { AgentRegistry } from '@tapflowio/agent-core'
 import { cmdAgentStart } from '../../commands/agent-start.js'
+import { claimAgentSlot } from '../../lib/agent-singleton.js'
 
 const mockExecSync = vi.mocked(execSync)
 
@@ -140,6 +148,67 @@ describe('cmdAgentStart', () => {
 
     await expect(cmdAgentStart({})).rejects.toThrow('process.exit')
     expect(exitSpy).toHaveBeenCalledWith(1)
+  })
+
+  // The singleton wiring sat behind a mock and had no coverage at all: deleting the whole claim loop
+  // left the suite green. These pin the refusal, its exit code, and the two ways a claim has to go
+  // back — a later platform refusing, and a platform that claimed and then failed to connect.
+  it('refuses and exits when an agent for that platform is already running', async () => {
+    AgentRegistry.register('ios', DummyAgent as never, { canRun: () => true, connect: iosConnectSpy })
+    vi.mocked(claimAgentSlot).mockResolvedValueOnce({ held: false, reason: 'in-use' })
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => { throw new Error('process.exit') })
+
+    await expect(cmdAgentStart({ platform: 'ios' })).rejects.toThrow('process.exit')
+    expect(exitSpy).toHaveBeenCalledWith(1)
+    // A refusal must not connect: a second agent registering is what evicts the first one's socket
+    // at the relay, which is the thing being prevented.
+    expect(iosConnectSpy, 'it refused and connected anyway').not.toHaveBeenCalled()
+  })
+
+  it('gives back an earlier claim when a later platform is refused', async () => {
+    AgentRegistry.register('ios', DummyAgent as never, { canRun: () => true, connect: iosConnectSpy })
+    AgentRegistry.register('android', DummyAgent as never, { canRun: () => true, connect: androidConnectSpy })
+    const release = vi.fn()
+    vi.mocked(claimAgentSlot)
+      .mockResolvedValueOnce({ held: true, release })
+      .mockResolvedValueOnce({ held: false, reason: 'in-use' })
+    vi.spyOn(process, 'exit').mockImplementation(() => { throw new Error('process.exit') })
+
+    await expect(cmdAgentStart({})).rejects.toThrow('process.exit')
+    expect(release, 'it exited still holding the slot it took first').toHaveBeenCalledTimes(1)
+  })
+
+  it('does not say an agent is running when the probe found none', async () => {
+    // A stale claim means the liveness probe got no answer — so "already running" is false, and it is
+    // false in the case that is hardest to diagnose: there is no process to go and find.
+    AgentRegistry.register('ios', DummyAgent as never, { canRun: () => true, connect: iosConnectSpy })
+    vi.mocked(claimAgentSlot).mockResolvedValueOnce({ held: false, reason: 'stale-claim' })
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+    vi.spyOn(process, 'exit').mockImplementation(() => { throw new Error('process.exit') })
+
+    await expect(cmdAgentStart({ platform: 'ios' })).rejects.toThrow('process.exit')
+    const printed = log.mock.calls.flat().join('\n')
+    expect(printed, 'the running-agent banner is false here').not.toContain('AGENT ALREADY RUNNING')
+    expect(printed).toContain('CLAIM LEFT BY ANOTHER ACCOUNT')
+    expect(printed, 'the remediation has to name the file to remove').toContain('/tmp/tapflow-agent-ios.sock')
+  })
+
+  it('gives the claim back when the platform it was taken for fails to connect', async () => {
+    // With another platform already connected the failure is a warning and this process runs on — so
+    // a claim held for an agent that does not exist would refuse the next `agent start` for it.
+    AgentRegistry.register('ios', DummyAgent as never, { canRun: () => true, connect: iosConnectSpy })
+    AgentRegistry.register('android', DummyAgent as never, { canRun: () => true, connect: androidConnectSpy })
+    androidConnectSpy.mockRejectedValue(new Error('adb went away'))
+    const iosRelease = vi.fn()
+    const androidRelease = vi.fn()
+    vi.mocked(claimAgentSlot)
+      .mockResolvedValueOnce({ held: true, release: iosRelease })
+      .mockResolvedValueOnce({ held: true, release: androidRelease })
+
+    await cmdAgentStart({})
+
+    expect(androidRelease, 'the failed platform kept its slot').toHaveBeenCalledTimes(1)
+    expect(iosRelease, 'the connected platform lost its slot').not.toHaveBeenCalled()
   })
 
   it('connect 실패 → exit(1)', async () => {

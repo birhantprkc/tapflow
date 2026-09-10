@@ -11,10 +11,15 @@ related: [adversarial-review]
 > Companion to [adversarial-review.md](./adversarial-review.md), which covers the review itself. This
 > side is about the moment before there is anything to review.
 
-Promoted from a program-length wire-contract redesign (`protocol` / `relay` / both agents / two
-clients / dashboard, ~10 merged PRs). Across those PRs the **majority of review findings were defects
-in the author's own work**, and the same four shapes kept producing them. Each rule below is here
-because it was paid for at least twice.
+Rules 1–4 come from a program-length wire-contract redesign (`protocol` / `relay` / both agents /
+two clients / dashboard, ~10 merged PRs). Across those PRs the **majority of review findings were
+defects in the author's own work**, and the same four shapes kept producing them; each was paid for
+at least twice.
+
+Rule 5 comes from a later and much smaller change — the repo's own PreToolUse gates — and is here on
+different grounds. It was paid for once, but what it cost was the remedy this document prescribes
+everywhere else: rules 2 and 4 both answer "how do you know the test holds?" with *run the mutation*,
+and one of the three probes below survived sixteen of them.
 
 The common root: **a claim written in prose reads, to the author and to a reviewer, as a claim that is
 enforced.** A green suite is not evidence that a test holds what its name says. It is evidence that
@@ -121,12 +126,70 @@ while a wrong address on a refusal misdiagnoses one session.
 `waitForType(browser, 'session:joined')` — type only. Green there was never evidence about the address,
 and reading the helper is what shows it.
 
+## 5. A mutation proves a test *can* fail, not that it asserts the right thing
+
+Three probes written on one branch measured nothing, and they failed three different ways. Two were
+caught by mutation; the third is the one that matters, because mutation cannot reach it.
+
+**The fixture had the property by accident.** A regression test for CRLF handling built its input by
+joining lines:
+
+```js
+const doc = [`cat > plan.md <<'EOF'`, `… gh issue create …`, 'EOF']
+expect(invocations(doc.join('\r\n'))).toEqual([])
+```
+
+`join` puts the separator **between** items, so the final `EOF` carried no `\r` — and that last line
+is the only one the code compares against the heredoc delimiter. The fixture was LF-terminated
+exactly where it mattered, so the CRLF path was never entered and the test passed for a reason
+unrelated to its name. Reverting the fix left the whole suite green.
+
+→ **When a fixture's point is a property of the input — line endings, encoding, ordering, size — make
+the input carry that property everywhere the code looks, or assert that it does.** `join` is where
+this goes wrong most often: it decorates the gaps and leaves the ends bare.
+
+**The failure mode was a hang, not a red test.** A guard existed because `readFileSync` on a FIFO
+blocks until something writes. The test called it in-process. `readFileSync` is synchronous, so with
+the guard removed it blocked the worker thread and vitest's own `testTimeout` could not interrupt it:
+the run went past ten minutes and had to be killed. The regression became a **stopped** CI job rather
+than a red one, and a stopped job names nothing while a red one names the test.
+
+→ **A test whose subject is "this does not block" runs the blocking call in a child process carrying
+its own timeout**, and asserts on the child's exit signal. In-process, the timeout you configured is
+not the timeout that applies.
+
+**The assertion was pointed the wrong way, and its message said so.** This is the one no mutation
+finds:
+
+```js
+expect(verdict(cmd, { 'b.md': 'English on disk.' }).blocked,
+       'disk wins over the payload').toBe(false)
+```
+
+The command writes a body file and then sends it, so reading the file **on disk** judges text the
+command is about to replace. The assertion was accurate about what the code did and wrong about what
+the code should do — and the message string, phrased as a decision, is what made it read as
+deliberate. Every mutation passed, because a mutation asks whether the assertion still holds, never
+whether it should. It was found by an outside reviewer on a branch that had already run sixteen.
+
+→ **Mutation testing verifies the link between a test and the code. It cannot verify the link between
+the test and the requirement.** A test asserting that something is *allowed* earns the same suspicion
+as one asserting absence (§2): state what the allowed case would look like if it were the bug, and
+check that is not what you have.
+
+**And a fix carries defects at the same rate as the code it repairs.** All three probes were written
+in the same session as the code they cover, two of them while fixing findings from a review of that
+same branch — and three of that branch's findings were introduced by earlier fixes on it. A round of
+review is not a ratchet. The diff that answers it is new code and needs the same treatment, which in
+practice means **re-running the mutation set after the fixes, not before**.
+
 ---
 
-## Where the rest of that program's decisions live
+## Where the rest of these decisions live
 
 Most of them are **not here on purpose.** The rationale for a rule belongs beside the code it governs
-(`packages/protocol/AGENTS.md`, `packages/relay/AGENTS.md`, the docstring on the function), and this
+(`packages/protocol/AGENTS.md`, `packages/relay/AGENTS.md`, the header comment on a hook, the
+docstring on the function), and this
 directory's own rule is to read that record before changing the code it describes. A second copy here
 would go stale independently of the first — which is the failure mode
 [adversarial-review.md](./adversarial-review.md) documents under "the justification is part of the

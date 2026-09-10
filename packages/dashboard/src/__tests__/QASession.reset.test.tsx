@@ -69,6 +69,15 @@ const ANDROID_AGENTS: SessionInfo[] = [{
   capabilities: ['clipboard'],
   devices: [device('dev-a', 'Pixel 7', 'android')],
 }]
+const MIXED_CAPABILITY_AGENTS: SessionInfo[] = [
+  ...AGENTS,
+  {
+    agentName: 'legacy-mac',
+    platform: 'ios',
+    capabilities: ['clipboard'],
+    devices: [device('dev-c', 'iPhone 14')],
+  },
+]
 
 /** The breadcrumb is rendered by the layout, outside QASession — and once a session is open it is
  *  the only way back to the Mac list, which is the path this issue is about. */
@@ -169,8 +178,22 @@ describe('QASession — Full reset applies to exactly one pick (#439)', () => {
 
     expect(screen.queryByRole('switch')).not.toBeInTheDocument()
 
+    // This only pins Android's default mount; the armed capability guard is covered by the
+    // mixed-agent case below.
     await user.click(screen.getByText('Pixel 7'))
     expect(viewerMounts).toEqual([{ deviceId: 'dev-a', resetMode: 'app-only' }])
+  })
+
+  it('does not carry an armed full reset to an agent that lacks the capability', async () => {
+    const user = userEvent.setup()
+    await openDeviceList(user, MIXED_CAPABILITY_AGENTS)
+
+    await user.click(screen.getByRole('switch'))
+    await user.click(screen.getByRole('button', { name: '← All Macs' }))
+    await user.click(screen.getByText('legacy-mac'))
+    await user.click(screen.getByText('iPhone 14'))
+
+    expect(viewerMounts).toEqual([{ deviceId: 'dev-c', resetMode: 'app-only' }])
   })
 
   it('mounts a fresh viewer per pick — the per-mount reset guard depends on it', async () => {

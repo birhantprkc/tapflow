@@ -58,6 +58,7 @@ export async function cmdStart(opts: StartOptions): Promise<void> {
   }
   const httpScheme = tls ? 'https' : 'http'
   const wsScheme = tls ? 'wss' : 'ws'
+  const agentConnectHost = tls && displayHost.toLowerCase() !== 'localhost' ? displayHost : '<this-ip>'
   // The co-located agent connects over localhost; the agent accepts the domain cert there (see isLocalhostWss).
   const relayUrl = `${wsScheme}://localhost:${RELAY_PORT}`
 
@@ -83,7 +84,7 @@ export async function cmdStart(opts: StartOptions): Promise<void> {
       `Relay  : ${httpScheme}://${displayHost}:${RELAY_PORT}`,
       ...(publicUrl ? [`Public : ${publicUrl}`] : []),
       'No agent environment detected — running relay only.',
-      `Connect a Mac agent:  tapflow agent start --relay ${wsScheme}://<this-ip>:${RELAY_PORT} --token <agent-PAT>`,
+      `Connect a Mac agent:  tapflow agent start --relay ${wsScheme}://${agentConnectHost}:${RELAY_PORT} --token <agent-PAT>`,
       `  Issue an 'agent'-scope token in the dashboard (Settings → Tokens).`,
       'Press Ctrl+C to stop.',
     ])

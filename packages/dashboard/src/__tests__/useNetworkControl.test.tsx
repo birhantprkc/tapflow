@@ -142,29 +142,49 @@ describe('useNetworkControl', () => {
     expect(view.result.current.position).toBe(first)
   })
 
-  it('tells the one reason it reads apart from the ones it does not', () => {
-    // The hook's only reason branch, and it had no test at all: replacing it with `false` — deleting
-    // the dashboard's half of `awaiting-app` outright — left the whole suite green, because the
-    // toolbar's tests inject the prop directly and never exercise the wire→prop step.
+  it('carries every reason through, not just the one it used to trust', () => {
+    // This used to assert the opposite — that `awaiting-app` was kept and the rest dropped — and the
+    // reason it did was about the wire: every Android read failure arrived as `unsupported-device`,
+    // so naming a reason meant telling a tester "this will never work" about a rebooting device. The
+    // set has been split (#618), so each member now carries a remedy that differs and dropping them
+    // throws away the difference.
     //
-    // Both directions matter. Widening the branch to "any reason but `unsupported-device`" is as
-    // wrong as removing it: the point is that this member is the only one an agent emits about a
-    // fact it knows.
+    // Still asserted member by member rather than in one pass: a hook that passed only the first
+    // reason it saw, or one that cached, reads the same on a single sample.
     const { view, report } = setup()
 
-    report({ offline: false, available: false, reason: 'awaiting-app' })
-    expect(view.result.current.awaitingApp).toBe(true)
-
-    for (const reason of ['not-armed', 'hooks-not-installed', 'unsupported-device'] as const) {
+    for (const reason of ['awaiting-app', 'not-armed', 'hooks-not-installed', 'unsupported-device',
+      'state-unconfirmed', 'filter-unavailable'] as const) {
       report({ offline: false, available: false, reason })
-      expect(view.result.current.awaitingApp, `reason ${reason}`).toBe(false)
+      expect(view.result.current.reason, `reason ${reason}`).toBe(reason)
     }
 
     // And a steerable report clears it, so a device that launches its app stops being drawn as
     // waiting for one.
-    report({ offline: false, available: false, reason: 'awaiting-app' })
     report(steerable(false))
-    expect(view.result.current.awaitingApp).toBe(false)
+    expect(view.result.current.reason).toBeUndefined()
+  })
+
+  it('announces enforcement that stopped, and announces it once', () => {
+    // **The one reason that interrupts rather than re-colours.** It says a device that was offline
+    // stopped being enforced, so requests the tester believed were blocked had been succeeding — a
+    // test already signed off, invalidated. Every other member changes what the control looks like.
+    //
+    // Once, though: a re-join asks for the state again and the answer still carries the reason, so an
+    // announcement per report would fire every time a viewer reconnects.
+    const { report, errors } = setup()
+
+    report({ offline: false, available: false, reason: 'enforcement-lost' })
+    report({ offline: false, available: false, reason: 'enforcement-lost' })
+
+    expect(errors).toHaveLength(1)
+    expect(errors[0]).toMatch(/needs checking again/)
+
+    // And it can be announced again once something else has been said in between — a second loss is
+    // a second invalidated test.
+    report(steerable(false))
+    report({ offline: false, available: false, reason: 'enforcement-lost' })
+    expect(errors).toHaveLength(2)
   })
 
   it('does not move the toggle when the click is sent', () => {
@@ -319,6 +339,47 @@ describe('useNetworkControl', () => {
     expect(view.result.current.pending).toBe(true)
   })
 
+  it('rejects the answer to a request the device disappeared during, once it is back', () => {
+    // **The window the readiness guard does not cover.** It drops what arrives *while* the device is
+    // away; this is the reply that arrives after it returns, produced before the reboot and
+    // correlated to a request this hook already told the tester it had given up on.
+    //
+    // Applying it would be the defect this whole hook was changed to end, one transition later: the
+    // pre-reboot position back on screen, and the report deadline frozen with it, because that
+    // deadline only runs while `position === 'waiting'`.
+    const { view, handlerRef, sent } = setup()
+    act(() => { view.result.current.toggle() })
+    const req = sent.find((m) => m.type === 'network:set')?.requestId
+
+    act(() => { view.rerender({ sessionId: 's1', deviceReady: false }) })
+    act(() => { view.rerender({ sessionId: 's1', deviceReady: true }) })
+    expect(view.result.current.position, 'the reboot left it waiting for a fresh report').toBe('waiting')
+
+    act(() => {
+      handlerRef.current?.({
+        type: 'network:state', sessionId: 's1', requestId: req, payload: steerable(true),
+      } as NetworkMessage)
+    })
+    expect(view.result.current.position, 'a pre-reboot answer was applied after the reboot').toBe('waiting')
+  })
+
+  it('starts rejecting nothing in a new session', () => {
+    // The abandoned set is per session. Left uncleared it only ever grows, and an id reused across
+    // sessions — which nothing forbids — would be refused for a request that was never dropped.
+    const { view, handlerRef, sent } = setup()
+    act(() => { view.result.current.toggle() })
+    const req = sent.find((m) => m.type === 'network:set')?.requestId
+    act(() => { view.rerender({ sessionId: 's1', deviceReady: false }) })
+    act(() => { view.rerender({ sessionId: 's2', deviceReady: true }) })
+
+    act(() => {
+      handlerRef.current?.({
+        type: 'network:state', sessionId: 's2', requestId: req, payload: steerable(true),
+      } as NetworkMessage)
+    })
+    expect(view.result.current.position, 'the new session inherited a refusal').toBe('offline')
+  })
+
   it('settles on unknown when no report arrives before the deadline', () => {
     vi.useFakeTimers()
     const { view } = setup()
@@ -353,6 +414,144 @@ describe('useNetworkControl', () => {
     view.rerender({ sessionId: 's1', deviceReady: true })
     act(() => { vi.advanceTimersByTime(NETWORK_REPORT_DEADLINE_MS + 1) })
     expect(view.result.current.position).toBe('unknown')
+  })
+
+  it('forgets the position when the device stops being ready', () => {
+    // A reboot keeps the session id, so the reset below never fired for it. The agent's boot path
+    // clears airplane mode and reports online — so an amber "offline" sat over a device being reset
+    // to the opposite, for the 30–60s the boot takes.
+    const { view, report } = setup()
+    report(steerable(true))
+    expect(view.result.current.position).toBe('offline')
+
+    view.rerender({ sessionId: 's1', deviceReady: false })
+    // `unknown`, not `waiting`: this device has been here, so "no state has been reported" is the true
+    // and terminal thing to say. `waiting` would draw a pulse and claim a read is under way while the
+    // deadline that ends that claim is gated on readiness — nothing checking, and nothing to stop it.
+    expect(view.result.current.position, 'the pre-reboot position survived the reboot').toBe('unknown')
+  })
+
+  it('does not carry "this one has been here" into the next session', () => {
+    // The memory is per session: switching to a session whose device has not arrived yet must read as
+    // waiting, not as a device that came and went. Otherwise the first thing a tester sees on a new
+    // session is a verdict about a device they have not been shown.
+    // Both change together, which is what a session switch looks like: the new session has no device
+    // on screen yet. Changing only the id leaves the readiness effect unrun, so it would not have
+    // exercised the memory at all — the first version of this test did exactly that and passed with
+    // the reset deleted.
+    const { view } = setup()
+    expect(view.result.current.position).toBe('waiting')
+
+    view.rerender({ sessionId: 's2', deviceReady: false })
+    expect(view.result.current.position, 'the previous session\'s device leaked into this one').toBe('waiting')
+  })
+
+  it('remembers a device across a switch between two sessions that both have one', () => {
+    // **The one switch that never passes through an unready device.** The test above changes the id
+    // and the readiness together, which is what a switch usually looks like; this is the switch where
+    // `deviceReady` stays `true` the whole way, so the readiness effect never reruns and the session
+    // reset is the only thing that touches the memory.
+    //
+    // Getting it wrong here is not a cosmetic difference. `waiting` draws "Checking the network
+    // state." and its deadline is gated on readiness, so with the device gone nothing arms and
+    // nothing ends the claim — the exact forever-pulse this hook was changed to remove.
+    const { view } = setup()
+    view.rerender({ sessionId: 's2', deviceReady: true })
+    view.rerender({ sessionId: 's2', deviceReady: false })
+    expect(view.result.current.position, 'a device that had been here read as one that never was')
+      .toBe('unknown')
+  })
+
+  it('stops claiming the device cannot be steered once it is gone', () => {
+    // `steerable` is a claim about the device, like the position, and the readiness reset dropped
+    // every other one. Left behind it disabled the control while `reason` — the thing that explains
+    // the disabling — was cleared in the same breath, so what stayed on screen was a dead button with
+    // nothing to say. A `session:rebound` can also put a different device on the far side of this.
+    const { view, report } = setup()
+    report(unsteerable(false))
+    expect(view.result.current.steerable).toBe(false)
+
+    view.rerender({ sessionId: 's1', deviceReady: false })
+    expect(view.result.current.steerable, 'the departed device still said it could not be steered')
+      .toBe(true)
+    expect(view.result.current.reason).toBeUndefined()
+  })
+
+  it('still waits, rather than reporting unknown, before the session has ever had a device', () => {
+    // The other half of the same distinction. A session with no device yet has nothing to report and
+    // nobody has asked, so calling that silence unreadable is a verdict on a question nobody put.
+    const { view } = setup({ deviceReady: false })
+    expect(view.result.current.position).toBe('waiting')
+  })
+
+  it('drops a report that was already on its way when the device stopped being ready', () => {
+    // The reset clears the position and the in-flight request, but the answer to that request can
+    // still land. Applying it puts the pre-reboot position back — and because the deadline is gated
+    // on `position === 'waiting'`, the wait then never resolves to `unknown` either. The stale answer
+    // this hook was changed to end, restored by the change itself.
+    const { view, report } = setup()
+    report(steerable(true))
+    expect(view.result.current.position).toBe('offline')
+
+    view.rerender({ sessionId: 's1', deviceReady: false })
+    expect(view.result.current.position).toBe('unknown')
+    report(steerable(true))
+    expect(view.result.current.position, 'a late report repositioned an unready device').toBe('unknown')
+  })
+
+  it('says the request was abandoned, rather than ending it in silence', async () => {
+    // The only terminal path that announced nothing. A click puts the control in a busy state that a
+    // screen reader reads out; ending that state without a word leaves the tester with no statement
+    // about the change they asked for — and dropping the late answer took away even the
+    // repositioning that used to stand in for one.
+    const { view, errors } = setup()
+    await act(async () => { view.result.current.toggle() })
+    expect(view.result.current.pending).toBe(true)
+
+    view.rerender({ sessionId: 's1', deviceReady: false })
+    expect(errors, 'the abandoned request ended silently').toHaveLength(1)
+    expect(errors[0]).toMatch(/became unavailable before it answered/i)
+    // No cause: `deviceReady` drops on a boot, on the agent going away and on a rebind, and only the
+    // first is a restart. Naming one would be wrong two times out of three.
+    expect(errors[0], 'it named a cause it cannot know').not.toMatch(/restart/i)
+  })
+
+  it('says nothing when there was no request to abandon', () => {
+    // Readiness drops for reasons that have nothing to do with a click — a boot, an agent going away
+    // — and announcing an abandoned request that nobody made is its own false statement.
+    const { view, errors } = setup()
+    view.rerender({ sessionId: 's1', deviceReady: false })
+    expect(errors, 'it announced a request nobody made').toHaveLength(0)
+  })
+
+  it('takes reports again once the device is ready, and still times out if none comes', () => {
+    // The half that would pass if the guard simply dropped everything: after the boot the control has
+    // to listen again, and the deadline has to still be armed underneath it.
+    vi.useFakeTimers()
+    const { view, report } = setup()
+    view.rerender({ sessionId: 's1', deviceReady: false })
+    view.rerender({ sessionId: 's1', deviceReady: true })
+    report(steerable(true))
+    expect(view.result.current.position, 'the guard outlived the boot').toBe('offline')
+
+    view.rerender({ sessionId: 's1', deviceReady: false })
+    view.rerender({ sessionId: 's1', deviceReady: true })
+    act(() => { vi.advanceTimersByTime(NETWORK_REPORT_DEADLINE_MS + 1) })
+    expect(view.result.current.position).toBe('unknown')
+  })
+
+  it('arms the deadline again after a reboot, so a silent boot is not left saying nothing', () => {
+    // The deadline is gated on `position === 'waiting'`. Without the reset above it never re-armed
+    // after the first report, so the stale answer had nothing to replace it — permanently, unlike the
+    // silence before the first boot which at least resolves to `unknown`.
+    vi.useFakeTimers()
+    const { view, report } = setup()
+    report(steerable(true))
+    view.rerender({ sessionId: 's1', deviceReady: false })
+    view.rerender({ sessionId: 's1', deviceReady: true })
+
+    act(() => { vi.advanceTimersByTime(NETWORK_REPORT_DEADLINE_MS + 1) })
+    expect(view.result.current.position, 'the deadline did not re-arm').toBe('unknown')
   })
 
   it('forgets the previous device when the session changes', () => {

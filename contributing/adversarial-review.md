@@ -42,7 +42,10 @@ and waiting out sleeps.
 
 - **Only use an isolated worktree when the reviewer must edit files.** A fresh worktree has no
   `node_modules` and no `dist`, so it pays 8–10 minutes of install and build before it can run
-  anything — and a reviewer that does not know this reports results from commands that silently did
+  anything — **the first time on a machine.** After that pnpm's store is warm and shared across
+  worktrees: `pnpm install --frozen-lockfile` in a second worktree of the same clone was measured at
+  **5.3 seconds**, and only `pnpm build` still costs minutes. The number above is the cold case, and
+  reading it as the general one is what kept a session from running its suite for hours — and a reviewer that does not know this reports results from commands that silently did
   nothing (`vitest: command not found` swallowed by a shell exit). A read-only lens (contract,
   compatibility, documentation) can work against the primary checkout, which is already built.
 - **Say what to install.** When a worktree is required, the prompt must open with
@@ -83,6 +86,61 @@ and waiting out sleeps.
   that *you* create, not one the reviewer has to discover it needs. This applies to a read-only
   reviewer too — it is reading files, so editing them mid-run means it may report on text you have
   already changed.
+- **And "you" is not only this session.** The rule above is written as discipline, which quietly
+  assumes the only other process is the one making the promise. It is not: another session of your own
+  — a second terminal reviewing somebody's PR, an editor task, anything holding the same clone — moves
+  the branch under a running review, and no amount of care on this side prevents it. Measured on
+  2026-08-28: two channels were reviewing a branch when a concurrent session checked out `pr-656` and
+  then a third branch. Neither had been told this could happen.
+
+  **So the reviewer prompt names the commit, and the reviewer checks.** Both channels noticed — one via
+  `git reflog` — and finished by reading blobs with `git show <sha>:<path>`, so both reports were
+  sound and their findings verified against the real files afterwards. That is the behaviour to ask
+  for rather than to be lucky about: give the reviewer the full HEAD hash you want reviewed, and say
+  that if the tree no longer holds it, it should read blobs at that hash instead and say so in its
+  report. A reviewer that silently trusts the tree reports on a change that is not there.
+
+  **"No longer holds it" is two questions, not one.** `git rev-parse HEAD` catches a branch that
+  moved; it says nothing about an uncommitted edit, which leaves the hash matching while the files
+  differ — and that is the case the paragraph above this one is about. So the reviewer checks
+  `git status --porcelain` as well, and treats either signal as reason to read blobs. Asking only for
+  the hash is a check that reads as covering both and covers one.
+
+## Ask the reviewer for facts, not for a disposition
+
+The gate above asks for a `now`/`later` column and a `later` budget, and the root
+[AGENTS.md](../AGENTS.md) then asks the author to re-grade every one. **Measured once: three issues
+filed off that column and all three closed again within the session** — one because no consumer
+reached the defect, one for the same reason a day's work later, and one whose fix was six lines in a
+file the running lens was already reading. Nothing was missing from the reviews. The re-grade simply
+did not happen, which is what happens to a step that produces no artifact.
+
+**The gate above stays as it is.** What follows is a shape to try alongside it, not a replacement —
+the `now`/`later` column and the `later` budget have nine measured issues behind them and this has
+three, so removing them on this evidence would be the mistake it is trying to describe. Try it in a
+prompt, keep the column, and see which one the author actually uses.
+
+The shape is to add three facts and let the disposition fall out of them:
+
+| field | what it must contain |
+|---|---|
+| **reaching path** | a concrete consumer or call sequence that hits it, **or the words "none found"** |
+| **fix size** | lines, for the smallest honest fix — not the ideal one |
+| **lens** | the one already running, or which other one it needs |
+
+The disposition is then close to arithmetic and the author has nothing to defer to. **"None found" is
+not a `later`; it is a comment beside the code**, which is where the invariant belonged in two of the
+three cases above — `g_queues` carries exactly such an argument for why address reuse is harmless
+there, and the code the issues were about carried none.
+
+**Write the three fields and the disposition into `.work/reviews/<branch>.md` per finding.** That is
+the artifact the re-grade never had: a skipped one shows up as an empty column instead of as nothing
+at all. A check could assert the fields are non-empty, but it would be a spelling assertion — a floor,
+not a fence.
+
+**This is one session's evidence, from one author in one area.** It is written here rather than in the
+gate because the gate's current shape is what produced the measurement, and replacing a rule that has
+its own measurement behind it needs more than three data points.
 
 ## The cleared list ages with the diff
 
@@ -179,8 +237,17 @@ What made the 4m30s pair cheap was structural, not stylistic. Each prompt carrie
 4. **The commands not to run**, by name.
 5. **A findings cap and a time budget.**
 6. **A required "checked and cleared" list**, so coverage is visible when nothing is found.
-7. **A now/later column on every finding — and for every `later`, the reason plus a one-line issue
-   title and body.** Without the column the split falls to whoever holds the diff, who is the person
+7. **A now/later column on every finding, a `later` budget of two per channel — and for every
+   `later`, the reason plus a one-line issue title and body.**
+
+   The budget is the part that was missing, and its absence is measured: capping findings while
+   leaving deferrals free produced nine issues from three PRs in a day. Ask the reviewer to justify
+   each `later` against the ten-line rule, and **re-grade every one of them yourself** — the column is
+   the reviewer's opinion about work it is not doing.
+
+   Every issue that does get filed names its parent on a line of its own (`Parent: #607`), which is
+   what lets the work it came from enumerate what it still owes.
+ Without the column the split falls to whoever holds the diff, who is the person
    least able to see what deferring costs, and the answer defaults to "later" because that is what
    keeps the diff small. Without the issue text, "later" costs a sentence while filing costs a task,
    and the cheaper one wins — which is how six deferrals came to live in a single conversation. The

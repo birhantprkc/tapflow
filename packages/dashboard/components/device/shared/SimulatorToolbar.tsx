@@ -1,11 +1,16 @@
 'use client';
 
-import { Camera, Link2, Loader2, Radio, RadioOff, RotateCw, Square, Video } from 'lucide-react';
+import { Camera, Link2, Loader2, Radio, RadioOff, RefreshCw, RotateCw, Square, Video } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import {
+  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
+  AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { cn } from '@/lib/utils';
-import { useId } from 'react';
-import type { ReactNode } from 'react';
+import { useId, useState } from 'react';
+import type { MutableRefObject, ReactNode } from 'react';
+import type { NetworkUnavailableReason } from '@tapflowio/protocol';
 import { Kbd, KbdGroup } from '@/components/ui/kbd';
 
 /**
@@ -17,7 +22,7 @@ import { Kbd, KbdGroup } from '@/components/ui/kbd';
  * cannot explain itself, and until the network control needed a name to be found by, none of these
  * buttons had one: a screen reader read the whole toolbar as four unlabelled buttons.
  *
- * `platformSlot` and `launchSlot` arrive as `ReactNode` from the viewers, so their buttons are
+ * `navigationSlot`, `deviceSlot` and `launchSlot` arrive as `ReactNode` from the viewers, so their buttons are
  * labelled where they are built rather than here.
  */
 function ShortcutTooltip({ label, keys }: { label: string; keys: string[] }) {
@@ -38,12 +43,32 @@ interface SimulatorToolbarProps {
   recordState: 'idle' | 'recording' | 'uploading' | 'done';
   onRotate: () => void;
   onDeepLink: () => void;
-  /** Platform-specific buttons rendered at the top (e.g. nav buttons, home, keyboard) */
-  platformSlot?: ReactNode;
-  /** Optional launch button rendered before platform buttons */
+  /**
+   * Platform buttons that move around the app or the OS — home, back, recent apps. Rendered in the
+   * **Navigation** group. See `packages/dashboard/AGENTS.md` → "Where a new device button goes".
+   */
+  navigationSlot?: ReactNode;
+  /**
+   * Platform buttons that leave the device in a condition — the software keyboard, volume, sleep.
+   * Rendered in the **Device** group, before rotate.
+   */
+  deviceSlot?: ReactNode;
+  /** Optional launch button, first in the Navigation group. */
   launchSlot?: ReactNode;
   /** Network control (#607). Absent when the agent does not advertise `network-control`. */
   network?: NetworkControl;
+  /**
+   * Restart the device (#628). Rendered **last in the Device group** — it acts on the device like the
+   * power button, and a group runs frequent → rare.
+   *
+   * `onReboot` is called only after the tester confirms; the dialog is here rather than at the caller
+   * so every platform gets the same wording for the same irreversible thing.
+   *
+   * `buttonRef` is how focus finds its way back. The restart is the only control here that unmounts
+   * the toolbar it was pressed from, so a keyboard user is left on `document.body` while the device
+   * comes back; `DeviceViewer` puts them on this button again once it returns.
+   */
+  reboot?: { pending: boolean; onReboot: () => void; buttonRef?: MutableRefObject<HTMLButtonElement | null> };
 }
 
 export interface NetworkControl {
@@ -51,18 +76,18 @@ export interface NetworkControl {
   /** Whether tapflow can still change it. Separate from where it is, because the protocol makes them
    *  separate — a device it can no longer steer still has a network state, and still shows it. */
   steerable: boolean;
-  /** The injection is in place and no app has run under it yet — `awaiting-app` on the wire.
+  /** Why it cannot be steered, straight off the wire. `undefined` whenever `steerable` is true.
    *
-   *  **Not a kind of `steerable: false`, even though it arrives inside one.** Traffic control works
-   *  in this state: a device taken offline here really does stop reaching the network. What does not
-   *  work is telling the app, and drawing that as a dead control said the opposite of what a click
-   *  would do. It is the state every iOS session is in until its app starts, so it is the first thing
-   *  a tester sees.
+   *  **This carried one boolean — `awaitingApp` — and the reason it did was about the wire, not about
+   *  this component.** Every Android read failure used to arrive as `unsupported-device`, so naming a
+   *  reason meant telling a tester "this will never work" about a rebooting device, and the one
+   *  member that conflated nothing was the only one worth reading. The set has been split (#618), so
+   *  each member now carries a remedy that differs, and a sentence per remedy is the whole point of a
+   *  closed set.
    *
-   *  **Required, not optional.** Its siblings are, and leaving this one out defaulted a consumer to
-   *  the failure rendering for the state every iOS session opens in — the one case where getting it
-   *  wrong is guaranteed rather than unlikely. Both call sites already passed it. */
-  awaitingApp: boolean;
+   *  A member this build has never heard of still has to render: agents update on their own schedule,
+   *  so the switch below carries a `default` rather than trusting the union. */
+  reason?: NetworkUnavailableReason;
   pending: boolean;
   onToggle: () => void;
 }
@@ -87,12 +112,17 @@ const MUTED = 'text-muted-foreground hover:text-muted-foreground';
 /**
  * A control tapflow cannot currently steer, pinned the same way.
  *
- * **It says the control is unusable now, not that the device is broken forever** — and the
- * distinction is forced rather than chosen. Every Android read failure arrives as
- * `unsupported-device` (#618), a rebooting device included, so the dashboard has no member of that
- * set it can safely translate into permanence. The hook declines to name a reason for the same
- * reason; this colour is the same restraint in a different medium, and the prose beside it says only
- * "tapflow can no longer change it".
+ * **It says the control is unusable now, and the sentence beside it says what to do.** The colour
+ * used to carry the whole claim and had to hedge: every Android read failure arrived as
+ * `unsupported-device` (#618), a rebooting device included, so there was no member the dashboard
+ * could translate into anything specific. The set has been split, so the *remedy* now lives in the
+ * reason — restart the device, launch an app, try again, go and ask whoever runs the Mac — and one
+ * colour serving all of them is a deliberate choice rather than the only honest option. It stays one
+ * colour because `networkLook` has two ternaries and a second failure colour would have to be
+ * invented for a distinction the sentence already makes.
+ *
+ * **Permanence is deliberately not what any of this encodes.** Only `filter-unavailable` is a state
+ * no click can leave, and that one is about the Mac rather than the device.
  *
  * It deliberately excludes `awaitingApp`, which resolves itself the moment an app starts: colouring
  * the ordinary opening seconds of every iOS session as an error is how a colour stops meaning
@@ -115,6 +145,48 @@ const MUTED = 'text-muted-foreground hover:text-muted-foreground';
 const FAILED = 'text-destructive hover:text-destructive';
 
 /**
+ * What the tester does next, one sentence per reason.
+ *
+ * **Every branch names an action they can take**, which is what the reason set exists for — a member
+ * per thing a consumer must do differently. Where there is nothing they can do, it says so plainly
+ * rather than implying a retry.
+ *
+ * `filter-unavailable` names the guide instead of linking to it. A link needs a surface, and the two
+ * this control has are a tooltip that never opens on touch and an `sr-only` string; putting an anchor
+ * in either is worse than a sentence that can be searched for. The destination exists —
+ * `docs/guide/network-control.md`, and the setup steps it points at.
+ */
+function reasonCaveat(reason: NetworkUnavailableReason | undefined): string {
+  switch (reason) {
+    case 'awaiting-app':
+      return ' Launch an app through tapflow so it is told too.';
+    case 'not-armed':
+      return ' Restart the device so tapflow can set it up.';
+    case 'state-unconfirmed':
+      return ' tapflow could not confirm the change — try again.';
+    case 'unsupported-device':
+      // Says what happened, not how long it lasts. The device answered and had not moved, and nothing
+      // measured says whether that is a policy that will not budge or a rule that had not landed yet —
+      // so this offers the retry and names the fallback instead of declaring the device incapable.
+      return ' The device did not change when tapflow asked — try again, or use another device.';
+    case 'filter-unavailable':
+      return ' This Mac is not set up to take devices off the network — see the network control guide.';
+    case 'enforcement-lost':
+      // **Short, because the toast carries this one.** `onError` renders `role="alert"`, which
+      // interrupts the polite `role="status"` region beside it in the same commit — so saying the
+      // whole thing twice drops the position half for anyone who hears the alert first, and repeats
+      // the sentence for anyone who hears both.
+      return ' It went back on the network on its own.';
+    case 'hooks-not-installed':
+      return ' tapflow cannot tell this app it is off the network.';
+    default:
+      // An agent newer than this build. Says the one thing that is true of every member without
+      // guessing which: it cannot be changed from here right now.
+      return ' tapflow cannot change it right now.';
+  }
+}
+
+/**
  * Four positions, and **none of them disables the button**.
  *
  * #447 settled that a control nothing acts on should be absent rather than disabled, because a
@@ -129,7 +201,22 @@ const FAILED = 'text-destructive hover:text-destructive';
  * each other because saying "could not read" about a device that is merely slow is a claim made
  * before anything was asked.
  */
-function networkLook({ position, steerable, awaitingApp }: Pick<NetworkControl, 'position' | 'steerable' | 'awaitingApp'>) {
+function networkLook({ position, steerable, reason }: Pick<NetworkControl, 'position' | 'steerable' | 'reason'>) {
+  // Derived rather than passed, so the colour rules below read exactly as they did when this was a
+  // prop. Nothing about which states are drawn as failures has changed here.
+  const awaitingApp = reason === 'awaiting-app';
+  // **Uncertainty is said with the pulse, not with the position.** `state-unconfirmed` means the
+  // round trip failed, so where the device is, is the last thing anyone confirmed. Rendering that as
+  // a position of `unknown` was tried and reverted: from `unknown` every click asks for offline
+  // again, so a device taken offline could not be brought back through the UI. The pulse already
+  // means "we are not sure yet" at `waiting`, and it leaves both the position and the colour alone.
+  //
+  // **Gated on `steerable` like the sentence below, and not on the reason alone.** This file takes the
+  // two as independent props and says so, and a pulse derived from `reason` by itself renders
+  // `{ steerable: true, reason: 'state-unconfirmed' }` as a permanently pulsing button whose status
+  // text says only "Device is on the network" — uncertainty in CSS and in no channel a screen reader
+  // can reach.
+  const unsure = !steerable && reason === 'state-unconfirmed' ? ' animate-pulse' : '';
   // Said after the position, never instead of it. A device tapflow cannot steer is still somewhere,
   // and an earlier draft that replaced the position with "could not be read" made the control a
   // one-way ratchet — from that rendering every click asked for offline again, so a device taken
@@ -137,9 +224,12 @@ function networkLook({ position, steerable, awaitingApp }: Pick<NetworkControl, 
   // Three sentences where there was one, because the remedies differ. "tapflow can no longer change
   // it" was said for all of them, and for the waiting-for-an-app state it was wrong twice over:
   // nothing had been armed, so there was no "no longer", and clicking does change the device.
-  const caveat = steerable ? ''
-    : awaitingApp ? ' Launch an app through tapflow so it is told too.'
-      : ' tapflow can no longer change it.';
+  //
+  // **A sentence per remedy, and no implementation words in any of them.** A tester reading these is
+  // not going to install a system extension or a hook; what they can do is launch an app, restart a
+  // device, try again, or go and ask whoever runs the Mac. Naming the machinery would describe our
+  // problem in place of their next step.
+  const caveat = steerable ? '' : reasonCaveat(reason);
   switch (position) {
     case 'offline':
       // The only position with colour. It is a state a tester deliberately put the device into and
@@ -149,13 +239,13 @@ function networkLook({ position, steerable, awaitingApp }: Pick<NetworkControl, 
         // Still amber while waiting for an app: the device really is offline, which is the thing this
         // colour is for. An unsteerable control overrides it, and `RadioOff` is then the only thing
         // left saying offline — see `FAILED`.
-        className: steerable || awaitingApp ? 'text-amber-500 hover:text-amber-500' : FAILED,
+        className: (steerable || awaitingApp ? 'text-amber-500 hover:text-amber-500' : FAILED) + unsure,
         status: `Device is offline.${caveat}`,
       };
     case 'online':
       return {
         Icon: Radio,
-        className: steerable || awaitingApp ? '' : FAILED,
+        className: (steerable || awaitingApp ? '' : FAILED) + unsure,
         status: `Device is on the network.${caveat}`,
       };
     case 'waiting':
@@ -179,26 +269,51 @@ function networkLook({ position, steerable, awaitingApp }: Pick<NetworkControl, 
  * this is what says it to everyone else, and unlike the description beside it a name cannot be
  * turned off by a verbosity setting.
  */
-function networkAction({ position, steerable, awaitingApp }: Pick<NetworkControl, 'position' | 'steerable' | 'awaitingApp'>) {
+function networkAction({ position, steerable, reason }: Pick<NetworkControl, 'position' | 'steerable' | 'reason'>) {
   const action = position === 'offline' ? 'Bring device online'
     : position === 'online' ? 'Take device offline'
       : 'Toggle device network';
   // **The caveat goes in the name, not only in the description.** A device tapflow has just said it
   // cannot steer still gets a name that promises the action, and the correction lived in the
   // `aria-describedby` sentence — the very channel the paragraph above calls unreliable, since a
-  // verbosity setting can drop it. "Retry" is honest in both directions: the last attempt did not
-  // land, and clicking will try again, which is not futile while #618 leaves a transient failure
-  // indistinguishable from a permanent one.
+  // verbosity setting can drop it. "Retry" is honest where it is offered: the last attempt did not
+  // land, and clicking will try again.
   // **Only where there is an attempt to retry.** `steerable` is about a report that came back, and a
   // position-less state has had none — so prefixing there would assert a failed attempt that no
   // channel explains, which is the claim-from-silence the rest of this file is built to avoid. The
   // combination is unreachable through `useNetworkControl`, where any report settles the position;
   // this component takes the two as independent props and has to be right on its own terms.
-  // `awaitingApp` keeps the plain name too. "Retry" claims a previous attempt that did not land, and
+  // `awaiting-app` keeps the plain name too. "Retry" claims a previous attempt that did not land, and
   // waiting for an app is not a failed attempt — it is a click that will work, on a device nobody has
   // opened an app on yet.
+  //
+  // **And the prefix is now scoped to the reasons a retry can land on.** Its justification said so
+  // explicitly — "not futile *while #618 leaves a transient failure indistinguishable from a
+  // permanent one*" — and #618 split enough of them to make the scoping possible. Offering "Retry" on
+  // a Mac that is not set up for this, on a device waiting for a reboot, or on hooks that proved they
+  // did not take, recommends a click that cannot work.
+  //
+  // **`unsupported-device` keeps it, and that is a correction.** Dropping it there assumed the new,
+  // narrow meaning — the device was read and had not moved — is permanent, and nothing measured says
+  // so: a policy restriction is permanent, a rule that had not propagated yet is not, and the signal
+  // cannot tell them apart. Worse, an agent older than this build still sends that literal for every
+  // transient failure, and there is no version on the wire to tell the two apart — so removing the
+  // affordance reproduced exactly the #618 regression for anyone running a new relay against an agent
+  // they installed earlier.
+  //
+  // **And what is left over needs a marker of its own.** Narrowing the prefix left four reasons with a
+  // plain actionable name on a button drawn in the failure colour: colour became the only channel that
+  // said it would not work, and colour is exactly the channel a screen-reader user does not have. The
+  // description says it, and the paragraph above is about why that channel cannot be relied on alone.
   const settled = position === 'online' || position === 'offline';
-  return steerable || awaitingApp || !settled ? action : `Retry: ${action.toLowerCase()}`;
+  const retryable = reason === 'state-unconfirmed' || reason === 'unsupported-device';
+  //
+  // **`awaiting-app` is excluded from both**, and that is the same exception it has always had here.
+  // Traffic control works in that state — a device taken offline really does stop reaching the
+  // network — so neither "Retry" nor "unavailable" is true of it. What is missing is only that the app
+  // is told, which the sentence says.
+  if (steerable || !settled || reason === 'awaiting-app') return action;
+  return retryable ? `Retry: ${action.toLowerCase()}` : `${action} — unavailable`;
 }
 
 export function SimulatorToolbar({
@@ -208,25 +323,65 @@ export function SimulatorToolbar({
   recordState,
   onRotate,
   onDeepLink,
-  platformSlot,
+  navigationSlot,
+  deviceSlot,
   launchSlot,
   network,
+  reboot,
 }: SimulatorToolbarProps) {
   // Per instance, not a literal: this component takes all its state through props and is rendered per
   // device viewer, so two toolbars on screen would point both buttons' `aria-describedby` at the first
   // span — one device's control described by another device's network state. The unit tests render one
   // toolbar at a time and cannot see that.
   const descId = useId();
+  const rebootStatusId = useId();
+  const recordStatusId = useId();
+  // Controlled rather than an `AlertDialogTrigger`, because the button it would wrap is already
+  // wrapped by a `TooltipTrigger asChild` — two libraries cloning the same child and both wanting to
+  // own its ref and its handlers. `BuildRow` drives its dialog the same way.
+  const [confirmingReboot, setConfirmingReboot] = useState(false);
   if (!joined) return null;
 
   return (
     <TooltipProvider delayDuration={400}>
+      {/*
+        * **Four groups, by what the tester is doing to the device (#634).**
+        *
+        *   Navigation → Device → Capture → Environment
+        *
+        * and inside each, the ones reached for most come first. The rule and its worked examples live
+        * in `packages/dashboard/AGENTS.md` → "Where a new device button goes"; it is written down
+        * there rather than here because the question it answers — *where does this new button go* —
+        * gets asked by someone who has not opened this file yet.
+        *
+        * The order is the same on both platforms, which is the point: a tester moving between iOS and
+        * Android finds rotate at the end of Device and the network control alone in Environment on
+        * both. That used to be a coincidence — Android's buttons were rendered in whatever order the
+        * agent's capability list happened to be in.
+        *
+        */}
       <div className="flex flex-col items-center gap-0.5 rounded-2xl border bg-background/90 backdrop-blur-sm px-1.5 py-2.5 shrink-0 mt-3">
-        {launchSlot}
-        {platformSlot}
+        {/*
+          * **`role="group"` and not only a line, because the grouping is the feature.**
+          *
+          * The dividers are `<div>`s with a background colour: to a screen reader or voice control
+          * they are nothing, so without these the four groups this change exists to create are one
+          * flat run of icon buttons. Not `role="toolbar"` on the container — that promises the APG
+          * roving-tabindex arrow-key model, which is not implemented here.
+          *
+          * **A real box, not `display: contents`.** An element that generates no box has been dropped
+          * from the accessibility tree along with its role and name — still reproducible in
+          * WebKit/VoiceOver for explicitly-roled generics — so `contents` would have left the grouping
+          * exactly as absent as the bare dividers it replaces. The test below cannot catch that:
+          * jsdom evaluates no CSS, so `getAllByRole('group')` passes either way.
+          */}
+        <div role="group" aria-label="Navigation" className="flex flex-col items-center gap-0.5">
+          {launchSlot}
+          {navigationSlot}
 
         <Tooltip>
           <TooltipTrigger asChild>
+            {/* A deeplink is "go to this screen", which is why it is here and not with the tools. */}
             <Button variant="ghost" size="icon" className="h-8 w-8" aria-label="Open a deeplink" onClick={onDeepLink}>
               <Link2 className="h-4 w-4" />
             </Button>
@@ -234,7 +389,76 @@ export function SimulatorToolbar({
           <TooltipContent side="left"><ShortcutTooltip label="Deeplink" keys={['⌘', 'K']} /></TooltipContent>
         </Tooltip>
 
-        <div className="w-4 h-px bg-border my-1" />
+        </div>
+
+        {/* ── Device: leave the device in a condition ────────────────────────────── */}
+        <div role="separator" aria-orientation="horizontal" className="w-4 h-px bg-border my-1" />
+
+        <div role="group" aria-label="Device" className="flex flex-col items-center gap-0.5">
+          {deviceSlot}
+
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button variant="ghost" size="icon" className="h-8 w-8" aria-label="Rotate the device" onClick={onRotate}>
+              <RotateCw className="h-4 w-4" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent side="left"><ShortcutTooltip label="Rotate" keys={['⌘', '⇧', 'O']} /></TooltipContent>
+        </Tooltip>
+
+        {reboot && (() => {
+          // **One string, two channels, so they cannot drift apart.** The tooltip is the visible
+          // label and the `aria-label` is the accessible name, and WCAG 2.5.3 wants the first
+          // contained in the second — "Restart device" against "Restart the device" is not, so
+          // voice control saying the visible words could miss the button. Written as two literals
+          // they had already disagreed outright while pending: the name changed and the tooltip did
+          // not. The other controls in this file hold the same rule by branching both together;
+          // this one holds it by having nothing to branch.
+          const rebootLabel = reboot.pending ? 'Restarting the device' : 'Restart the device';
+          return (
+          <>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  ref={reboot.buttonRef}
+                  variant="ghost"
+                  size="icon"
+                  className="h-8 w-8"
+                  aria-label={rebootLabel}
+                  aria-busy={reboot.pending}
+                  // `aria-disabled`, not `disabled`: a disabled button is removed from the tab order and
+                  // stops being describable, so the one moment it has something to say is the moment it
+                  // cannot say it. #447 is where that was measured; the click guard is below.
+                  aria-disabled={reboot.pending}
+                  aria-describedby={rebootStatusId}
+                  onClick={() => { if (!reboot.pending) setConfirmingReboot(true); }}
+                >
+                  {/* **Not `Power`, which Android's own power key already uses.** They sit two apart in
+                      this same group and the glyph was byte-identical — one blanks the screen, the
+                      other throws away everything on the device.
+                      `RefreshCw` is next to `RotateCw` and that is accepted rather than missed: the
+                      silhouettes differ where it counts, a closed loop with two heads against an open
+                      arc with one, and it is the glyph people already read as "start this again".
+                      `RotateCcwSquare` was tried first and is worse — it *depicts* a rotation, so next
+                      to the rotate button it moves the confusion instead of ending it. */}
+                  {reboot.pending ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="left">{rebootLabel}</TooltipContent>
+            </Tooltip>
+            <span id={rebootStatusId} role="status" className="sr-only">
+              {reboot.pending ? 'Restarting the device.' : ''}
+            </span>
+          </>
+          );
+        })()}
+
+        </div>
+
+        {/* ── Capture: take the current state out of the session ───────────────── */}
+        <div role="separator" aria-orientation="horizontal" className="w-4 h-px bg-border my-1" />
+
+        <div role="group" aria-label="Capture" className="flex flex-col items-center gap-0.5">
 
         <Tooltip>
           <TooltipTrigger asChild>
@@ -249,7 +473,7 @@ export function SimulatorToolbar({
           <TooltipTrigger asChild>
             <Button
               variant="ghost" size="icon"
-              className={cn('h-8 w-8', recordState === 'recording' && 'text-red-500 hover:text-red-500')}
+              className={cn('h-8 w-8 aria-disabled:opacity-50', recordState === 'recording' && 'text-red-500 hover:text-red-500')}
               // The name carries the state, so `aria-pressed` would say it twice — "Stop recording,
               // pressed" states the same fact in two grammars and reads as a contradiction. Pick one:
               // this button flips its name, so it is a plain action button.
@@ -264,8 +488,16 @@ export function SimulatorToolbar({
                     : recordState === 'done' ? 'Recording saved'
                       : 'Start recording'
               }
-              disabled={recordState === 'uploading' || recordState === 'done'}
-              onClick={onRecordToggle}
+              aria-busy={recordState === 'uploading'}
+              // `aria-disabled`, not `disabled`: activating "Stop recording" turned the focused
+              // button non-focusable, so focus fell to `<body>` and the name change was announced
+              // to nobody. Same shape as the restart and network controls; the guard is below.
+              aria-disabled={recordState === 'uploading' || recordState === 'done'}
+              // Both on purpose: the live region fires once, when the state changes; the description
+              // is what a user who tabs to the button afterwards gets. Some screen readers read both
+              // while the button is focused, which is the cheaper failure.
+              aria-describedby={recordStatusId}
+              onClick={() => { if (recordState === 'idle' || recordState === 'recording') onRecordToggle(); }}
             >
               {recordState === 'uploading'
                 ? <Loader2 className="h-4 w-4 animate-spin" />
@@ -283,20 +515,30 @@ export function SimulatorToolbar({
               // the two channels disagreeing for `done` — "Recording saved" read out, "Processing…"
               // on screen — which is stale for a sighted user and a Label-in-Name mismatch the moment
               // this trigger becomes hoverable (#624).
-              : recordState === 'done' ? 'Recording saved' : 'Processing…'}
+              : recordState === 'done' ? 'Recording saved' : 'Processing the recording'}
           </TooltipContent>
         </Tooltip>
+        {/* `uploading` and `done` arrive asynchronously, and a name change on a focused button is not
+            re-announced — so without this a screen-reader user hears the recording start and never
+            hears that it was saved. Mounted unconditionally with only the text toggled, as the
+            network control's region is. */}
+        <span id={recordStatusId} role="status" className="sr-only">
+          {recordState === 'recording' ? 'Recording.'
+            : recordState === 'uploading' ? 'Processing the recording.'
+              : recordState === 'done' ? 'Recording saved.' : ''}
+        </span>
 
-        <div className="w-4 h-px bg-border my-1" />
+        </div>
 
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Button variant="ghost" size="icon" className="h-8 w-8" aria-label="Rotate the device" onClick={onRotate}>
-              <RotateCw className="h-4 w-4" />
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent side="left"><ShortcutTooltip label="Rotate" keys={['⌘', '⇧', 'O']} /></TooltipContent>
-        </Tooltip>
+        {/* ── Environment: change what the device is sitting in ─────────────────── */}
+        {/* Rendered with its contents or not at all: an agent that does not advertise
+            `network-control` would otherwise leave a named, empty group behind a separator, so AT
+            announces a boundary and a section that holds nothing. */}
+        {network && (
+        <>
+        <div role="separator" aria-orientation="horizontal" className="w-4 h-px bg-border my-1" />
+
+        <div role="group" aria-label="Environment" className="flex flex-col items-center gap-0.5">
 
         {network && (() => {
           const { Icon, className, status } = networkLook(network);
@@ -362,7 +604,42 @@ export function SimulatorToolbar({
             </Tooltip>
           );
         })()}
+        </div>
+        </>
+        )}
       </div>
+
+      {/* **Outside the toolbar's column**: Radix portals the open dialog, and an `AlertDialog` that
+          is closed renders nothing — but leaving the element inside a `role="group"` would still put
+          it in that group's accessibility subtree while it is open. */}
+      {reboot && (
+        <AlertDialog open={confirmingReboot} onOpenChange={setConfirmingReboot}>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Restart this device?</AlertDialogTitle>
+              {/* Says what is lost rather than that something is. A tester who has spent ten minutes
+                  reaching a screen is deciding whether to spend them again, and "this cannot be
+                  undone" does not tell them that. Apps and their data survive — this is a restart,
+                  not the wipe the selector screen offers. */}
+              <AlertDialogDescription>
+                Anything open on the device closes, and whatever you had set up on screen is gone.
+                Installed apps and their data stay. The device takes a moment to come back.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Cancel</AlertDialogCancel>
+              <AlertDialogAction
+                onClick={() => {
+                  setConfirmingReboot(false);
+                  reboot.onReboot();
+                }}
+              >
+                Restart
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+      )}
     </TooltipProvider>
   );
 }

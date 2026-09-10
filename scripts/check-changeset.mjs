@@ -20,6 +20,7 @@ import {
   prodReachableNames,
   prodVersionChanges,
 } from './prod-reach.mjs'
+import { proseLines } from './lib/prose-lines.mjs'
 
 // Inverted on purpose: everything under `packages/` ships unless named here. Listing what
 // ships instead left a NEW published package invisible to the gate — the case that most needs
@@ -272,43 +273,6 @@ function shipsBetween(file, before, after) {
  *
  * Exported for the tests.
  */
-/**
- * The lines of a markdown body that are actually prose: no fenced block, no indented block, and
- * — with `skipFrontmatter` — nothing inside the leading `---` delimiters.
- *
- * Shared on purpose. Both markers below are switches that turn a gate OFF, so a body that merely
- * QUOTES one must not trip it; every doc in this repo prints both verbatim. `extractReason` had
- * this guard and `parseBackfills` was written without it, which is exactly the kind of drift a
- * second copy invites.
- */
-function* proseLines(body, { skipFrontmatter = false } = {}) {
-  const lines = body.split(/\r?\n/)
-  let i = 0
-  if (skipFrontmatter && lines[0]?.trim() === '---') {
-    i = 1
-    while (i < lines.length && lines[i].trim() !== '---') i++
-    i++                                            // step past the closing delimiter
-  }
-  let fence = null
-  for (; i < lines.length; i++) {
-    const raw = lines[i]
-    const line = raw.trim()
-    const marker = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(raw)
-    if (fence) {
-      if (marker && marker[1][0] === fence.char && marker[1].length >= fence.length && !marker[2].trim()) {
-        fence = null
-      }
-      continue
-    }
-    if (marker && (marker[1][0] === '~' || !marker[2].includes('`'))) {
-      fence = { char: marker[1][0], length: marker[1].length }
-      continue
-    }
-    if (/^ {4,}|^\t/.test(raw)) continue           // indented code block
-    yield { raw, line }
-  }
-}
-
 export function extractReason(body) {
   for (const { line } of proseLines(body)) {
     const m = line.match(/^<!--\s*no-changeset:\s*(.*?)\s*-->$/)
@@ -403,8 +367,8 @@ export function ignoredOnlyChangesets(files, ignored, read) {
  */
 export function changelogEntryOwed(files, read) {
   return files.filter((f) => {
-    for (const { raw } of proseLines(read(f), { skipFrontmatter: true })) {
-      if (/^<!--\s*changelog:\s*internal\b.*-->$/.test(raw)) return false
+    for (const { line } of proseLines(read(f), { skipFrontmatter: true })) {
+      if (/^<!--\s*changelog:\s*internal\b.*-->$/.test(line)) return false
     }
     return true
   })

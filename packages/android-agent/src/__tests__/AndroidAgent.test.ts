@@ -411,7 +411,7 @@ describe('AndroidAgent', () => {
       await waitForType(browser, 'device:ready')
       const state = await waitForType<NetworkState>(browser, 'network:state')
 
-      expect(state.payload).toEqual({ offline: true, available: false, reason: 'unsupported-device' })
+      expect(state.payload).toEqual({ offline: true, available: false, reason: 'state-unconfirmed' })
     })
 
     // The boot reset **writes to the device**, so it has to answer to `bootSeq` like every other
@@ -473,7 +473,12 @@ describe('AndroidAgent', () => {
 
     // A device that cannot do this is **answering**, not failing: `network:state` with a reason the
     // viewer can render, never `network:error`. The two are told apart by the test below.
-    it('reports an image that does not support the command as unavailable', async () => {
+    //
+    // The reason is `state-unconfirmed` and not `unsupported-device`, even though the error here is
+    // literally an image without the command: a write that threw is also what a rebooting device and
+    // a dropped adb connection produce, and nothing in the failure tells them apart (#618). Calling
+    // it permanent would tell a tester to give up on a device that is coming back in twenty seconds.
+    it('reports a write that threw as unconfirmed rather than as a dead image', async () => {
       const a = withAirplane(false, () => { throw new Error('cmd: not found') })
       await session(a)
       set(true)
@@ -482,7 +487,7 @@ describe('AndroidAgent', () => {
       // `toEqual`, not `toMatchObject`: `offline` is the field that carries the truth here, and
       // leaving it unasserted is what let a mutation report the requested value instead of the
       // device's. `reason` too — each value makes a different sentence on screen.
-      expect(state.payload).toEqual({ offline: false, available: false, reason: 'unsupported-device' })
+      expect(state.payload).toEqual({ offline: false, available: false, reason: 'state-unconfirmed' })
       expect(state.requestId).toBe('rq-net')
     })
 
@@ -539,11 +544,17 @@ describe('AndroidAgent', () => {
 
       set(true)
       const state = await waitForType<NetworkState>(browser, 'network:state')
-      expect(state.payload).toEqual({ offline: true, available: false, reason: 'unsupported-device' })
+      expect(state.payload).toEqual({ offline: true, available: false, reason: 'state-unconfirmed' })
     })
 
-    // The mirror: a command accepted that changed nothing. The wrapper saw the device stay put, so
-    // that is what goes out — this is the false "offline" the read-back exists to prevent.
+    // The mirror, and **the pair is the discriminator** (#618). Both results are `confirmed: false`
+    // and the shapes are identical, so what separates them is where `offline` sits: the test above
+    // returns the value that was *requested*, which is what `setAirplaneMode` reports when the
+    // read-back itself failed — nothing was observed, so `state-unconfirmed`. This one returns a
+    // value that disagrees with the request, which means the read-back *succeeded* and the device had
+    // not moved. Only that is an image which does not really support the command.
+    //
+    // Changing either `offline` here breaks the classification, not just the assertion.
     it('reports the device as online when the command was accepted and did nothing', async () => {
       adb = mockAdb(true)
       vi.spyOn(adb, 'airplaneMode').mockResolvedValue(false)
@@ -556,7 +567,8 @@ describe('AndroidAgent', () => {
     })
 
     // A write that never reached the device leaves the before-state true, and that is the one case
-    // where reporting it is right.
+    // where reporting it is right. The reason is `state-unconfirmed` for the same reason as above:
+    // a throw from the write says nothing about whether the device could ever do this.
     it('keeps the pre-request state when the write itself failed', async () => {
       adb = mockAdb(true)
       vi.spyOn(adb, 'airplaneMode').mockResolvedValue(true)     // device was already offline
@@ -565,7 +577,7 @@ describe('AndroidAgent', () => {
 
       set(false)
       const state = await waitForType<NetworkState>(browser, 'network:state')
-      expect(state.payload).toEqual({ offline: true, available: false, reason: 'unsupported-device' })
+      expect(state.payload).toEqual({ offline: true, available: false, reason: 'state-unconfirmed' })
     })
 
     // ── #614: the relay asks on a viewer's re-join ──────────────────────────────────────────
@@ -650,7 +662,7 @@ describe('AndroidAgent', () => {
       requestState()
       const state = await waitForType<NetworkState>(browser, 'network:state')
 
-      expect(state.payload).toEqual({ offline: true, available: false, reason: 'unsupported-device' })
+      expect(state.payload).toEqual({ offline: true, available: false, reason: 'state-unconfirmed' })
     })
 
     it('does not let an unconfirmed write overwrite what it confirmed earlier', async () => {
@@ -668,6 +680,11 @@ describe('AndroidAgent', () => {
 
       set(true)
       await waitForType(browser, 'network:state')      // confirmed offline — this is what it knows
+      // The fake device follows its own write. `confirmed: true` *means* the read-back agreed, so a
+      // read that goes on answering `false` afterwards is a device that cannot exist — and the write
+      // path now remembers a successful pre-write read as well, which that contradiction would send
+      // backwards for a reason having nothing to do with what this test holds.
+      vi.mocked(adb.airplaneMode).mockResolvedValue(true)
 
       vi.mocked(adb.setAirplaneMode).mockResolvedValue({ confirmed: false, offline: false })
       set(false, 'rq-unconfirmed')
@@ -677,7 +694,7 @@ describe('AndroidAgent', () => {
       requestState()
       const state = await waitForType<NetworkState>(browser, 'network:state')
 
-      expect(state.payload).toEqual({ offline: true, available: false, reason: 'unsupported-device' })
+      expect(state.payload).toEqual({ offline: true, available: false, reason: 'state-unconfirmed' })
     })
 
     it('says nothing when it has never seen the device and cannot read it now', async () => {
@@ -750,6 +767,104 @@ describe('AndroidAgent', () => {
       expect(state.requestId).toBe('rq-after')
       expect(a.setAirplaneMode).toHaveBeenCalledTimes(1)
       expect(a.setAirplaneMode).toHaveBeenCalledWith('emulator-5554', false)
+    })
+
+    // ── the capability path answers the same question, so it must give the same answer ────────
+    //
+    // `setNetworkOffline` and `networkState` are the in-process capability, not what `mcp-server`
+    // or `flow-runner` call — those address a session over the wire (#617). They had
+    // **no test at all**, which is how the doc on `setNetworkOffline` came to record that the two
+    // paths "must not disagree… and this one drifted first". A narrowed `unsupported-device` makes a
+    // repeat worse than the drift it describes: a caller reading it as permanent would be told a
+    // rebooting device can never do this.
+    describe('capability path', () => {
+      it('classifies an accepted write that did nothing the same as the WS path', async () => {
+        adb = mockAdb(true)
+        vi.spyOn(adb, 'airplaneMode').mockResolvedValue(false)
+        vi.spyOn(adb, 'setAirplaneMode').mockResolvedValue({ confirmed: false, offline: false })
+        await session(adb)
+        await booted()
+
+        expect(await agent.setNetworkOffline(true))
+          .toEqual({ offline: false, available: false, reason: 'unsupported-device' })
+      })
+
+      it('classifies a write it could not read back as unconfirmed, not as a dead image', async () => {
+        adb = mockAdb(true)
+        vi.spyOn(adb, 'airplaneMode').mockResolvedValue(false)
+        vi.spyOn(adb, 'setAirplaneMode').mockResolvedValue({ confirmed: false, offline: true })
+        await session(adb)
+        await booted()
+
+        expect(await agent.setNetworkOffline(true))
+          .toEqual({ offline: true, available: false, reason: 'state-unconfirmed' })
+      })
+
+      it('reports a write that threw as unconfirmed, keeping the state it read before', async () => {
+        adb = mockAdb(true)
+        vi.spyOn(adb, 'airplaneMode').mockResolvedValue(true)
+        vi.spyOn(adb, 'setAirplaneMode').mockRejectedValue(new Error('exit 255'))
+        await session(adb)
+        await booted()
+
+        expect(await agent.setNetworkOffline(false))
+          .toEqual({ offline: true, available: false, reason: 'state-unconfirmed' })
+      })
+
+      it('keeps a confirmed offline device offline when both the read and the write fail', async () => {
+        // **Two failures in a row, which is the one case that used to drop the memory.** The pre-write
+        // read falls back to what was last confirmed and the write then throws, so the answer is
+        // whatever the agent last knew — not `false`, which draws an online control over a device
+        // whose app can reach nothing and sends the next bug report to the app under test.
+        const a = withAirplane(false)
+        await session(a)
+        await booted()
+        expect(await agent.setNetworkOffline(true)).toEqual({ offline: true, available: true })
+
+        vi.mocked(a.airplaneMode).mockRejectedValue(new Error('device offline'))
+        vi.mocked(a.setAirplaneMode).mockRejectedValue(new Error('exit 255'))
+
+        expect(await agent.setNetworkOffline(false))
+          .toEqual({ offline: true, available: false, reason: 'state-unconfirmed' })
+        expect(await agent.networkState())
+          .toEqual({ offline: true, available: false, reason: 'state-unconfirmed' })
+      })
+
+      it('refuses to answer for a device it has never observed and cannot read', async () => {
+        // **`false` is not "unknown", it is "on the network".** With nothing ever confirmed and the
+        // read failing, there is no position to report — and answering `offline: false` claims the one
+        // direction that hides the problem. The WS report path stays silent in this state; a function
+        // has to answer, so it answers with the failure.
+        adb = mockAdb(true)
+        vi.spyOn(adb, 'airplaneMode').mockRejectedValue(new Error('device offline'))
+        await session(adb)
+
+        await expect(agent.networkState()).rejects.toThrow(/never been observed/)
+      })
+
+      it('still answers with the last confirmed value when a read fails', async () => {
+        // The other half, and the reason the throw above is narrow: once something *has* been
+        // confirmed, an unreadable device is still that value. Reporting it as online is what sends a
+        // tester to file against an app that cannot reach anything.
+        const a = withAirplane(false)
+        await session(a)
+        await booted()
+        await agent.setNetworkOffline(true)
+
+        vi.mocked(a.airplaneMode).mockRejectedValue(new Error('device offline'))
+
+        expect(await agent.networkState())
+          .toEqual({ offline: true, available: false, reason: 'state-unconfirmed' })
+      })
+
+      it('answers a confirmed write as steerable', async () => {
+        const a = withAirplane(false)
+        await session(a)
+        await booted()
+
+        expect(await agent.setNetworkOffline(true)).toEqual({ offline: true, available: true })
+        expect(await agent.networkState()).toEqual({ offline: true, available: true })
+      })
     })
   })
 

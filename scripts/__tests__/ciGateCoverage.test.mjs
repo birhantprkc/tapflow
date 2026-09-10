@@ -65,6 +65,22 @@ describe('every CI job is behind the required `ci` aggregate', () => {
     expect(block).toMatch(/needs\.test\.result.*=.*success/)
   })
 
+  it('`ci` accepts a skipped `test-swift` only on the gate\'s own say-so', () => {
+    const block = CI.slice(CI.indexOf('\n  ci:'))
+    // `test-swift` may legitimately not run — it is gated on whether the netfilter moved. That makes
+    // it the one leg whose absence has to be argued for rather than assumed, and a required check
+    // counts a skip as a pass. Three things have to be present together: the leg is still asserted
+    // to succeed in the normal case, a non-success is only tolerated when it is exactly `skipped`,
+    // and the gate's own output has to say why. Dropping any one of them lets a cancelled runner or
+    // a mistyped `if:` read as green, which is the failure the test above exists to prevent, one job
+    // over. Measured before this was written: deleting the whole conditional left this file at 4/4.
+    expect(block, 'the success case is no longer asserted').toMatch(/needs\['test-swift'\]\.result.*=.*success/)
+    expect(block, 'any non-success is tolerated, not only a skip').toMatch(/=\s*"skipped"/)
+    expect(block, 'a skip is accepted without the gate explaining it').toMatch(/needs\.changes\.outputs\.netfilter.*=.*"false"/)
+    // And the gate itself: a failed `changes` leaves that output empty, which must not read as false.
+    expect(block, 'the gate job is not required to have succeeded').toMatch(/needs\.changes\.result.*=.*success/)
+  })
+
   it('no job or step opts out of failing', () => {
     // `continue-on-error` is the one hole that survives the aggregate: the leg reports success and
     // the rollup believes it. It is why the `alls-green` action exists.

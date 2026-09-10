@@ -4,6 +4,7 @@ import { config } from '@tapflowio/relay'
 import { requestAudioPermission, isAudioSupported } from '@tapflowio/ios-agent'
 import '@tapflowio/android-agent'
 import { banner, createSpinner } from '../lib/print.js'
+import { claimAgentSlot, claimPath } from '../lib/agent-singleton.js'
 
 export interface AgentStartOptions {
   device?: string
@@ -64,6 +65,41 @@ export async function cmdAgentStart(opts: AgentStartOptions): Promise<void> {
   }
 
   const agents: Array<{ disconnect(): void }> = []
+  const claims = new Map<string, () => void>()
+
+  // **One agent per Mac, per platform, and the refusal is the feature.**
+  //
+  // Two agents on one Mac enumerate the same simulators and write the same host-wide filter rule, so
+  // the second one starting used to put every device the first had taken offline back online. The
+  // relay already treats this as one agent — identity there is `IOPlatformUUID` + platform, and a
+  // second registration evicts the first's socket — so the configuration was never supported. It just
+  // failed at the filter, silently, instead of here with a sentence.
+  for (const platform of platformsToRun) {
+    const claim = await claimAgentSlot(platform)
+    if (!claim.held) {
+      // **One banner, chosen by the reason.** Printing the running-agent one first and then adding
+      // the stale case after it said something false in the case that is hardest to diagnose: the
+      // probe found no listener, so no agent is running, and being told one is sends the reader
+      // hunting for a process that does not exist.
+      if (claim.reason === 'stale-claim') {
+        banner('error', 'CLAIM LEFT BY ANOTHER ACCOUNT', [
+          `No tapflow ${platform} agent is running, but a claim on this Mac was left by a different`,
+          `macOS account and cannot be cleared from here. Remove ${claimPath(platform)} as that`,
+          'user, or from an account that can.',
+        ])
+      } else {
+        banner('error', 'AGENT ALREADY RUNNING', [
+          `A tapflow ${platform} agent is already running on this Mac.`,
+          'One agent per platform manages every simulator here, so a second one would fight it for',
+          'the network filter and the device list. Stop the other one, or use the session it already',
+          'serves.',
+        ])
+      }
+      for (const release of claims.values()) release()
+      process.exit(1)
+    }
+    claims.set(platform, claim.release)
+  }
 
   // ── Connect each registered platform ────────────────────────────────────
   for (const platform of platformsToRun) {
@@ -85,6 +121,11 @@ export async function cmdAgentStart(opts: AgentStartOptions): Promise<void> {
           ]
         : []
       if (agents.length > 0) {
+        // **The claim goes back when the platform it was taken for did not start.** Holding it while
+        // this process runs on for another platform makes the next `agent start --platform <this>`
+        // refuse for an agent that does not exist.
+        claims.get(platform)?.()
+        claims.delete(platform)
         console.log(`  ⚠  ${platform}: ${message}`)
       } else {
         banner('error', `${platform.toUpperCase()} CONNECTION FAILED`, [message, ...authHint])

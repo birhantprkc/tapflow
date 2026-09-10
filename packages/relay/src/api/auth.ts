@@ -1,6 +1,6 @@
 import http from 'http'
-import crypto from 'crypto'
 import { getDb } from '../db.js'
+import { makePasswordHash, verifyPassword, isInitialized, createAdminAccount } from '../lib/adminAccount.js'
 import { signJwt, requireAuth } from '../middleware/auth.js'
 import { json, readJson } from '../router.js'
 import { config } from '../lib/config.js'
@@ -19,25 +19,11 @@ function resolveClient(req: http.IncomingMessage, trustedProxies: string[]) {
 // 로그인 무차별 대입 방어: IP+계정 단위로 실패를 세고 지수 백오프로 잠근다.
 const loginLimiter = createRateLimiter()
 
-function hashPassword(password: string, salt: string): string {
-  return crypto.pbkdf2Sync(password, salt, 100_000, 64, 'sha512').toString('hex')
-}
-
-export function makePasswordHash(password: string): string {
-  const salt = crypto.randomBytes(16).toString('hex')
-  const hash = hashPassword(password, salt)
-  return `${salt}:${hash}`
-}
-
-export function verifyPassword(password: string, stored: string): boolean {
-  const [salt, hash] = stored.split(':')
-  if (!salt || !hash) return false
-  const computed = Buffer.from(hashPassword(password, salt), 'hex')
-  const expected = Buffer.from(hash, 'hex')
-  // 저장 해시 포맷 손상 시 길이 불일치로 timingSafeEqual이 RangeError → 안전 실패로 처리.
-  if (computed.length !== expected.length) return false
-  return crypto.timingSafeEqual(computed, expected)
-}
+// Hashing and the first-owner rules live in `lib/adminAccount.ts`, because the boot-time bootstrap
+// needs them too and a `lib/` module must not import this layer. Re-exported here so the callers
+// that already reach for them through this module keep their import path.
+export { makePasswordHash, verifyPassword, isInitialized, createAdminAccount } from '../lib/adminAccount.js'
+export type { CreateAdminResult } from '../lib/adminAccount.js'
 
 export async function handleLogin(
   req: http.IncomingMessage,
@@ -112,9 +98,7 @@ export function handleLogout(_req: http.IncomingMessage, res: http.ServerRespons
 }
 
 export function handleAuthStatus(_req: http.IncomingMessage, res: http.ServerResponse): void {
-  const db = getDb()
-  const { n } = db.prepare('SELECT COUNT(*) as n FROM users').get() as { n: number }
-  json(res, 200, { initialized: n > 0 })
+  json(res, 200, { initialized: isInitialized() })
 }
 
 export async function handleInit(req: http.IncomingMessage, res: http.ServerResponse, trustedProxies: string[] = config.local.trustedProxies): Promise<void> {
@@ -124,16 +108,22 @@ export async function handleInit(req: http.IncomingMessage, res: http.ServerResp
     return json(res, 403, { error: 'Initialization is only allowed from localhost. Run `tapflow admin init` on the relay host.' })
   }
 
-  const db = getDb()
-  const { n } = db.prepare('SELECT COUNT(*) as n FROM users').get() as { n: number }
-  if (n > 0) return json(res, 403, { error: 'Already initialized' })
+  // The owner check stays ahead of reading the body, as it was: an already-initialized install
+  // answers 403 without parsing anything.
+  if (isInitialized()) return json(res, 403, { error: 'Already initialized' })
 
   const body = await readJson<{ email: string; password: string }>(req)
-  if (!body.email || !body.password) return json(res, 400, { error: 'email and password required' })
-  if (body.password.length < 8) return json(res, 400, { error: 'Password must be at least 8 characters' })
-
-  db.prepare('INSERT INTO users (email, display_name, role, password_hash) VALUES (?, ?, ?, ?)')
-    .run(body.email, 'Admin', 'Admin', makePasswordHash(body.password))
-
-  json(res, 201, { ok: true })
+  const result = createAdminAccount(body.email, body.password)
+  switch (result) {
+    case 'missing-fields': return json(res, 400, { error: 'email and password required' })
+    case 'password-too-short': return json(res, 400, { error: 'Password must be at least 8 characters' })
+    case 'ok': return json(res, 201, { ok: true })
+    // `noImplicitReturns` is off here, so a new member of `CreateAdminResult` would compile and fall
+    // through — leaving the request with no response at all, hanging until the caller's own timeout.
+    // `never` makes that a type error instead. The boot path guards the same way.
+    default: {
+      const unreachable: never = result
+      return json(res, 500, { error: `Unhandled result: ${String(unreachable)}` })
+    }
+  }
 }

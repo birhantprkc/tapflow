@@ -5,6 +5,7 @@ import path from 'path'
 import { spawnSync } from 'child_process'
 import { ValidationError, PlatformError, MAX_CLIPBOARD_BYTES } from '@tapflowio/agent-core'
 import { ClipboardTooLargeError } from '../SimctlWrapper.js'
+import { SimulatorNetwork } from '../SimulatorNetwork.js'
 
 // A live helper. Since #482 every write reports whether it reached the helper process and the
 // agent acks on that answer, so the mock has to state it — returning undefined would model a
@@ -115,6 +116,10 @@ interface IOSAgentInternals {
   deviceStates: Map<string, { booted: boolean; deviceId: string }>
 }
 const internals = (agent: IOSAgent): IOSAgentInternals => agent as unknown as IOSAgentInternals
+/** The one private method a test drives directly. Separate from `IOSAgentInternals` so that view stays
+ *  about reconnect state, which is what every other test uses it for. */
+const internals2 = (agent: IOSAgent): { reportEnforcementLost(deviceId: string): void } =>
+  agent as unknown as { reportEnforcementLost(deviceId: string): void }
 
 // HID usage codes from KeyCodeMap (duplicated here so tests are self-contained)
 const HID_BACKSPACE = 0x2A
@@ -2302,12 +2307,118 @@ describe('IOSAgent', () => {
       return browser
     }
 
+    /**
+     * A `SimulatorNetwork` that can actually take a device offline, unlike the agent's own — which is
+     * deliberately pointed at a host binary that does not exist so no suite ever rewrites the
+     * developer's live filter. Everything it needs lives in a temp directory: a script standing in for
+     * the container app *and* the provider, and the state file it publishes.
+     */
+    function workingNetwork(dir: string): SimulatorNetwork {
+      const host = path.join(dir, 'fake-host')
+      fs.writeFileSync(
+        host,
+        `#!/bin/sh\n`
+        + `if [ "$1" = "--confirm" ]; then\n`
+        + `  R=$(cat "${dir}/rule" 2>/dev/null || echo "")\n`
+        + `  [ -n "$R" ] && printf '{"enforcing":true,"rule":["%s"],"pid":1}\\n' "$R" || printf '{"enforcing":true,"rule":[],"pid":1}\\n'\n`
+        + `  exit 0\n`
+        + `fi\n`
+        + `printf '%s' "\${2-}" > "${dir}/rule"\n`
+        + `printf '{"at":%s,"pulseSeconds":1,"rule":["%s"]}\\n' "$(date +%s)" "\${2-}" > "${dir}/state.json"\n`,
+        { mode: 0o755 },
+      )
+      // A real path: `state()` reports `hooks-not-installed` when the library is not on disk, and
+      // this fixture used to name one that never existed.
+      const hookDylib = path.join(dir, 'libtapflow-nethook.dylib')
+      fs.writeFileSync(hookDylib, '')
+      return new SimulatorNetwork(
+        { setStatusBarOffline: async () => {}, setSimulatorEnv: async () => {} },
+        {
+          filterHostBinary: host,
+          conditionDir: dir,
+          verdictDir: dir,
+          nethookDylib: hookDylib,
+          filterStateFiles: [path.join(dir, 'state.json')],
+          livenessIntervalMs: 20,
+        },
+      )
+    }
+
+    it('sends an uncorrelated report when enforcement stops under a device', async () => {
+      // **The channel that had no test, and could not have had one.** The handler used to be attached
+      // only inside the `??` that builds a `SimulatorNetwork` when none was injected — and every test
+      // injects one — so deleting the wiring left the whole suite green. It is the only thing that
+      // tells a tester a check they already signed off was invalidated; the refusal path beside it had
+      // five tests and this had none.
+      //
+      // Driven through the real detection rather than by calling the handler: the frame a viewer gets
+      // is the point, and a stub firing the callback would assert the wiring without the state behind
+      // it.
+      //
+      // **One viewer, and the loop over sessions is still uncovered.** `reportEnforcementLost` walks
+      // every session holding the device, and turning its `continue` into a `break` would go unnoticed
+      // here. A second socket joining the same session gets no `session:joined` from this harness, and
+      // two sessions on one device needs a rebind this describe does not set up — so the gap is
+      // recorded rather than papered over.
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tapflow-agent-net-'))
+      const network = workingNetwork(dir)
+      const agent = new IOSAgent({ intervalMs: 50, network }, mockSimctl(false))
+      await agent.connect(`ws://localhost:${port}`)
+      const browser = await bootedSession(agent)
+
+      fs.writeFileSync(path.join(dir, 'tapflow-nethook-dev-1.json'), JSON.stringify({ installed: true }))
+      browser.send(JSON.stringify({ type: 'network:set', requestId: 'rq-off', sessionId: agent.sessionId, payload: { offline: true } }))
+      const confirmed = await waitForType(browser, 'network:state')
+      expect(confirmed.payload, 'the device never got offline, so nothing could be lost').toEqual({ offline: true, available: true })
+
+      // The provider stops publishing: the file freezes with the device still named in it.
+      fs.writeFileSync(path.join(dir, 'state.json'), JSON.stringify({
+        at: Math.floor(Date.now() / 1000) - 30, pulseSeconds: 1, rule: ['dev-1'],
+      }))
+
+      const lost = await waitForType(browser, 'network:state')
+      expect(lost.payload).toEqual({ offline: false, available: false, reason: 'enforcement-lost' })
+      expect(lost.requestId, 'nobody asked for this — it must not correlate to a request').toBeUndefined()
+
+      // **And it goes to every session holding the device, not the first one.** A device can sit
+      // behind more than one, and the session that made the last request is not necessarily the one
+      // whose tester is looking at it. Observed on the agent's own socket because a second viewer
+      // cannot be stood up against one session in this harness — `session:start` for a session that is
+      // already joined gets no `session:joined` back — so the assertion is on what the agent sends
+      // rather than on what a second browser receives.
+      const states = internals(agent).deviceStates
+      // A session on a *different* device, inserted between the two that match — otherwise the loop's
+      // skip is never taken and turning it into a `break` changes nothing observable.
+      states.set('other-device-session', { booted: true, deviceId: 'dev-2' })
+      states.set('other-session', { booted: true, deviceId: 'dev-1' })
+      const sent: string[] = []
+      const ws = internals(agent).ws!
+      const realSend = ws.send.bind(ws)
+      ws.send = ((data: string) => { sent.push(data); realSend(data) }) as typeof ws.send
+
+      internals2(agent).reportEnforcementLost('dev-1')
+
+      const addressed = sent
+        .map((raw) => JSON.parse(raw) as { type: string; sessionId?: string; payload?: { reason?: string } })
+        .filter((m) => m.type === 'network:state' && m.payload?.reason === 'enforcement-lost')
+        .map((m) => m.sessionId)
+      expect(new Set(addressed), 'the report reached one session and stopped')
+        .toEqual(new Set([agent.sessionId, 'other-session']))
+      states.delete('other-session')
+      states.delete('other-device-session')
+
+      network.dispose()
+      agent.disconnect()
+      browser.close()
+      fs.rmSync(dir, { recursive: true, force: true })
+    })
+
     it('answers a toggle for a booted device with a state', async () => {
       // The control for the test below, and it is not a formality: `network:error` is also what an
       // agent that never wired the handler at all produces, so an assertion that a dead device gets
       // an error passes just as well on an agent where nothing works. This is what says the path
-      // exists. The state itself is `not-armed` here because the container app is not installed on a
-      // test machine, which the class reports rather than pretends about.
+      // exists. The state itself is `filter-unavailable` here because the container app is not
+      // installed on a test machine, which the class reports rather than pretends about.
       const agent = new IOSAgent({ intervalMs: 50 }, mockSimctl(false))
       await agent.connect(`ws://localhost:${port}`)
       const browser = await bootedSession(agent)
@@ -2317,13 +2428,13 @@ describe('IOSAgent', () => {
       expect(reply.requestId).toBe('rq-net-1')
       // **And it reached no filter.** Layer 1 is a system extension on the developer's Mac; without
       // the guard in the constructor this line ran the notarized container app and rewrote the host's
-      // live configuration, once per boot test. `not-armed` is what a machine without that app
-      // reports, so this pins the two to the same answer.
+      // live configuration, once per boot test. `filter-unavailable` is what a machine without that
+      // app reports, so this pins the two to the same answer.
       //
       // Worth knowing what this does *not* catch: on a machine where the app is not installed both
-      // answers are `not-armed` anyway, so removing the guard fails here only on the machines the
-      // guard is for. That is the population that matters and it is not everyone.
-      expect(reply.payload).toEqual({ offline: false, available: false, reason: 'not-armed' })
+      // answers are `filter-unavailable` anyway, so removing the guard fails here only on the machines
+      // the guard is for. That is the population that matters and it is not everyone.
+      expect(reply.payload).toEqual({ offline: false, available: false, reason: 'filter-unavailable' })
 
       agent.disconnect()
       browser.close()
@@ -2359,7 +2470,7 @@ describe('IOSAgent', () => {
     })
 
     it('resolves the capability entry points against simctl when the cache says nothing is up', async () => {
-      // `setNetworkOffline`/`networkState` are the MCP path — no session id, so they have to *find*
+      // `setNetworkOffline`/`networkState` are the in-process path — no session id, so they *find*
       // the device. They read `booted`, which `initDeviceStates` clears on every reconnect, so after
       // a relay restart they refused a simulator that was still running. The wire path is rescued by
       // `deviceFor`; these two have no equivalent and stayed broken until something else happened to

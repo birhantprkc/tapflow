@@ -253,12 +253,17 @@ export class IOSAgent implements DeviceAgent, NetworkControlCapability {
     //
     // Pointed at a path that does not exist rather than stubbed out: that is the same state a machine
     // without the app is in, so the tests exercise the real class along its real reporting path
-    // (`not-armed`) instead of a double that could drift from it. Same shape, and the same reason, as
-    // `sleepBlocker` below.
+    // (`filter-unavailable`) instead of a double that could drift from it. Same shape, and the same
+    // reason, as `sleepBlocker` below.
     this.network = options.network ?? new SimulatorNetwork(
       this.simctl,
       process.env.VITEST ? { filterHostBinary: path.join(tmpdir(), 'tapflow-no-filter-host') } : {},
     )
+    // **Wired here rather than in the constructor call above, and the difference is coverage.** An
+    // injected `SimulatorNetwork` — which is what every test uses — would otherwise never carry the
+    // handler, so the only path that tells a tester enforcement was lost was reachable in production
+    // and in nothing else.
+    this.network.setEnforcementLostHandler((deviceId) => { this.reportEnforcementLost(deviceId) })
     this.fps = options.fps ?? 30
     this.intervalMs = options.intervalMs
     this.reconnectDelays = options.reconnectDelays ?? [1000, 2000, 4000, 8000, 16000, 30000]
@@ -277,6 +282,9 @@ export class IOSAgent implements DeviceAgent, NetworkControlCapability {
 
   async connect(relayUrl: string): Promise<void> {
     this._stopping = false
+    // Paired with the `dispose()` in `disconnect()`. This method is public and reuses the network, so
+    // without it a reconnect leaves the liveness watcher off for good — see `SimulatorNetwork.resume`.
+    this.network.resume()
     if (this._reconnectTimer) { clearTimeout(this._reconnectTimer); this._reconnectTimer = null }
     this.relayUrl = relayUrl
     const allDevices = await this.simctl.listDevices()
@@ -417,6 +425,9 @@ export class IOSAgent implements DeviceAgent, NetworkControlCapability {
     }
     this.deviceStates.clear()
     this.uiTreeReader.stop()
+    // The liveness watcher outlives every device it was started for, so it is stopped here with the
+    // other things that tick. It is `unref`'d, which is why nobody noticed it had no caller.
+    this.network.dispose()
     this.sleepBlocker.release()
     this.ws?.close()
     this.ws = null
@@ -1072,7 +1083,12 @@ export class IOSAgent implements DeviceAgent, NetworkControlCapability {
         this.network.target(launchState.deviceId, bundleId)
           .catch((e: unknown) => logger.warn('could not name the network target:', (e as Error).message))
           .then(() => this.simctl.launchApp(launchState.deviceId, bundleId))
-          .then(() => {
+          .then((pid) => {
+            // **After the launch, with the pid it returned.** The network control measures how long a
+            // started process has gone without reporting its hooks; opening that window before
+            // `simctl launch` had run put the launch itself inside the budget, and left it open when
+            // the launch failed. A null or unchanged pid means no new process, so nothing is owed.
+            this.network.markLaunched(launchState.deviceId, pid)
             // Track the foreground app so ui:tree:request can query it via XCUITest.
             this.lastBundleIds.set(launchState.deviceId, bundleId)
             // Audio: the whole-sim tap's poll picks up the launched app process within one interval;
@@ -1744,6 +1760,28 @@ export class IOSAgent implements DeviceAgent, NetworkControlCapability {
     const deviceId = await this.deviceFor(sessionId)
     if (!deviceId) return
     this.sendMsg({ type: 'network:state', sessionId, payload: this.network.state(deviceId) })
+  }
+
+  /**
+   * A device that was offline stopped being enforced — tell whoever is watching it.
+   *
+   * **Uncorrelated, and it has to be**: nobody asked. `network:error` is the wrong carrier for the
+   * same reason — that type is *"a `network:set` that could not be dispatched"*, and this is not a
+   * request failing. `network:state` already supports an unsolicited frame; the viewer re-join path
+   * has been sending one since #614.
+   *
+   * **Every session holding the device, not one.** A device can sit behind two sessions, and the one
+   * that happened to make the last request is not necessarily the one whose tester is looking at it.
+   *
+   * Synchronous on purpose: `deviceFor` asks simctl before believing a device is up, and this runs
+   * from a timer while something has just gone wrong with that device. The state being reported is
+   * about the filter, not about whether the simulator is still booted.
+   */
+  private reportEnforcementLost(deviceId: string): void {
+    for (const [sessionId, state] of this.deviceStates) {
+      if (state.deviceId !== deviceId) continue
+      this.sendMsg({ type: 'network:state', sessionId, payload: this.network.state(deviceId) })
+    }
   }
 
   private async handleNetworkSet(sessionId: string, offline: boolean, requestId: string): Promise<void> {

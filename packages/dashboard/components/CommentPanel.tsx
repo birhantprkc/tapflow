@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useId, useRef, useState, type FormEvent } from 'react'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import { ScrollArea } from '@/components/ui/scroll-area'
@@ -49,6 +49,7 @@ const ALLOWED_TYPES = ['image/png', 'image/jpeg', 'image/webp']
 type Props = { buildId: number }
 
 export function CommentPanel({ buildId }: Props) {
+  const fileErrorId = useId()
   const [comments, setComments] = useState<Comment[]>([])
   const [body, setBody] = useState('')
   const [file, setFile] = useState<File | null>(null)
@@ -200,7 +201,11 @@ export function CommentPanel({ buildId }: Props) {
           {(file || fileError) && (
             <div className="px-3 -mt-1 pb-1">
               {file && <p className="text-xs text-muted-foreground">{file.name}</p>}
-              {fileError && <p className="text-xs text-destructive">{fileError}</p>}
+              {fileError && (
+                <p id={fileErrorId} role="alert" className="text-xs text-destructive">
+                  {fileError}
+                </p>
+              )}
             </div>
           )}
           <div className="flex items-center gap-2 px-2 py-2">
@@ -210,6 +215,7 @@ export function CommentPanel({ buildId }: Props) {
               size="icon"
               className="h-7 w-7 text-muted-foreground"
               aria-label="Attach image"
+              aria-describedby={fileError ? fileErrorId : undefined}
               onClick={() => fileRef.current?.click()}
             >
               <ImagePlus className="h-4 w-4" aria-hidden="true" />

@@ -150,3 +150,27 @@ export function bootAbandonMessage(reason: BootAbandonReason): string {
  *  two sessions. */
 export const BOOT_NO_SESSION_STATE =
   'No device state for this session on the agent — re-join the session before booting.'
+
+
+// ── Audio frames ────────────────────────────────────────────────────────────
+//
+// **Data types, and they live here rather than behind a capability interface.** They arrived with
+// `AudioStreamCapability`, which declared `audioFormat()` / `audioStream()` for consumers to
+// feature-detect — and nothing ever implemented it, detected it, or gave audio an `AgentCapability`
+// string, because audio is not gated: the dashboard plays whatever frames arrive. The interface and
+// its guard are gone; these are not, because `ios-agent`'s `AudioCaptureStreamer` speaks them and
+// two packages needing the same shape is exactly what this file is for.
+
+export type AudioSampleFormat = 's16' | 'u8'
+export type AudioChannels = 'mono' | 'stereo'
+
+export interface AudioFormat {
+  sampleRate: number          // e.g. 44100
+  channels: AudioChannels
+  sampleFormat: AudioSampleFormat
+}
+
+export interface AudioFrame {
+  payload: Buffer             // raw PCM samples in the stream's AudioFormat (no codec)
+  timestamp: number           // capture timestamp, epoch microseconds — for loose A/V sync
+}

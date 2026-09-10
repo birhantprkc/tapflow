@@ -1,6 +1,6 @@
 ---
 description: 릴리즈 절차 — 버전 추천부터 릴리즈 PR까지 (changesets, 가이드형)
-model: claude-opus-4-8
+model: claude-opus-5
 ---
 
 다음 npm 릴리즈를 준비한다. 인자로 bump 레벨(`major`/`minor`/`patch`)을 줄 수 있고, 없으면 근거를 모아 직접 추천한다: **$ARGUMENTS**
@@ -84,6 +84,46 @@ model: claude-opus-4-8
   - **2FA 계정에서는 이 명령이 `EOTP`로 실패한다** — 브라우저 인증이 필요해 자동화할 수 없다. 사용자에게 명령을 넘긴다.
 - **루트 `CHANGELOG.md`**: changeset 관리 밖(Keep a Changelog 수동) → `[Unreleased]`를 `[X.Y.Z] - YYYY-MM-DD`(오늘 날짜)로 승격하고 Added/Changed/Fixed를 채운다.
   - **하단 compare 링크도 함께 갱신**(놓치기 쉬움): `[Unreleased]`를 `vX.Y.Z...HEAD`로 바꾸고, `[X.Y.Z]: .../compare/v{직전}...vX.Y.Z` 링크를 새로 추가한다. 직전 릴리즈 링크가 빠져 있으면 이번에 함께 메운다.
+- **단계 배송이 남긴 거짓말을 훑는다** — 루트와 **패키지별 CHANGELOG 양쪽**. 여러 PR에 걸쳐 들어온 기능은
+  각 PR 시점에 "아직 화면에 없다"를 `[Unreleased]`와 changeset 본문에 적어 넣는데, 승격하면 그 전부가 **한
+  섹션 안에** 놓여 서로를 반박한다. 그 문장이 참이었다가 거짓이 되는 순간은 승격뿐이라, 여기가 잡을 수 있는
+  유일한 지점이다.
+
+  ```sh
+  set -o pipefail
+  # 버전은 타이핑하지 말고 유도한다 — `changeset version`이 방금 쓴 것과, 그 직전 태그.
+  ver=$(node -p "require('./packages/cli/package.json').version")
+  prev=$(git describe --tags --abbrev=0 --match 'v*' | sed 's/^v//')
+  found=0
+  for f in CHANGELOG.md packages/*/CHANGELOG.md; do
+    sec=$(awk -v v="$ver" -v p="$prev" '$0 ~ "^#+ \\[?" v {s=1; next} $0 ~ "^#+ \\[?" p {s=0} s' "$f") \
+      || { echo "could not read $f"; exit 1; }
+    [ -n "$sec" ] || continue
+    found=$((found + 1))
+    printf '%s\n' "$sec" \
+      | grep -nEi "\byet\b|for now|still to come|(iOS|Android) follows|when it lands|nothing (is )?visible|not on screen|no agent|nothing reads" \
+      | sed "s|^|$f: |"
+  done
+  [ "$found" -ge 5 ] || { echo "only $found changelog(s) carried a $ver section — the sweep read almost nothing"; exit 1; }
+  echo "swept $found changelogs for $ver (previous $prev)"
+  ```
+
+  **위 dist-tag 항목의 세 교훈이 여기에도 그대로 적용된다** — 처음 쓴 판은 셋 다 어겼고, #696에서 지적받았다.
+  버전을 `0.20.0`으로 박아두면 다음 사이클에 그것을 안 고친 순간 모든 awk 범위가 비고, 파일마다 0줄을 뱉으며
+  전부 "clean"으로 읽힌다. 일부러 깨뜨려 재보니 **예전 판은 어긋난 버전에도, 못 읽는 파일에도 아무것도 찍지
+  않고 exit 0**이었다. 그래서 버전은 유도하고, `awk` 실패는 전파하고, 섹션을 실제로 찾은 파일 수를 세어
+  바닥(5개)에 못 미치면 멈춘다. 마지막 줄이 몇 개를 읽었는지 말하는 것도 같은 이유다 — 출력이 없다는 것과
+  아무것도 안 읽었다는 것은 화면에서 똑같이 생겼다.
+
+  **`yet`은 통째로 잡고, 결과를 손으로 거른다.** 처음엔 `not yet`으로 좁게 적었고 그게 정확히 이 게이트가
+  막으려던 실패를 냈다 — 네 문장 중 셋만 잡고, **가장 널리 복제된** "No agent implements it yet"을 놓쳤다.
+  넓힌 `\byet\b`는 v0.20.0에서 11건을 물어오고 그중 진짜는 1건이지만, 그 1건("Nothing reads that file
+  yet")은 좁은 패턴도 CodeRabbit도 못 찾은 다섯 번째였다. 나머지 10건은 "a device nobody has heard from
+  yet"처럼 기기 상태를 말하는 정상 문장이다. **울타리가 아니라 바닥이고**, 비용은 문단 열 개를 읽는 것이다.
+
+  **패키지별 CHANGELOG를 빼먹지 않는다.** v0.20.0 준비 때 루트만 고쳤고, CodeRabbit이 패키지 쪽에서 같은
+  결함을 4건 찾았다. 이어서 훑으니 **6개 패키지에 8곳**이었다 — changeset 하나가 패키지 셋을 지목하면 같은
+  본문이 셋 모두에 복제되기 때문이다. changeset은 이미 소비돼 사라졌으므로, 고칠 수 있는 곳은 생성된 파일뿐이다.
 - **dashboard**: private + `ignore` → 건드리지 않는다.
 
 ## 8. 검증
@@ -113,4 +153,92 @@ model: claude-opus-4-8
 - `git push origin vX.Y.Z`
 - 워크플로우가 처리하는 것: `pnpm build` → `changeset publish`(공개 패키지 전부, 단일 경로) → GitHub Release 생성. changesets publish는 위상 정렬 없이 동시 발행하므로, 신규 패키지가 있으면 위 7번의 seed publish 전제를 반드시 지킨다.
 - npm 인증은 **GitHub OIDC(trusted publishing)** 로 동작한다 — NPM_TOKEN 등 별도 토큰이 필요 없다.
-- 발행 확인: Actions의 Release 워크플로우 `success`, `npm view tapflow version`, GitHub Releases 페이지.
+- **발행 확인은 폴링이고, 레지스트리를 직접 읽는다.** v0.20.0에서 예전 확인 셋이 **전부 참이면서 릴리즈는
+  설치 불가**였다. 워크플로우 로그는 9개 전부 `published successfully`라고 말했고, 그 시점에 둘은 13분 뒤에야
+  나타났다 — 로그는 npm API가 받아들였다는 뜻이지 레지스트리가 서빙한다는 뜻이 아니다. `npm view`는 CDN 캐시를
+  읽어, `ios-agent`가 레지스트리 문서에 이미 들어간 뒤에도 `0.19.0`을 돌려줬다. GitHub Releases 페이지는 npm에
+  대해 아무 말도 하지 않는다. 게다가 `tapflow` 하나만 봤다 — 9개 중 1개고, 그게 가장 느린 축이었던 건 운이다.
+
+  측정된 반영 시차: 7개 즉시, `ios-agent` 약 1분, `tapflow`·`relay` **약 13분**. 늦은 셋이 가장 큰
+  것들이다 — `relay`는 빌드된 대시보드를, `ios-agent`는 notarized 시스템 확장을 품는다.
+
+  ```sh
+  set -o pipefail
+  # 최신 태그를 버전 순으로 고른다. `git describe`는 HEAD 기준으로 답하므로, 다른 세션이
+  # 낡은 브랜치를 체크아웃해 두었으면 직전 릴리즈를 고르고 조용히 그것을 검증한다.
+  tag=${1:-$(git tag -l 'v*' --sort=-v:refname | head -1)}
+  deadline=$(( $(date +%s) + ${PUBLISH_TIMEOUT:-1200} ))
+
+  # 이름과 기대 버전을 태그에서 읽는다. 작업 트리가 릴리즈 커밋에 있으리란 보장이 없고
+  # (다른 세션이 브랜치를 바꿔둘 수 있다), 릴리즈에 버전선이 하나라는 보장도 없다 —
+  # v0.20.0에서 audiotap-helper는 0.3.1이었다.
+  want=$(git ls-tree -r --name-only "$tag" -- packages 2>/dev/null \
+    | grep -E '^packages/[^/]+/package\.json$' \
+    | while read -r f; do
+        git show "$tag:$f" | python3 -c 'import json,sys
+  d = json.load(sys.stdin)
+  if not d.get("private"): print(d["name"], d["version"])'
+      done)
+  n=$(printf '%s' "$want" | grep -c .)
+  [ "$n" -ge 2 ] || { echo "found $n published package(s) at $tag — refusing to report on that"; exit 1; }
+  echo "verifying $n packages from $tag"
+
+  while :; do
+    missing=""; stale=""
+    while read -r name ver; do
+      [ -n "$name" ] || continue
+      # `--max-time`, because a stalled request has no limit of its own and the deadline is only
+    # checked between rounds — one hung connection and the poll never reaches it again. A timeout
+    # is just this round failing for that package; the next round retries it.
+    #
+    # Bounded by what is left rather than a flat 30s: nine stalled packages at 30s each is a
+    # 270-second round, and the deadline cannot govern a round it is only consulted after. When
+    # nothing is left, the package is recorded as unchecked rather than skipped — skipping it
+    # silently would let a round end with an empty pending list and announce success for packages
+    # no request was ever made about.
+    left=$(( deadline - $(date +%s) ))
+    if [ "$left" -le 0 ]; then missing="$missing $name@$ver(unchecked, deadline)"; continue; fi
+    [ "$left" -gt 30 ] && left=30
+    doc=$(curl -sf --max-time "$left" "https://registry.npmjs.org/$(printf '%s' "$name" | sed 's|/|%2f|')") \
+        || { missing="$missing $name@$ver(no document)"; continue; }
+      got=$(printf '%s' "$doc" | python3 -c 'import json,sys
+  d = json.load(sys.stdin); v = sys.argv[1]
+  print(("ok" if d.get("dist-tags",{}).get("latest") == v else "latest=" + str(d.get("dist-tags",{}).get("latest"))) if v in d.get("versions",{}) else "absent")' "$ver") \
+        || { missing="$missing $name@$ver(unreadable)"; continue; }
+      case "$got" in
+        ok) ;;
+        absent) missing="$missing $name@$ver" ;;
+        *)     stale="$stale $name@$ver($got)" ;;
+      esac
+    done <<EOF
+  $want
+  EOF
+    [ -n "$missing$stale" ] || { echo "all $n packages published, and latest points at them"; break; }
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      [ -n "$missing" ] && echo "DEADLINE — never appeared:$missing"
+      [ -n "$stale" ] && echo "DEADLINE — published but latest points elsewhere:$stale (checking the wrong tag?)"
+      exit 1
+    fi
+    echo "[$(date +%H:%M:%S)] waiting:$missing$stale"
+    # Never sleep past the deadline: with a short PUBLISH_TIMEOUT a fixed sleep is what decides
+    # when the check gives up, instead of the deadline doing it.
+    nap=$(( deadline - $(date +%s) )); [ "$nap" -gt 30 ] && nap=30
+    sleep "$nap"
+  done
+  ```
+
+  세 가지를 일부러 이렇게 했다:
+
+  - **`versions`에 있는 것과 `dist-tags.latest`가 그것을 가리키는 것은 다르다.** `npm install tapflow`는
+    latest를 가져가므로 둘 다 본다. 메시지도 둘을 나눈다 — `absent`는 아직 안 올라온 것이고,
+    `latest=…`는 올라왔는데 latest가 딴 데를 가리키는 것이라 **엉뚱한 태그를 검증 중**이라는 뜻일 때가 많다.
+  - **기대 버전은 작업 트리가 아니라 태그에서 읽는다.** 다른 세션이 낡은 브랜치를 체크아웃해 둘 수 있다. 이걸
+    짜면서 실제로 그 상태였고, 트리에서 읽던 판은 `0.19.0`을 기대하며 영원히 기다렸다. 그리고 릴리즈에
+    버전선이 하나라는 보장이 없다 — v0.20.0에서 `audiotap-helper`는 `0.3.1`이었으므로 버전은 패키지마다
+    자기 매니페스트에서 읽는다.
+  - **태그는 버전 순으로 고르지, `git describe`로 고르지 않는다.** `describe`는 HEAD 기준으로 답한다.
+    같은 낡은 브랜치에서 그것이 `v0.19.0`을 골랐고, 검사는 직전 릴리즈를 조용히 검증할 뻔했다.
+
+  일부러 깨뜨려 재봤다: 없는 태그 → 바닥 판정으로 exit 1, 낡은 태그 → `latest points elsewhere`로 exit 1,
+  없는 패키지 → `no document`, 발행된 적 없는 버전 → `absent`. 정상 실행은 `all 9 packages published,
+  and latest points at them`으로 exit 0.

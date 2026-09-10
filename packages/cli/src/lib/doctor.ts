@@ -1,8 +1,18 @@
 import { execSync, spawnSync } from 'node:child_process'
-import { existsSync, readdirSync } from 'node:fs'
+import { accessSync, constants, existsSync, readdirSync, readFileSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { isFilterEnforcing, isNetFilterCurrent, isNewer, readNetFilterState, shippedHookPath } from './net-filter.js'
+
+/**
+ * How long any one probe may take before `doctor` treats it as unanswerable.
+ *
+ * Every call below is a read, wrapped in a `catch` that reports "cannot tell". Without a timeout a
+ * hung `simctl` or a wedged `adb` hangs the whole command instead — and the machines where one of
+ * these hangs are exactly the machines someone runs `doctor` on.
+ */
+const PROBE_TIMEOUT_MS = 10_000
 
 export interface DoctorCheck {
   label: string
@@ -35,6 +45,10 @@ function buildIosChecks(isMac: boolean): DoctorCheck[] {
     return [{ label: 'iOS', ok: false, warn: true, detail: 'iOS testing requires macOS.' }]
   }
   // Xcode.app이 없으면 xcodebuild/xcrun을 부르지 않는다 — 호출 시 macOS가 CLT 설치 팝업을 띄운다.
+  //
+  // **넷필터 체크는 이 조기 반환에도 붙는다.** 확장은 Xcode와 무관하게 설치·활성될 수 있고, 이 경로가
+  // 체크를 빠뜨리면 Xcode 없는 맥에서는 넷필터 상태를 물어볼 방법이 아예 없다. 설계 리뷰가 "체크
+  // 추가는 배열에 객체를 넣는 일"이라는 전제를 반환 경로가 셋이라는 사실로 반박했다.
   if (!existsSync('/Applications/Xcode.app')) {
     return [
       {
@@ -42,9 +56,291 @@ function buildIosChecks(isMac: boolean): DoctorCheck[] {
         ok: false,
         detail: 'Install Xcode from https://developer.apple.com/xcode/ or the Mac App Store. Or run: tapflow setup ios',
       },
+      ...buildNetFilterChecks(),
+      checkNetworkHook(),
+      // **`checkHookSymbols` is deliberately NOT here**, unlike the two above it. It runs `xcrun`, and
+      // the comment at the top of this branch is the reason the branch exists: on a Mac with no
+      // Xcode, `xcrun` pops the Command Line Tools install dialog out of a diagnostic command. The
+      // netfilter checks belong because they are filesystem reads; this one is not.
+      //
+      // Nothing is lost by its absence: without Xcode there is no simulator SDK to read, so its
+      // answer here could only ever have been "cannot tell".
     ]
   }
-  return [checkXcode(), checkSimctl(), checkBootedSimulator()]
+  return [checkXcode(), checkSimctl(), checkBootedSimulator(), ...buildNetFilterChecks(), checkNetworkHook(), checkHookSymbols()]
+}
+
+/**
+ * The iOS network filter, in two checks — **is it working, and is it the one this tapflow expects**.
+ *
+ * Split because they fail for different reasons and have different remedies, and because the second
+ * one is the whole point: the version that matters is the one macOS has **activated**, not the app
+ * sitting in `/Applications`. On the ordinary upgrade path those two disagree — `--install` answers
+ * "needs a reboot" and leaves the new app on disk with the old provider still running — and a check
+ * that compared the files would report a healthy Mac while the dashboard says it is not set up.
+ *
+ * Everything here is `warn`, never `fail`. A session works without the filter; only iOS network
+ * control does not.
+ */
+
+function buildNetFilterChecks(): DoctorCheck[] {
+  const s = readNetFilterState()
+
+  // **Both halves of "the package carries a filter".** The extension version comes from a plist
+  // nested inside the same bundle, so a bundle that is there but damaged answers `null` for one and
+  // not the other — and every comparison below would then be against nothing.
+  if (s.shippedHost === null || s.shippedExt === null) {
+    return [{
+      label: 'Network filter',
+      ok: false,
+      warn: true,
+      detail: 'This tapflow install carries no usable filter app, so iOS network control cannot be set up. Reinstalling tapflow restores it.',
+    }]
+  }
+  if (s.installedHost === null) {
+    // **Activated but no app on disk is not "not installed".** macOS keeps running an extension whose
+    // container app has been deleted, so saying it is missing sends someone to reinstall — from an
+    // older checkout, that replaces a filter that is working.
+    if (s.activatedExt !== null) {
+      return [{
+        label: 'Network filter',
+        ok: false,
+        warn: true,
+        detail: `Running ${s.activatedExt}, but the app it came from is gone from /Applications. Reinstall it from the tapflow whose version matches, or clear it with: systemextensionsctl uninstall 6FBS3QP893 dev.tapflow.netfilter.ext`,
+      }]
+    }
+    return [{
+      label: 'Network filter',
+      ok: false,
+      warn: true,
+      detail: 'Not installed. Run `tapflow setup ios` on a new machine, or `tapflow migrate net-filter` if tapflow was set up before this feature existed.',
+    }]
+  }
+  if (s.activatedExt === null) {
+    return [{
+      label: 'Network filter',
+      ok: false,
+      warn: true,
+      detail: 'Installed but not approved yet. Open System Settings → General → Login Items & Extensions → Network Extensions and switch tapflow on.',
+    }]
+  }
+
+  // **Installed, approved and switched on are three things, and the third has no version.**
+  // `systemextensionsctl` describes the system extension; `NEFilterManager.isEnabled` is a separate
+  // preference, so a filter switched off leaves every version here correct and this check green over
+  // a control that does not work. That state is reachable from this repo's own code: the replace
+  // disables the filter before swapping the extension, and an interrupted run leaves it off.
+  //
+  // **It is decided here rather than inside the matching-version branch**, which is where it first
+  // went and was wrong: every branch below reports this same `running` object, so a Mac that was both
+  // waiting for a restart *and* switched off said "Network filter ok" and named only the restart —
+  // and restarting does not turn a filter back on. The version half stays separate and still true,
+  // because sending someone to an upgrade would send them somewhere that cannot help.
+  const running: DoctorCheck = isFilterEnforcing()
+    ? { label: 'Network filter', ok: true }
+    : {
+        label: 'Network filter',
+        ok: false,
+        warn: true,
+        detail: 'Installed and approved, but switched off — nothing is filtering, so iOS network control does not work. Run: tapflow migrate net-filter',
+      }
+  // **The same condition the installer uses, not a second one shaped like it** (#724). Deciding this
+  // on the extension alone would report a Mac whose `/Applications` app is stale as fully healthy —
+  // and that app is the agent's own layer-1 path, so an older one meets flags it does not understand
+  // and, on a build old enough, clears the rule instead of refusing. Green while that is true is the
+  // worst answer available.
+  if (isNetFilterCurrent(s)) {
+    return [running, { label: 'Network filter version', ok: true }]
+  }
+  // Running something, but not this. Several ways that happens and they want different sentences.
+  //
+  // `isNewer`, not a second `Number() >`: that one answered `false` for a version neither side could
+  // parse, while the installer's guard answers `true` and refuses. The two disagreeing sent the user
+  // to a `migrate net-filter` that would refuse the moment they ran it.
+  //
+  // **The sentence names the pair that actually triggered**, which needs saying because the two
+  // disjuncts are now different measurements. Reporting the extension pair for a host mismatch prints
+  // two identical numbers as the evidence they differ — and under this scheme the host disjunct is
+  // the one that fires most often, since a host-only release moves that number alone.
+  const newerExt = isNewer(s.activatedExt, s.shippedExt)
+  const newerHost = s.installedHost !== null && isNewer(s.installedHost, s.shippedHost)
+  if (newerExt || newerHost) {
+    return [running, {
+      label: 'Network filter version',
+      ok: false,
+      warn: true,
+      detail: newerExt
+        ? `This Mac is set up for a newer tapflow — it runs extension ${s.activatedExt} and this one carries ${s.shippedExt}. Upgrade this checkout rather than reinstalling the filter.`
+        : `This Mac is set up for a newer tapflow — the app in /Applications is ${s.installedHost} and this one carries ${s.shippedHost}. Upgrade this checkout rather than reinstalling the filter.`,
+    }]
+  }
+  // The app on disk is this build's and the extension running is not: macOS finishes a replacement
+  // only on restart. **Decided from the host version alone**, because both plists come out of one
+  // build and the host's is unique per build — so a matching host version already says the extension
+  // beside it is this build's too, without reading a third plist for it.
+  if (s.installedHost === s.shippedHost) {
+    return [running, {
+      label: 'Network filter version',
+      ok: false,
+      warn: true,
+      detail: `Waiting for a restart: ${s.shippedExt} is installed but the Mac is still running ${s.activatedExt}. Restart the Mac to finish.`,
+    }]
+  }
+  // The extension is already this build's and only the app is behind — the ordinary shape of a
+  // release that changed nothing but the host. macOS will skip the activation, so this costs a copy
+  // and no interruption, but it has to happen: the agent runs that binary.
+  if (s.activatedExt === s.shippedExt) {
+    return [running, {
+      label: 'Network filter version',
+      ok: false,
+      warn: true,
+      detail: `The app in /Applications is ${s.installedHost} and this tapflow carries ${s.shippedHost}. The agent runs that binary. Run \`tapflow migrate net-filter\` to update it.`,
+    }]
+  }
+  return [running, {
+    label: 'Network filter version',
+    ok: false,
+    warn: true,
+    detail: `The Mac runs extension ${s.activatedExt} and this tapflow carries ${s.shippedExt}. Run \`tapflow migrate net-filter\` to update it.`,
+  }]
+}
+
+/**
+ * The other half of iOS network control, and until now nothing looked at it.
+ *
+ * The filter cuts the traffic; this library is what tells the app it is offline. Losing it produces
+ * the worst-shaped failure in the feature — dyld ignores a `DYLD_INSERT_LIBRARIES` path that is not
+ * there without a word, so the app runs unhooked and the agent never receives a verdict. The control
+ * then asks the tester to launch an app through tapflow — which they have already done, and will go
+ * on being asked for as long as the session lasts.
+ *
+ * A warning rather than a failure, matching the filter's checks: a session works without it and only
+ * iOS network control does not.
+ */
+/**
+ * The symbols the injected library rebinds, and where this Xcode says they live.
+ *
+ * **A copy, and the copy is the point rather than a shortcut.** The list lives in
+ * `packages/ios-agent/src/network-hook.m`'s `wanted[]`, which this package does not ship — and it
+ * cannot be read back out of the shipped dylib either: three of the four are resolved with
+ * `dlsym(RTLD_DEFAULT, name)`, so they are C string literals rather than import entries, and only
+ * `getaddrinfo` appears in its symbol table at all (measured). So the two lists are kept in step by
+ * `scripts/__tests__/hookSymbolsChecked.test.mjs`, which reads `wanted[]` and fails when they differ.
+ */
+/**
+ * Nine, from two tables in `network-hook.m` — four path hooks and five reachability hooks. The
+ * second set is all-or-none separately from the first, but a symbol a new Xcode stops exporting takes
+ * it down just the same, and this list is the only thing that says so before a tester finds out by
+ * launching an app.
+ *
+ * **Nothing but quoted names goes between the brackets.** `hookSymbolsChecked.test.mjs` counts the
+ * entries by splitting on commas as a cross-check against its own regex, so a comment containing one
+ * makes the two disagree and fails the build — which is the check working, and is why this note is
+ * out here.
+ */
+const HOOK_SYMBOLS = [
+  'getaddrinfo', 'nw_path_get_status', 'nw_path_monitor_set_update_handler', 'nw_path_monitor_set_queue',
+  'SCNetworkReachabilityGetFlags', 'SCNetworkReachabilitySetCallback', 'SCNetworkReachabilitySetDispatchQueue',
+  'SCNetworkReachabilityScheduleWithRunLoop', 'SCNetworkReachabilityUnscheduleFromRunLoop',
+]
+
+/** The SDK stubs that between them declare everything the hook needs. */
+const SDK_STUBS = [
+  'usr/lib/libSystem.tbd',
+  'System/Library/Frameworks/Network.framework/Network.tbd',
+  'System/Library/Frameworks/SystemConfiguration.framework/SystemConfiguration.tbd',
+]
+
+/**
+ * **Does this Xcode still export what the hook rebinds** (#629).
+ *
+ * The install is all-or-none and each entry begins with `dlsym(RTLD_DEFAULT, name)`, so one symbol
+ * removed or renamed by a new Xcode takes the whole feature down — and a tester finds out by launching
+ * an app and reading a dead control. This is the half of that which can be answered by reading.
+ *
+ * **Reading, and nothing else.** No simulator is booted, installed to or launched into, and no
+ * environment is written. `doctor` diagnoses prerequisites; the version of this that ran a probe app
+ * inside a simulator was refused for that reason, and because on this product's model a booted
+ * simulator is usually somebody's live session. #629 carries the argument.
+ *
+ * What it therefore does **not** answer: whether rebinding still works once the symbols are found.
+ * That is settled at runtime, where the verdict file already reports it.
+ */
+function checkHookSymbols(): DoctorCheck {
+  let sdk: string
+  try {
+    sdk = execSync('xcrun --sdk iphonesimulator --show-sdk-path', {
+      encoding: 'utf8', stdio: 'pipe', timeout: PROBE_TIMEOUT_MS,
+    }).trim()
+  } catch {
+    // `checkXcode` on this path already reports an unconfigured Xcode, so this says only what it
+    // could not do rather than diagnosing the cause a second time in different words.
+    return { label: 'Network hook symbols', ok: false, warn: true, detail: 'Skipped — no iOS simulator SDK to read.' }
+  }
+
+  // **All of them or none**, because the two files partition the symbols between them: `getaddrinfo`
+  // is declared only in `libSystem.tbd` and the three `nw_path_*` only in `Network.tbd`. With one file
+  // missing, three symbols read as absent — and the message below would tell someone their Xcode had
+  // dropped them and ask them to file a bug about it. A layout this does not recognise is "cannot
+  // tell", never "removed".
+  const stubs = SDK_STUBS.map((rel) => join(sdk, rel))
+  let declared: string
+  try {
+    if (!stubs.every((p) => existsSync(p))) throw new Error('layout')
+    // Wrapped like every other probe in this file, for the reason its header gives: a read that throws
+    // between the check and the open — an SDK replaced mid-update — would reject the whole command and
+    // take the Android section down with it.
+    declared = stubs.map((p) => readFileSync(p, 'utf8')).join('\n')
+  } catch {
+    return {
+      label: 'Network hook symbols',
+      ok: false,
+      warn: true,
+      detail: `Could not read the export lists under ${sdk}, so whether this Xcode still provides them is unknown.`,
+    }
+  }
+
+  const missing = HOOK_SYMBOLS.filter((sym) => !new RegExp(`\\b_${sym}\\b`).test(declared))
+
+  if (missing.length > 0) {
+    return {
+      label: 'Network hook symbols',
+      ok: false,
+      warn: true,
+      detail: `The SDK at ${sdk} does not declare ${missing.join(', ')}. The injected library needs all of them, so iOS network control would fail once an app is launched. Please report this with your Xcode version.`,
+    }
+  }
+  // **What this does and does not say.** It read the SDK; the library is injected into a process
+  // running against a *simulator runtime*, and a Mac usually has several — measured here: one SDK
+  // (26.5) against six runtimes back to 17.2. A symbol the SDK declares can still be absent from an
+  // older runtime, and the match is target-blind besides: `libSystem.tbd` is a multi-document file
+  // whose macOS/Catalyst documents are visible to this regex. So this is evidence that the symbols
+  // have not been withdrawn, not a guarantee that a given session will find them — which is why the
+  // label says what was read.
+  return { label: `Network hook symbols (${sdk.split('/').pop()})`, ok: true }
+}
+
+function checkNetworkHook(): DoctorCheck {
+  const hook = shippedHookPath()
+  if (hook === null) {
+    return {
+      label: 'Network hook',
+      ok: false,
+      warn: true,
+      detail: 'Missing from this tapflow install. An app cannot be told it is offline without it, so iOS network control stays off. Reinstalling tapflow restores it.',
+    }
+  }
+  try {
+    accessSync(hook, constants.R_OK)
+  } catch {
+    return {
+      label: 'Network hook',
+      ok: false,
+      warn: true,
+      detail: `Found at ${hook} but cannot be read, so it cannot be injected. Reinstalling tapflow restores it.`,
+    }
+  }
+  return { label: 'Network hook', ok: true }
 }
 
 // adb가 없어도 섹션을 숨기지 않고 진단을 노출한다(Android를 세팅하려는 사용자가 볼 수 있도록).
@@ -126,7 +422,7 @@ function checkAdbStatus(adb: AdbResolution | null): DoctorCheck {
 
 function checkXcode(): DoctorCheck {
   try {
-    const out = execSync('xcodebuild -version', { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] })
+    const out = execSync('xcodebuild -version', { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], timeout: PROBE_TIMEOUT_MS })
     const version = out.split('\n')[0]?.replace('Xcode ', '') ?? ''
     return { label: `Xcode ${version}`, ok: true }
   } catch {
@@ -147,7 +443,7 @@ function checkXcode(): DoctorCheck {
 
 function checkSimctl(): DoctorCheck {
   try {
-    execSync('xcrun simctl list --json', { stdio: 'pipe' })
+    execSync('xcrun simctl list --json', { stdio: 'pipe', timeout: PROBE_TIMEOUT_MS })
     return { label: 'xcrun simctl', ok: true }
   } catch {
     return {
@@ -161,7 +457,7 @@ function checkSimctl(): DoctorCheck {
 // 부팅은 QA Session 접속 시 relay가 on-demand로 한다 — 미부팅은 정상, 디바이스 존재만 확인.
 function checkBootedSimulator(): DoctorCheck {
   try {
-    const raw = execSync('xcrun simctl list devices --json', { encoding: 'utf8', stdio: 'pipe' })
+    const raw = execSync('xcrun simctl list devices --json', { encoding: 'utf8', stdio: 'pipe', timeout: PROBE_TIMEOUT_MS })
     const data = JSON.parse(raw) as { devices: Record<string, Array<{ name: string; state: string; udid: string }>> }
     const allDevices = Object.values(data.devices).flat()
     if (allDevices.length === 0) {
@@ -213,7 +509,7 @@ export interface AdbResolution {
 
 export function resolveAdb(): AdbResolution | null {
   try {
-    const found = execSync('which adb', { encoding: 'utf8', stdio: 'pipe' }).trim()
+    const found = execSync('which adb', { encoding: 'utf8', stdio: 'pipe', timeout: PROBE_TIMEOUT_MS }).trim()
     if (found) return { path: found, inPath: true }
   } catch {
     // PATH에 없으면 표준 SDK 위치 탐색으로 진행
@@ -247,7 +543,7 @@ function checkAvdAvailable(): DoctorCheck {
     return { label: 'AVD', ok: false, detail: 'Android SDK/emulator not found. Run: tapflow setup android' }
   }
   try {
-    const out = spawnSync(emulator, ['-list-avds'], { encoding: 'utf8' }).stdout ?? ''
+    const out = spawnSync(emulator, ['-list-avds'], { encoding: 'utf8', timeout: PROBE_TIMEOUT_MS }).stdout ?? ''
     const avds = out.trim() ? out.trim().split('\n').map((l) => l.trim()).filter(Boolean) : []
     if (avds.length > 0) {
       return { label: `AVD available: ${avds[0]}`, ok: true }

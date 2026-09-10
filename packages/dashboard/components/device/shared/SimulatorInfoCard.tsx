@@ -23,6 +23,10 @@ interface SimulatorInfoCardProps {
   bootError: string | null;
   installing: boolean;
   installError: string | null;
+  /** H.264 decode path is unavailable in this browser — the viewer can render the device chrome but
+   *  no stream (#748). Routed through this shared status region so Android and iOS converge on the
+   *  same one-sentence English copy instead of each viewer shipping its own overlay. */
+  decoderUnsupported: boolean;
   keyboardActive: boolean;
   /** The relay is holding this session open while its agent is gone (#426). Outranks every other
    *  status: the rest describe a device this viewer cannot currently reach. */
@@ -30,7 +34,7 @@ interface SimulatorInfoCardProps {
 }
 
 function getStatusText(props: SimulatorInfoCardProps): string | null {
-  const { connected, joined, bootError, deviceReady, installing, installError, agentAway } = props;
+  const { connected, joined, bootError, deviceReady, installing, installError, agentAway, decoderUnsupported } = props;
   if (!connected) return 'Connecting…';
   if (!joined) return 'Joining session…';
   if (agentAway) return 'The agent went away — waiting for it to come back…';
@@ -39,6 +43,7 @@ function getStatusText(props: SimulatorInfoCardProps): string | null {
   if (!deviceReady) return 'Starting device…';
   if (installing) return 'Installing app…';
   if (installError) return `Install failed: ${installError}`;
+  if (decoderUnsupported) return 'Streaming is not supported in this environment.';
   return null;
 }
 
@@ -126,9 +131,25 @@ export function SimulatorInfoCard(props: SimulatorInfoCardProps) {
         </div>
       )}
 
+      {/* **The region is always mounted and the sentence arrives inside it**, which is the shape a
+          live region has to have. This sentence is the only thing that says what a boot is doing, and
+          after #628 a keyboard user is parked beside it for a whole restart.
+          `role="status"` on the `<p>` itself does not work: that element is conditional, so the region
+          and its first sentence land in the same commit with nothing to compare against — "Starting
+          device…" and "Boot failed…" are exactly the transitions that go missing. Mounting the `<p>`
+          unconditionally instead adds a line's height to every card with nothing to say, and a second
+          sr-only copy of the text puts the same sentence in the tree twice. An empty wrapper costs
+          neither. */}
+      {/* `sr-only` while empty, which is `position: absolute` — so it stops being a flex item and stops
+          consuming one of the parent's `gap-3`. The normal state of this card is *no* sentence at all
+          (connected, joined, ready, installed), and that is where a permanently mounted 0-height child
+          would still have added 12px. The node is the same one either way, which is the whole point of
+          mounting it early. */}
+      <div role="status" className={statusText ? undefined : 'sr-only'}>
       {statusText && (
-        <p className="text-[12px] text-muted-foreground leading-relaxed break-all">{statusText}</p>
+        <p className="text-[12px] text-muted-foreground leading-relaxed break-words">{statusText}</p>
       )}
+      </div>
 
       <PerformanceModeNotice open={noticeOpen} onOpenChange={handleNoticeOpenChange} />
     </div>

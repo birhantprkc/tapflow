@@ -115,10 +115,14 @@ describe('DeviceViewer recovers from an agent restart (#426)', () => {
   })
 
   it('unsticks a keyboard toggle whose acknowledgement died with the agent', async () => {
-    // `swKeyboardPending` disables the toggle until `keyboard:toggled` comes back. Send it to an
-    // agent that then restarts and the acknowledgement never arrives — the control stays disabled
-    // for the life of the mount. Before rebinding existed this was unreachable: a dead agent
+    // `swKeyboardPending` marks the toggle unavailable until `keyboard:toggled` comes back. Send it
+    // to an agent that then restarts and the acknowledgement never arrives — the control stays that
+    // way for the life of the mount. Before rebinding existed this was unreachable: a dead agent
     // unmounted the viewer, so nothing could outlive it.
+    //
+    // Read from `aria-disabled` rather than the DOM's `disabled`: the button stays focusable so its
+    // tooltip can still explain itself, which means the *click guard* is what enforces the state and
+    // it is asserted below. `disabled` would have made that guard unreachable and untested.
     //
     // Clicking is what makes the flag true. Delivering `keyboard:toggled` instead — as an earlier
     // version of this test did — sets it *false*, so the assertion held with the clearing line
@@ -126,12 +130,33 @@ describe('DeviceViewer recovers from an agent restart (#426)', () => {
     live()
     const kbd = () => document.querySelector('button[data-active]') as HTMLButtonElement
     fireEvent.click(kbd())
-    expect(kbd().disabled).toBe(true)
+    expect(kbd().getAttribute('aria-disabled')).toBe('true')
+    // Unavailable *and* why. `aria-disabled` with an unchanged name announces a control nobody can
+    // use and gives no reason for it, which is the half the first version of this missed.
+    expect(kbd().getAttribute('aria-label')).toMatch(/changing it/i)
+    // And a live region, because renaming the button under the focus that just clicked it is not
+    // re-announced by NVDA, JAWS or VoiceOver. Mounted before the change, so the region is not
+    // inserted in the same commit as its first sentence.
+    const status = () => document.getElementById(kbd().getAttribute('aria-describedby')!)
+    expect(status()?.getAttribute('role'), 'the toggle has no live region').toBe('status')
+    expect(status()?.textContent).toMatch(/changing the software keyboard/i)
+    // Still clickable in the DOM, so the guard is the only thing stopping a second request — and the
+    // request is what has to be counted. `data-active` does not move until the agent answers, so
+    // reading it would have passed with the guard deleted.
+    const toggles = () => send.mock.calls.filter(([m]) => m.type === 'input:keyboard:toggle').length
+    const before = toggles()
+    fireEvent.click(kbd())
+    expect(toggles(), 'a second request went out while one was pending').toBe(before)
 
     rebound()
     act(() => { deliver!({ type: 'session:chrome', sessionId: 's1', payload: CHROME }) })
 
-    expect(kbd().disabled).toBe(false)
+    expect(kbd().getAttribute('aria-disabled')).toBe('false')
+    expect(kbd().getAttribute('aria-label'), 'the pending name stuck around').toBe('Software keyboard')
+    // Finishing is announced too. Clearing the sentence on success would mean the failure path was
+    // announced and the success was the silent one.
+    expect(status()?.textContent, 'the region went quiet instead of saying it finished')
+      .toMatch(/software keyboard is (up|down)/i)
   })
 
   it('keeps the installed app, and keeps the control that launches it', async () => {

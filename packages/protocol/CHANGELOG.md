@@ -1,5 +1,105 @@
 # @tapflowio/protocol
 
+## 0.20.1
+
+## 0.20.0
+
+### Minor Changes
+
+- 3f18f70: Gate the dashboard's Full reset toggle on an agent capability instead of the platform string.
+
+  `AgentCapability` gains `full-reset`, `IOSAgent` advertises it, and `SessionInfo` now carries the
+  agent's capabilities so the viewer can gate while picking a device — before any session exists to
+  join. The old `os !== 'android'` check said "Android cannot" when it meant "this agent did not say
+  it can", and got both directions wrong: an iOS agent too old to implement Full reset was still
+  offered the toggle, and an Android agent that implements it later would still have it hidden.
+
+- faeaae9: A viewer that reconnects now learns whether its device is on the network (#614).
+
+  `network:state` is produced by the agent, and the relay replays only three things to a re-joining
+  browser — so the network toggle had no value to render and would have shown a guessed position. The
+  relay now asks the agent to re-read the device, from the same block that already asks for a
+  keyframe, and the Android agent answers with an uncorrelated report.
+
+  The relay asks only agents that announce `network-control`, so an agent without the feature — one
+  predating this release, say — is never asked and a viewer never has to guess from a silence.
+
+  Caching it in the relay would have been cheaper and wrong: the relay caches only what it can
+  invalidate, and airplane mode changes when someone types `adb` in a terminal.
+
+- 4901c8c: Add the wire contract for taking a device under test off the network (#607): `network:set` from the
+  viewer, `network:state` and `network:error` back, and a `NetworkControlCapability` beside
+  `DeviceAgent` for the agents that implement it.
+
+  This is the contract, and it landed before the platforms so each one had something to build
+  against; both of them and the control ship in this same release.
+
+  **`network-control` in `capabilities` claims less than the other two entries do.** `clipboard` and
+  `full-reset` are settled facts about an agent's own code, but that string is sent once at
+  `agent:register`, before any device is booted or app launched — so it can only mean "this agent has
+  the code". Whether the mechanism actually takes is per device and per app, and `network:state`
+  carries that as `available` plus a closed `reason`. A single boolean was tried and rejected: with the
+  capability gating the control, `available: false` would have been unreachable, and the state it
+  describes — conditioned but no longer steerable — would have hidden the only control that could undo
+  it.
+
+  `offline` reports the **device**, not the request: one taken offline and then left unsteerable is
+  still offline, and saying otherwise would render "online" over a device whose app reaches nothing.
+  The payload shape and its reason set live in `@tapflowio/protocol` and are re-exported by
+  `agent-core`, the rule that package already follows for `ClipboardErrorPayload`.
+
+- d238c34: Stop drawing a working network control as a dead one (#607).
+
+  `NetworkUnavailableReason` gains `awaiting-app`, for a device whose injection is in place and which
+  no app has run under yet. That is not an edge case on iOS — the library is delivered when the device
+  boots but can only name its target when an app is launched, so **it is the state every session is in
+  until its app starts**, and it is the first thing a tester meets.
+
+  It had been reported as `not-armed`, and that value means something else: nothing was delivered, and
+  the remedy it prescribes is a reboot. Rebooting does not help here, and neither does the sentence the
+  dashboard drew from it — _"tapflow can no longer change it"_ was wrong twice over. Nothing had been
+  armed, so there was no "no longer"; and clicking the control **does** change the device, because
+  traffic-level control works in this state. What does not work is telling the app, which is the half
+  that needed saying.
+
+  So the control now says what is missing — _"Launch an app through tapflow so it is told too"_ — and
+  is drawn as what it is: actionable. It keeps its plain action name rather than the `Retry:` prefix,
+  which claims a previous attempt that never happened, and a device taken offline here stays amber,
+  because it really is offline.
+
+  **A control tapflow cannot currently steer is drawn as unusable wherever the device is pointing**,
+  where before it was drawn that way only at `online` and left washed out at `offline` — the same faint
+  rendering that reads as disabled on a button that still works, in another hue. A device whose state
+  has not been read yet is untouched by this and stays muted: it has had no attempt, so drawing one as
+  a failure claims something that never happened, in the opening seconds of every session.
+
+  That colour says the control is unusable **now**, and deliberately not that the device will never do
+  it. The dashboard reads this one member and still ignores the rest of the set, for the reason
+  recorded where it ignores them: every Android read failure currently arrives as `unsupported-device`,
+  so a rebooting device and a permanently incapable one are indistinguishable here, and nothing the
+  dashboard draws may tell those apart. `awaiting-app` is not in that set — an agent emits it only
+  about a fact it knows — which is what makes it safe to read alone.
+
+### Patch Changes
+
+- cb04a51: Write the injected library's verdict file atomically, so a healthy app stops reporting that its state could not be confirmed.
+
+  The library wrote the file with `fopen(path, "w")`, which truncates it in place. The agent reads that file on every `state()` call — the relay triggers one on `device:ready`, on a viewer's re-join and after every toggle — so a read landing inside the write is reachable on a session where nothing is wrong, and what it gets is half a file. The reader cannot tell that from a real answer, so the network control reported `state-unconfirmed` for no cause. It now writes beside the target and `rename`s onto it: a reader sees the whole old file or the whole new one.
+
+  The dylib is a committed prebuilt with no recorded build recipe, so `packages/ios-agent/build-nethook.sh` now holds one. Its flags were recovered from the committed binary rather than remembered, and confirmed by a rebuild whose every section matched byte for byte.
+
+  Two things that were invisible now report. `bin/libtapflow-nethook.dylib` is a committed prebuilt, and every test that exercised the network hook injected a _fake_ path — so editing the source and shipping the previous binary was silent. It is now recorded against its sources like the network filter next door, with the difference stated in the guard: a failure here is the contributor's to fix, because no signing key is involved.
+
+  And the library itself had no diagnosis at all. `DYLD_INSERT_LIBRARIES` naming a path that does not exist is ignored by dyld without a word, so a damaged install launched the app unhooked and wrote no verdict — leaving the control asking the tester to launch an app through tapflow, for the whole session, while the app they launched was running in front of them. `tapflow doctor ios` now reports the library, and the agent says so instead of asking for something already done.
+
+- 5e2fcc5: Split the network-control reason set so each member carries a remedy, and confirm that a simulator's rule is actually being enforced before reporting it offline.
+
+  `unsupported-device` now means only what it says — the write was accepted, the read-back succeeded, and the device had not moved. Every other Android failure is `state-unconfirmed`, which a retry may fix. Two iOS members are new: `filter-unavailable` for a Mac that cannot take devices offline, and `enforcement-lost` for enforcement that stopped underneath a device that was already offline.
+
+  On iOS the rule is now confirmed over XPC before the other layers are applied, and a request that cannot be confirmed is refused rather than half-applied — applying the app-facing layers alone tells an app it is offline while its requests keep succeeding. Enforcement is watched while any device is offline, so an outage that used to pass silently is reported instead of leaving a tester signing off on requests that succeeded.
+
+  The dashboard says what to do per reason, stops offering a retry where a retry cannot help, and interrupts rather than re-colouring when a finished check has been invalidated.
+
 ## 0.19.0
 
 ### Minor Changes

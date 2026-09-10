@@ -13,6 +13,7 @@ import { parseEnvelopeHeader, HEADER_SIZE, CODEC_H264, CODEC_AUDIO, type BinaryF
 import { useAudioPlayback } from '@/hooks/useAudioPlayback';
 import type { ClipboardMessageHandler } from '@/hooks/useClipboardBridge';
 import type { NetworkMessageHandler } from '@/hooks/useNetworkControl';
+import { useDeviceReboot, type RebootMessageHandler } from '@/hooks/useDeviceReboot';
 import { canDecodeH264 } from '@/lib/decoders/pickDecoder';
 import { resolveInputError } from '@/lib/inputErrorNotice';
 import { newRequestId } from '@/lib/requestId';
@@ -107,7 +108,12 @@ export function DeviceViewer({ sessionId, deviceId, buildId, resetMode, onRecord
   const appInstallIdsRef = useRef<Set<string>>(new Set());
   const appLaunchIdsRef = useRef<Set<string>>(new Set());
   const [swKeyboardVisible, setSwKeyboardVisible] = useState(false);
+  /** The same length `useNetworkControl` gives its own request, and for the same reason: an
+   *  uncorrelated request whose only answer may never come. */
+  const KEYBOARD_REQUEST_DEADLINE_MS = 8_000;
   const [swKeyboardPending, setSwKeyboardPending] = useState(false);
+  const kbdDeadlineRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (kbdDeadlineRef.current) clearTimeout(kbdDeadlineRef.current); }, []);
 
   // Active viewer registers its binary frame decoder here.
   // SimulatorViewer routes incoming binary frames to whichever viewer is mounted.
@@ -119,6 +125,34 @@ export function DeviceViewer({ sessionId, deviceId, buildId, resetMode, onRecord
   // Same shape, one message family over: the network control registers here and the routing below
   // hands it `network:state` and `network:error` (#607).
   const networkHandlerRef = useRef<NetworkMessageHandler | undefined>(undefined);
+  // And one over again: the reboot control registers here and the routing below hands it the two
+  // shutdown replies (#628). Kept apart from the network one because they answer different requests —
+  // routing both families through a single handler is what `inboundDisposition`'s check exists to stop.
+  const rebootHandlerRef = useRef<RebootMessageHandler | undefined>(undefined);
+
+  /**
+   * **The only place a `device:boot` is sent, and that is the point rather than tidying.**
+   *
+   * Three things have to happen together for a boot to be answerable: the id goes in `bootIdsRef` so
+   * its reply is recognised as this mount's, it goes in `latestBootIdRef` so a superseded boot's
+   * failure can be told from the current one's, and it goes on the wire. Two copies of that already
+   * existed — the join and the agent-restart rebind — and #628 would have made a third. Half-copying
+   * it fails quietly in the direction that looks healthy: `device:ready` still clears the spinner
+   * while the app is never installed, which is the failure the `device:booting` branch is annotated
+   * with at length.
+   *
+   * `resetMode` stays a parameter because it is the one thing the callers genuinely disagree on, and
+   * the disagreement is load-bearing: only the first boot of a mount may carry a reset (#439).
+   */
+  const sendBoot = useCallback((reset: 'app-only' | 'full-erase' | undefined) => {
+    const bootId = newRequestId();
+    bootIdsRef.current.add(bootId);
+    latestBootIdRef.current = bootId;
+    sendRef.current({
+      type: 'device:boot', sessionId, requestId: bootId,
+      payload: { deviceId, resetMode: reset, acceptH264: canDecodeH264(), secureContext: window.isSecureContext },
+    });
+  }, [sessionId, deviceId]);
 
   // Opt-in audio output (Android emulator first). Audio frames are codec-tagged and routed
   // straight to Web Audio — they never enter the video FIFO/decoder path. Always-on playback;
@@ -188,10 +222,7 @@ export function DeviceViewer({ sessionId, deviceId, buildId, resetMode, onRecord
       // Cleared with `rebindRef` just above and for the same reason: an earlier cycle's boot will
       // never be answered now, and keeping its id would let a straggler release this cycle's rebind.
       bootIdsRef.current.clear();
-      const bootId = newRequestId();
-      bootIdsRef.current.add(bootId);
-      latestBootIdRef.current = bootId;
-      sendRef.current({ type: 'device:boot', sessionId, requestId: bootId, payload: { deviceId, resetMode: reset, acceptH264: canDecodeH264(), secureContext: window.isSecureContext } });
+      sendBoot(reset);
     }
     if (msg.type === 'session:agent-away') {
       // Everything on screen describes an agent that is no longer there. Drop the frame so the
@@ -223,6 +254,7 @@ export function DeviceViewer({ sessionId, deviceId, buildId, resetMode, onRecord
       setBootError(null);
       setLaunching(false);
       setSwKeyboardPending(false);
+      if (kbdDeadlineRef.current) clearTimeout(kbdDeadlineRef.current);
       setSwKeyboardVisible(false);
       envelopeQueueRef.current = [];
       setAgentCapabilities(msg.capabilities);
@@ -238,10 +270,7 @@ export function DeviceViewer({ sessionId, deviceId, buildId, resetMode, onRecord
       // only because a rebind cannot precede a join on the same mount — and would silently become
       // a wipe the day that stops holding.
       resetSentRef.current = true;
-      const rebootId = newRequestId();
-      bootIdsRef.current.add(rebootId);
-      latestBootIdRef.current = rebootId;
-      sendRef.current({ type: 'device:boot', sessionId, requestId: rebootId, payload: { deviceId, resetMode: 'app-only', acceptH264: canDecodeH264(), secureContext: window.isSecureContext } });
+      sendBoot('app-only');
       // Only when the status card has not been saying it already — otherwise the toast lands at the
       // exact moment that message is replaced by the reconnect, saying the same thing twice.
       if (!wasAnnounced) toast.info('The agent restarted — reconnecting to the device.');
@@ -403,9 +432,18 @@ export function DeviceViewer({ sessionId, deviceId, buildId, resetMode, onRecord
       const { visible } = msg.payload;
       setSwKeyboardVisible(visible);
       setSwKeyboardPending(false);
+      if (kbdDeadlineRef.current) clearTimeout(kbdDeadlineRef.current);
     }
     if (msg.type === 'network:state' || msg.type === 'network:error') {
       networkHandlerRef.current?.(msg);
+      return;
+    }
+    // **Handed over without comparing anything here**, unlike every other correlated pair in this
+    // handler. `useAgentSession` sends three uncorrelated `device:shutdown`s on the way out of a
+    // view and `SessionList` answers those, so the id comparison is what separates this viewer's
+    // reboot from somebody else's teardown — and it belongs beside the id, which lives in the hook.
+    if (msg.type === 'device:shutdown-done' || msg.type === 'device:shutdown-error') {
+      rebootHandlerRef.current?.(msg);
       return;
     }
 
@@ -446,7 +484,7 @@ export function DeviceViewer({ sessionId, deviceId, buildId, resetMode, onRecord
           return;
       }
     }
-  }, [sessionId, deviceId, buildId, onSessionEnded, resetMode, installed, agentAway]);
+  }, [sessionId, buildId, onSessionEnded, resetMode, installed, agentAway, sendBoot]);
 
   const handleBinaryFrame = useCallback((data: ArrayBuffer) => {
     const envelope = parseEnvelopeHeader(data);
@@ -481,8 +519,28 @@ export function DeviceViewer({ sessionId, deviceId, buildId, resetMode, onRecord
   const iosChrome = chrome !== null && 'framePng' in chrome ? chrome as ChromeData : null;
   const androidChrome = chrome !== null && !('framePng' in chrome) ? chrome as AndroidChrome : null;
 
+  /**
+   * **The toggle gets a budget, because two agent paths answer nothing at all.**
+   *
+   * `input:keyboard:toggle` is uncorrelated and `keyboard:toggled` is the only thing that clears the
+   * wait — but `IOSAgent` drops the message when it holds no state for the session, and its
+   * `simctl` call's `.catch` logs and returns. Neither needs the agent to die, so the rebind recovery
+   * does not cover them, and the wait then lasts for the life of the mount.
+   *
+   * That was survivable while the button only greyed itself out: it made no claim. It now says
+   * "changing it" in its name, in a live region and with a spinner, so an unanswered toggle states
+   * something false to a screen-reader user indefinitely. `useNetworkControl` reached the same shape
+   * first and this is its deadline, at the same length.
+   */
   const onKbdToggle = () => {
     setSwKeyboardPending(true);
+    if (kbdDeadlineRef.current) clearTimeout(kbdDeadlineRef.current);
+    kbdDeadlineRef.current = setTimeout(() => {
+      // Only the wait is cleared. Where the keyboard actually is, is unknown — and `swKeyboardVisible`
+      // already holds the last value the device confirmed, which is the honest answer.
+      setSwKeyboardPending(false);
+      toast.error('The device did not answer. The software keyboard is where it was, as far as tapflow can tell.');
+    }, KEYBOARD_REQUEST_DEADLINE_MS);
     send({ type: 'input:keyboard:toggle', sessionId });
   };
 
@@ -503,6 +561,87 @@ export function DeviceViewer({ sessionId, deviceId, buildId, resetMode, onRecord
     sendRef.current({ type: 'app:launch', sessionId, requestId, buildId });
   }, [sessionId, buildId]);
 
+  const restartButtonRef = useRef<HTMLButtonElement | null>(null);
+  const hadViewer = useRef(false);
+  /**
+   * Whether a restart owes focus back to the button that started it.
+   *
+   * **Armed where the restart commits, not where it is asked for.** Asking is `onReboot`, and three
+   * ways of asking never produce a viewer coming back to spend the flag: the relay refuses the
+   * shutdown, the 20s deadline passes, or something else claims the device while the shutdown is
+   * still unanswered — that last one cancels inside `useDeviceReboot` and tells nobody, by design.
+   * A flag left armed is spent by whatever boot happens next, which is the unsolicited recovery this
+   * is gated to ignore. Arming on the shutdown's success instead means none of those three ever arm
+   * it, rather than each of them having to remember to disarm.
+   */
+  const restoreFocusAfterReboot = useRef(false);
+
+  // **Boots through the same helper the join and the rebind use**, which is what keeps a reboot's
+  // reply recognisable as this mount's. `app-only` is not a choice here: a reboot is not a request to
+  // erase (#439), and wiping stays on the selector screen where a session is being created.
+  const { pending: rebootPending, reboot } = useDeviceReboot({
+    sessionId, deviceId, deviceReady, send,
+    handlerRef: rebootHandlerRef,
+    onShutdownComplete: useCallback(() => {
+      restoreFocusAfterReboot.current = true;
+      sendBoot('app-only');
+    }, [sendBoot]),
+    onError: useCallback((message: string) => { toast.error(message); }, []),
+  });
+
+  /**
+   * **Where focus goes when the toolbar unmounts itself.**
+   *
+   * The restart is the only control here that destroys the thing it was pressed from: its boot sends
+   * `device:booting`, which sets `chrome` to null, which unmounts the viewer and the toolbar inside
+   * it. Focus then falls to `document.body`.
+   *
+   * **It stays there until the device is back, and that is accepted rather than fixed.** The a11y rule
+   * set this package follows calls focus landing on `document.body` the failure and a labelled
+   * `tabIndex={-1}` container an acceptable place to park it (`06-focus-management.md`, rules 1 and 3),
+   * and that parking is what used to be here. Its price was a focus nothing could use — see below —
+   * which had to be indicated, so a ring was drawn around the whole viewer on every boot. What is lost
+   * by not parking is the tab position for the seconds the device is away; what is gained is that the
+   * indicator now only ever appears on something a keystroke can act on. #683 is the announcement half
+   * of the same gap and is not solved by either choice.
+   *
+   * **It goes back to the button they pressed, not to the device.** Parking it on the screen region
+   * was the earlier answer and it bought nothing: keystrokes reach the device through
+   * `keyboardActive`, which only a pointer press sets, so the region held a focus that could not be
+   * used — and an unusable focus still has to be indicated, which is how a ring came to be drawn
+   * around the entire viewer on every boot. The restart button is a real control, it is where the
+   * tester was, and it carries the browser's own focus ring at the size of a button.
+   *
+   * **Only after a restart this component sequenced.** A stream dying on its own clears the chrome
+   * too, and moving the caret onto a destructive control nobody pressed is its own defect — so the
+   * flag comes from the restart's own shutdown landing rather than from the chrome going away. That
+   * also settles the first boot, where nobody has focused anything and taking focus would be a page
+   * grabbing the caret on load.
+   */
+  useEffect(() => {
+    const hasViewer = Boolean(iosChrome ?? androidChrome);
+    const regainedViewer = !hadViewer.current && hasViewer;
+    hadViewer.current = hasViewer;
+    if (!regainedViewer || !restoreFocusAfterReboot.current) return;
+    // Spent whether or not the focus moves: leaving it set would let a later, unrelated boot cycle
+    // claim focus on the strength of this restart.
+    restoreFocusAfterReboot.current = false;
+    // A tester can Tab somewhere else while the device comes back — the status card, the header,
+    // anywhere — and pulling focus off what they chose is the defect this exists to avoid, aimed the
+    // other way.
+    if (document.activeElement !== document.body) return;
+    restartButtonRef.current?.focus();
+  }, [iosChrome, androidChrome]);
+
+  // **After the shutdown lands there are still two ways the returning viewer is not this restart's.**
+  // The boot behind it fails, so the device that turns up later was booted by something else; or the
+  // agent goes away mid-boot and the rebind that follows boots the device itself. `session:rebound`
+  // needs no branch of its own — the agent announces its departure first, which is this flag.
+  useEffect(() => {
+    if (bootError || agentAway) restoreFocusAfterReboot.current = false;
+  }, [bootError, agentAway]);
+
+
   const commonProps = {
     sessionId, buildId, send, openUrl, launchApp, connected, joined,
     deviceReady, installing, installed, installError, bootError,
@@ -514,27 +653,61 @@ export function DeviceViewer({ sessionId, deviceId, buildId, resetMode, onRecord
     networkSupported: agentCapabilities.includes('network-control'),
     onRecordingUploaded,
     swKeyboardVisible, swKeyboardPending, onKbdToggle,
+    rebootPending, onReboot: reboot,
+    restartButtonRef,
   };
 
   // Before chrome arrives, show a phone skeleton + status card so the layout isn't empty
   if (!iosChrome && !androidChrome) {
+    // **`role="region"`, because a bare `div` is `generic` and ARIA prohibits naming that role** — the
+    // name would not be exposed at all. **"Device screen", not "Device"** — the toolbar's four group
+    // names (Navigation / Device / Capture / Environment) are a vocabulary the placement rule treats as
+    // a contract, and this region *contains* that group: one name over two very different scopes, and
+    // `getByLabelText('Device')` matching both. The name says what this *is* rather than what is
+    // happening: a fixed "starting up" keeps asserting a recovery after a boot that failed, while the
+    // card below carries the outcome.
+    //
+    // **It is a landmark, not a focus target.** It held `tabIndex={-1}` so that a restart could park
+    // focus here, and a `tabIndex={-1}` element still takes focus from a mouse — so every tap on the
+    // skeleton drew a ring around the whole thing, and the ring came back on every boot once the
+    // parking worked. Nothing was gained for it: this region has no keyboard behaviour to offer, and
+    // focus after a restart now returns to the button that started it.
     return (
-      <div className="flex items-start justify-center gap-16">
-        {/* toolbar placeholder */}
-        <div className="flex flex-col items-center gap-0.5 rounded-2xl border bg-background/90 px-1.5 py-2.5 shrink-0 mt-3 opacity-40">
+      <div
+        role="region"
+        aria-label="Device screen"
+        className="flex items-start justify-center gap-16"
+      >
+        {/* **No `aria-busy` anywhere, and the two shapes below are hidden.** Three attempts put it in
+            three places and each was wrong in the same way. On this container it sat above
+            `SimulatorInfoCard`'s live region, where a busy subtree can hold back the sentence that
+            says what happened. Derived from `!deviceReady` it never cleared, because that flag does
+            not come back after `device:boot-error` — a failed boot announcing itself as running for
+            the rest of the session. Moved onto the placeholders it became a constant, which is the
+            same defect one element over.
+
+            The shapes are decorative: no text, no name, nothing for a screen reader to attach "busy"
+            to. So they are `aria-hidden` and the progress is said once, in the one place that has
+            words for it — and that sentence is the thing to keep out of any hidden or busy subtree.
+
+            What this does *not* fix is that the region carrying it is remounted by the transition, so
+            a restart is still not announced end to end. That is #683: it needs the render restructured
+            rather than another attribute. */}
+        <div aria-hidden="true" className="flex flex-col items-center gap-0.5 rounded-2xl border bg-background/90 px-1.5 py-2.5 shrink-0 mt-3 opacity-40">
           {Array.from({ length: 5 }).map((_, i) => (
             <div key={i} className="h-8 w-8 rounded-md bg-muted animate-pulse" />
           ))}
         </div>
         <div className="flex items-start gap-8">
           {/* phone body skeleton */}
-          <div style={{ background: '#1c1c1e', borderRadius: '34px', padding: '12px', flexShrink: 0 }}>
+          <div aria-hidden="true" style={{ background: '#1c1c1e', borderRadius: '34px', padding: '12px', flexShrink: 0 }}>
             <div className="animate-pulse bg-zinc-700" style={{ width: 324, height: 720, borderRadius: '22px' }} />
           </div>
           <SimulatorInfoCard
             joined={joined} fps={0} connected={connected}
             deviceReady={deviceReady} bootError={bootError}
             installing={installing} installError={installError}
+            decoderUnsupported={false}
             keyboardActive={false} agentAway={agentAway}
           />
         </div>

@@ -106,7 +106,7 @@ Zero bleed — sim B's capture stayed at exactly 0 the whole time sim A played. 
 
 ## Rejected iOS approaches (do not re-explore without new facts)
 
-All four were tried against headless `simctl`-booted sims. Full evidence is in the `.work/` plans — the rejected-approach detail in `.work/archive/2026-06-25-ios-audio-output-impl-plan.md`, the approach-E design in `.work/2026-06-26-ios-audio-process-tap-plan.md` (local only).
+All four were tried against headless `simctl`-booted sims. What each attempt produced is the table below; the working notes behind it were local scratch and are gone.
 
 | # | Approach | Why rejected |
 |---|---|---|

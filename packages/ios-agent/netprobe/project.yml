@@ -1,0 +1,22 @@
+# The network probe app. Same model as `../xctest-runner`: source is committed, xcodegen makes the
+# project, and the built app is not committed — a contributor who needs it runs `./build.sh`.
+#
+# **It is not signed and does not need to be.** Unlike `ios-netfilter`, nothing here loads into the
+# system: it is an ordinary simulator app, so the ad-hoc signature `xcodebuild` gives it is enough.
+name: TapflowNetProbe
+options:
+  bundleIdPrefix: dev.tapflow
+  deploymentTarget:
+    iOS: "17.0"
+targets:
+  NetProbe:
+    type: application
+    platform: iOS
+    sources: [NetProbe]
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: true
+        PRODUCT_BUNDLE_IDENTIFIER: dev.tapflow.netprobe
+        # `main.swift` with top-level `UIApplicationMain` — there is no `@main` type, which is what
+        # lets the whole probe be one readable file.
+        SWIFT_VERSION: "5"

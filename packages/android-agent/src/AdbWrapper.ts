@@ -151,10 +151,21 @@ export class AdbWrapper {
    *
    * - `{ confirmed: true, offline }` — wrote and read it back.
    * - `{ confirmed: false, offline }` — the read disagreed. `offline` is what the **device** said;
-   *   the command was accepted and had no effect, which is what an image that does not really
-   *   support this looks like.
+   *   the command was accepted and had no effect.
+   *
+   *   This line used to add "which is what an image that does not really support this looks like",
+   *   and the test below contradicts it in the same file: an image that does not know the subcommand
+   *   **answers non-zero and throws from the write**, so it never reaches this branch. What does
+   *   reach it has not been measured, so the branch is named by what was observed and not by a cause.
    * - `{ confirmed: false, offline: <requested> }` — the read failed outright. The write was
    *   accepted, so the requested value is the best evidence there is; it is not a default.
+   *
+   * **The last two are the same shape, and the value is what tells them apart** — a caller comparing
+   * `offline` against what it asked for learns which of the two it got, and that is the only place
+   * that distinction exists. It is load-bearing: `AndroidAgent.classifyWrite` reads it to decide
+   * between `unsupported-device` (the device answered and had not moved) and `state-unconfirmed`
+   * (nothing was observed). Returning the requested value in the disagreement branch would collapse
+   * them. Neither is a claim about permanence — see the members' own docs for why.
    */
   async setAirplaneMode(serial: string, on: boolean): Promise<{ confirmed: boolean; offline: boolean }> {
     await this.runner.exec(

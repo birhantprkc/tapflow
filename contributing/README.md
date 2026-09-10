@@ -58,36 +58,74 @@ cannot keep true.
 
 ## Current records
 
+Grouped by **what you would be touching**, because that is how these are reached: a
+rule beside the code names the record, and you follow the pointer. Nothing here is
+meant to be read through. Within a group the most-referenced come first.
+
+### Read before you act
+
+Named imperatively from `AGENTS.md` — these describe a gate you are about to hit, not a thing to look up once stuck.
+
 | File | type | topics |
 |------|------|--------|
-| [simulator-audio.md](./simulator-audio.md) | rationale | audio, ios, android |
-| [legacy-browser-fallback-ios-only.md](./legacy-browser-fallback-ios-only.md) | rationale | ios, streaming, browser-compat |
-| [monorepo-project-references.md](./monorepo-project-references.md) | rationale | monorepo, typescript, build |
-| [android-sdk-bootstrap.md](./android-sdk-bootstrap.md) | rationale | android, setup, sdk |
-| [runtime-platform-registration.md](./runtime-platform-registration.md) | rationale | agent-core, architecture, extensibility |
-| [codec-negotiation.md](./codec-negotiation.md) | rationale | streaming, codec, browser-compat |
-| [android-rotation.md](./android-rotation.md) | rationale | android, rotation, scrcpy |
-| [ios-device-recovery.md](./ios-device-recovery.md) | rationale | ios, lifecycle, recovery |
-| [agent-keep-awake.md](./agent-keep-awake.md) | rationale | macos, performance, power |
-| [relay-heartbeat.md](./relay-heartbeat.md) | rationale | relay, websocket, reliability |
-| [relay-resource-rejection.md](./relay-resource-rejection.md) | rationale | relay, resource-management, session |
-| [relay-backpressure-frame-drop.md](./relay-backpressure-frame-drop.md) | rationale | relay, streaming, backpressure |
-| [build-status-deletion-decoupling.md](./build-status-deletion-decoupling.md) | rationale | relay, builds, storage |
-| [relay-tunnel-access.md](./relay-tunnel-access.md) | rationale | relay, deployment, tunnel |
-| [relay-agent-auth.md](./relay-agent-auth.md) | rationale | relay, auth, security |
-| [relay-secret-loading.md](./relay-secret-loading.md) | rationale | relay, config, secrets |
-| [simkit-internals.md](./simkit-internals.md) | reference | ios, simulator, reverse-engineering |
-| [measurement.md](./measurement.md) | reference | performance, measurement, instrumentation |
-| [downscale-tuning.md](./downscale-tuning.md) | reference | streaming, performance, downscale |
-| [frame-envelope.md](./frame-envelope.md) | reference | streaming, protocol, instrumentation |
-| [sustainability-carbon-math.md](./sustainability-carbon-math.md) | reference | sustainability, carbon, measurement, methodology |
-| [streaming-latency-log.md](./streaming-latency-log.md) | log | streaming, latency, performance |
-| [android-video-streaming-diagnosis.md](./android-video-streaming-diagnosis.md) | diagnosis | android, video, streaming |
-| [awdl-wifi-latency-diagnosis.md](./awdl-wifi-latency-diagnosis.md) | diagnosis | network, latency, relay, wifi |
-| [workshop-lab-fork-observations.md](./workshop-lab-fork-observations.md) | reference | performance, capacity, extensibility, external-fork |
 | [adversarial-review.md](./adversarial-review.md) | rules | process, review, quality |
 | [test-and-guard-coverage.md](./test-and-guard-coverage.md) | rules | testing, static-checks, review, quality |
 | [security-bumps.md](./security-bumps.md) | rules | dependencies, security, tooling |
+
+### Streaming, codecs and latency
+
+| File | type | topics |
+|------|------|--------|
+| [measurement.md](./measurement.md) | reference | performance, measurement, instrumentation |
+| [streaming-latency-log.md](./streaming-latency-log.md) | log | streaming, latency, performance |
+| [codec-negotiation.md](./codec-negotiation.md) | rationale | streaming, codec, browser-compat |
+| [downscale-tuning.md](./downscale-tuning.md) | reference | streaming, performance, downscale |
+| [frame-envelope.md](./frame-envelope.md) | reference | streaming, protocol, instrumentation |
+| [legacy-browser-fallback-ios-only.md](./legacy-browser-fallback-ios-only.md) | rationale | ios, streaming, browser-compat |
+| [relay-backpressure-frame-drop.md](./relay-backpressure-frame-drop.md) | rationale | relay, streaming, backpressure |
+| [awdl-wifi-latency-diagnosis.md](./awdl-wifi-latency-diagnosis.md) | diagnosis | network, latency, relay, wifi |
+
+### iOS
+
+| File | type | topics |
+|------|------|--------|
+| [simkit-internals.md](./simkit-internals.md) | reference | ios, simulator, reverse-engineering |
+| [simulator-audio.md](./simulator-audio.md) | rationale | audio, ios, android |
+| [ios-device-recovery.md](./ios-device-recovery.md) | rationale | ios, lifecycle, recovery |
+
+### Android
+
+| File | type | topics |
+|------|------|--------|
+| [android-sdk-bootstrap.md](./android-sdk-bootstrap.md) | rationale | android, setup, sdk |
+| [android-rotation.md](./android-rotation.md) | rationale | android, rotation, scrcpy |
+| [android-video-streaming-diagnosis.md](./android-video-streaming-diagnosis.md) | diagnosis | android, video, streaming |
+
+### The relay and its data
+
+| File | type | topics |
+|------|------|--------|
+| [relay-heartbeat.md](./relay-heartbeat.md) | rationale | relay, websocket, reliability |
+| [relay-resource-rejection.md](./relay-resource-rejection.md) | rationale | relay, resource-management, session |
+| [relay-tunnel-access.md](./relay-tunnel-access.md) | rationale | relay, deployment, tunnel |
+| [relay-agent-auth.md](./relay-agent-auth.md) | rationale | relay, auth, security |
+| [relay-secret-loading.md](./relay-secret-loading.md) | rationale | relay, config, secrets |
+| [build-status-deletion-decoupling.md](./build-status-deletion-decoupling.md) | rationale | relay, builds, storage |
+
+### The agent host, the repo, and its extension points
+
+| File | type | topics |
+|------|------|--------|
+| [monorepo-project-references.md](./monorepo-project-references.md) | rationale | monorepo, typescript, build |
+| [runtime-platform-registration.md](./runtime-platform-registration.md) | rationale | agent-core, architecture, extensibility |
+| [agent-keep-awake.md](./agent-keep-awake.md) | rationale | macos, performance, power |
+
+### Beyond the code
+
+| File | type | topics |
+|------|------|--------|
+| [sustainability-carbon-math.md](./sustainability-carbon-math.md) | reference | sustainability, carbon, measurement, methodology |
+| [workshop-lab-fork-observations.md](./workshop-lab-fork-observations.md) | reference | performance, capacity, extensibility, external-fork |
 
 ## Adding a record
 

@@ -18,6 +18,7 @@ import { resolveClientAddress } from './lib/clientAddress.js'
 import { resolveCorsHeaders } from './lib/cors.js'
 import { isCsrfBlocked } from './lib/csrf.js'
 import { pickLanAddress } from './lib/lanAddress.js'
+import { createTrailingRequester, systemTimerScheduler, type TrailingRequester } from './lib/trailingRequester.js'
 import { getDb } from './db.js'
 import { handleLogin, handleLogout, handleMe, handleChangePassword, handleInit, handleAuthStatus } from './api/auth.js'
 import { handleVerify, handleAccept } from './api/invitations.js'
@@ -60,8 +61,6 @@ export const IDR_REQUEST_THROTTLE_MS = 500
  *  edge (see `networkStateRequester`). Sharing the constant would mean tuning one tunes the other. */
 export const NETWORK_STATE_REQUEST_THROTTLE_MS = 500
 
-/** A throttled per-session callback that owns a timer, so it has to be disposed rather than dropped. */
-type SessionRequester = (() => void) & { dispose(): void }
 // Ping every socket each interval; a missed pong window (~2× this) terminates the dead socket.
 const HEARTBEAT_MS = 30_000
 // How long a session outlives its agent's socket, waiting for that agent to come back (#426).
@@ -240,7 +239,7 @@ export class RelayServer {
   private idrRequesters = new Map<string, () => void>()
   /** Unlike `idrRequesters` these hold a timer, which is why the value is not a bare closure — see
    *  `forgetSessionState`. */
-  private networkStateRequesters = new Map<string, SessionRequester>()
+  private networkStateRequesters = new Map<string, TrailingRequester>()
   private wsRoles = new Map<WebSocket, 'agent' | 'browser' | 'stream'>()
   /** Per-socket throttle state for `logInboundRejection`. A `WeakMap` so a closed socket's entry goes
    *  with the socket — there is no cleanup to forget, unlike the maps keyed by session id nearby. */
@@ -599,34 +598,24 @@ export class RelayServer {
    * One per session, constructed here, for the reason written on `idrRequester`: the throttle lives
    * in the closure, so a second requester is a second budget.
    */
-  private networkStateRequester(sessionId: string): SessionRequester {
+  private networkStateRequester(sessionId: string): TrailingRequester {
     const existing = this.networkStateRequesters.get(sessionId)
     if (existing) return existing
-    let lastAt = 0
-    let pending: ReturnType<typeof setTimeout> | null = null
-    const fire = () => {
-      lastAt = Date.now()
-      const session = this.sessions.get(sessionId)
-      // `sendTo` already drops a socket that is not OPEN, so a closed agent needs no check here —
-      // an earlier draft duplicated it and no mutation could tell the copy from the original.
-      //
-      // The lookup is the guard that remains, and it should be unreachable: **every path that removes
-      // a session runs `forgetSessionState`, which disposes this timer.** It is kept as the cheap half
-      // of that pair rather than as a live case — a trailing edge is the one call here that outlives
-      // the statement scheduling it, so the invariant holding is worth not assuming.
-      if (session) this.sendTo(session.agentSocket, { type: 'network:request-state', sessionId })
-    }
-    const requester = (() => {
-      const wait = NETWORK_STATE_REQUEST_THROTTLE_MS - (Date.now() - lastAt)
-      if (wait <= 0) { fire(); return }
-      // Already coalesced. A second timer here would be the double send the window is for.
-      if (pending) return
-      pending = setTimeout(() => { pending = null; fire() }, wait)
-      pending.unref()
-    }) as SessionRequester
-    requester.dispose = () => {
-      if (pending) { clearTimeout(pending); pending = null }
-    }
+    const requester = createTrailingRequester({
+      scheduler: systemTimerScheduler,
+      windowMs: NETWORK_STATE_REQUEST_THROTTLE_MS,
+      fire: () => {
+        const session = this.sessions.get(sessionId)
+        // `sendTo` already drops a socket that is not OPEN, so a closed agent needs no check here —
+        // an earlier draft duplicated it and no mutation could tell the copy from the original.
+        //
+        // The lookup is the guard that remains, and it should be unreachable: **every path that removes
+        // a session runs `forgetSessionState`, which disposes this timer.** It is kept as the cheap half
+        // of that pair rather than as a live case — a trailing edge is the one call here that outlives
+        // the statement scheduling it, so the invariant holding is worth not assuming.
+        if (session) this.sendTo(session.agentSocket, { type: 'network:request-state', sessionId })
+      },
+    })
     this.networkStateRequesters.set(sessionId, requester)
     return requester
   }

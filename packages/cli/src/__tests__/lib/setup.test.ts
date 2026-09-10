@@ -12,7 +12,7 @@ vi.mock('@tapflowio/ios-agent', () => ({
   requestAudioPermission: vi.fn(),
 }))
 
-import { execSync, spawnSync } from 'node:child_process'
+import { execFileSync, execSync, spawnSync } from 'node:child_process'
 import { existsSync, readFileSync, appendFileSync, readdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -20,6 +20,11 @@ import { confirm, text } from '@clack/prompts'
 import { runSetupAndroid, runSetupIos } from '../../lib/setup.js'
 
 const mockExecSync = vi.mocked(execSync)
+const mockExecFileSync = vi.mocked(execFileSync)
+const NET_FILTER_VERSION = '1787675754'
+/** What `systemextensionsctl list` prints for an extension macOS is actually running. */
+const activatedListing = (version: string) =>
+  `1 extension(s)\n--- com.apple.system_extension.network_extension\nenabled\tactive\tteamID\tbundleID (version)\tname\t[state]\n*\t*\t6FBS3QP893\tdev.tapflow.netfilter.ext (1.0/${version})\tdev.tapflow.netfilter.ext\t[activated enabled]\n`
 const mockSpawnSync = vi.mocked(spawnSync)
 const mockExistsSync = vi.mocked(existsSync)
 const mockReadFileSync = vi.mocked(readFileSync)
@@ -28,6 +33,9 @@ const mockAppendFileSync = vi.mocked(appendFileSync)
 const mockConfirm = vi.mocked(confirm)
 const mockText = vi.mocked(text)
 const XCODE_APP = '/Applications/Xcode.app'
+/** Where the filter's provider pulses. Its freshness is the only thing that separates an installed,
+ *  approved, switched-ON filter from an installed, approved, switched-off one. */
+const FILTER_STATE_FILE = '/Library/Application Support/tapflow/tapflow-netfilter-state.json'
 
 const SDK_DIR = join(homedir(), 'Library', 'Android', 'sdk')
 const SDK_SDKMANAGER = join(SDK_DIR, 'cmdline-tools', 'latest', 'bin', 'sdkmanager')
@@ -493,8 +501,26 @@ describe('runSetupIos', () => {
     mockSpawnSync.mockReturnValue(okSpawn as never)
     mockConfirm.mockResolvedValue(true as never)
     mockText.mockResolvedValue('' as never)
-    // 기본: 완전히 구성된 macOS (brew·Xcode·활성화·Booted 시뮬)
-    mockExistsSync.mockImplementation((p) => p === XCODE_APP)
+    // 기본: 완전히 구성된 macOS (brew·Xcode·활성화·Booted 시뮬·넷필터 설치·활성·가동 중)
+    //
+    // 넷필터는 경로 모양으로 매칭한다 — 패키지 안 앱의 절대 경로는 node가 패키지를 어디서 찾느냐에
+    // 달려 있어 테스트가 하드코딩할 값이 아니다.
+    //
+    // **가동 중까지가 "완전 구성"이다.** 버전 세 개가 맞아도 필터는 꺼져 있을 수 있고, 그 상태는
+    // `systemextensionsctl`에 그대로 `[activated enabled]`로 남는다. heartbeat 파일이 그 차이를
+    // 말하는 유일한 자리라서, 이 픽스처가 그것을 빠뜨리면 "완전 구성"이 아니다.
+    mockExistsSync.mockImplementation((p) =>
+      p === XCODE_APP || String(p).includes('TapflowNetFilter.app') || p === FILTER_STATE_FILE)
+    mockReadFileSync.mockImplementation((p) => (p === FILTER_STATE_FILE
+      ? JSON.stringify({ at: Math.floor(Date.now() / 1000), pulseSeconds: 5 }) as never
+      : '' as never))
+    // `defaults read …/Info.plist` 와 `systemextensionsctl list`. 둘 다 읽기이므로 exec 계열이고,
+    // 그래서 아래 "부작용 없음"(spawnSync 미호출) 단언이 넷필터 때문에 깨지지 않는다.
+    mockExecFileSync.mockImplementation((cmd) => {
+      if (String(cmd).endsWith('/defaults')) return `${NET_FILTER_VERSION}\n` as never
+      if (String(cmd).endsWith('/systemextensionsctl')) return activatedListing(NET_FILTER_VERSION) as never
+      return '' as never
+    })
     mockExecSync.mockImplementation((cmd) => {
       const c = cmd as string
       if (c === 'which brew') return '/opt/homebrew/bin/brew\n'
@@ -624,8 +650,20 @@ describe('runSetupIos', () => {
 
   it('멱등 — 완전 구성 머신은 전부 ok, 부작용 없음', async () => {
     const results = await runSetupIos()
-    expect(results.every((r) => r.ok)).toBe(true)
+    expect(results.filter((r) => !r.ok).map((r) => [r.label, r.detail])).toEqual([])
     expect(mockSpawnSync).not.toHaveBeenCalled()
+  })
+
+  it('필터가 꺼져 있으면 버전이 다 맞아도 found로 넘기지 않는다', async () => {
+    // 이 단계는 설치 루틴을 부르기 전에 자기 판정으로 빠져나간다. 그 판정이 버전만 보던 동안,
+    // disable 다음 install 전에 끊긴 맥은 여기서 영구히 found였다 — 그 맥을 고칠 유일한 실행이
+    // 아무것도 안 하기로 결정하는 자리였다.
+    setTTY(false)
+    mockExistsSync.mockImplementation((p) =>
+      p === XCODE_APP || String(p).includes('TapflowNetFilter.app'))
+    const results = await runSetupIos()
+    const step = results.find((r) => r.label === 'Network filter')
+    expect(step?.state, '꺼진 필터를 found로 보고했다').not.toBe('found')
   })
 
   // issue #326: iOS 단계도 found / created / repaired를 구분한다.

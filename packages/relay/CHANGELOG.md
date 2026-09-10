@@ -1,5 +1,179 @@
 # @tapflowio/relay
 
+## 0.20.1
+
+### Patch Changes
+
+- 3d2aade: **A Docker install can now create its first account.** Until now it could not, at all. The bootstrap endpoint `POST /api/v1/auth/init` only answers a local client — that check is what stops a stranger claiming a public instance between first boot and the owner setting a password — and a container is always behind its bridge gateway, so the call answered 403 from the host's own browser and from the LAN alike. The error text points at `tapflow admin init`, but the image is relay-only by design and carries no CLI to run it. `docker compose up` therefore ended at a login screen nobody could get past.
+
+  Set `TAPFLOW_ADMIN_EMAIL` and `TAPFLOW_ADMIN_PASSWORD` and the relay creates that first Admin while it boots, before it serves anything. They can go in `<dataDir>/.env` instead of the compose file, which keeps the password out of your shell history and inside the volume you already mount — but **`chmod 600` it yourself**. `tapflow init` creates that file 0600 and the relay-only image has no CLI, so a container operator writes it under their own umask; the relay now warns at boot when it is readable by others.
+
+  It runs on every boot and does nothing when an owner already exists — your account is never replaced and nothing is logged, so a long-running relay does not collect a line per restart. **A password under 8 characters, or one variable without the other, stops the relay starting.** That only happens when an admin was asked for and there is none: an install that already has an owner returns before those checks, so a typo cannot strand a relay that is already serving. Serving anyway would leave the install ownerless and claimable by anything that can reach loopback, for as long as nobody notices — and an ownerless relay is not a working service to begin with. The password is never written to the log on any path, and is removed from the environment once used.
+
+  Nothing changes for an install that does not set them, including the 403 above, which is still the right answer for a browser reaching a relay it has not been given.
+
+  **Deploying tapflow with Docker is not documented yet** ([#352](https://github.com/jo-duchan/tapflow/issues/352)): there is no Compose file in the repository and no deployment guide, so this removes the wall that stood at the end of that path rather than opening the path. It is released as a fix for that reason.
+
+- 07d4b40: Backfills: #739
+
+  tapflow no longer pins any transitive dependency. The `pnpm.overrides` block is empty.
+
+  Nothing you install changes: every package the block named already resolves at or above its security floor without it, verified by resolving the workspace both ways and comparing — `hono` 4.13.0, `axios` 1.18.1, `undici` 7.29.0, `body-parser` 2.3.0, `protobufjs` 7.6.5, `fast-uri` 3.1.7, `qs` 6.16.0, identical either way.
+
+  It is recorded because three of the eight entries had gone stale in a way that mattered. Each pinned `fast-uri` up to a floor its advisories have since moved past — 2.4.4 where 2.4.5 is required, 3.1.5 where 3.1.6 is, 4.1.2 where 4.1.3 is — so had any of them ever taken effect it would have landed on a version that was still affected, while reading, to anyone scanning the block, as though the matter were handled. A fourth named a line with no patched version anywhere, which no override can rescue.
+
+- da07ac4: The record button keeps keyboard focus while a recording is processed and saved, and announces both outcomes to assistive technology. It used `disabled` for those states, which took the focused button out of the tab order the moment "Stop recording" was activated, so focus fell to the page body and the name that changed to say what happened was read to nobody. It now stays focusable, refuses a click on its own while busy, and carries the outcome in a live region beside it.
+- ea2b5cc: **The resource charts no longer reserve space for time that has not happened.** The window's right edge was rounded up to the next round tick so the tick labels would stay on clean times, which left up to a full step of axis that no sample can ever reach — an hour of empty chart on the 6h range, and 63 pixels of 504 on 7d. Empty because it is in the future, which reads as a gap in the data rather than as the edge of the window. The window now ends at the moment of the reading and the ticks are counted down from the last round step at or before it, so the labels stay round and the newest sample sits at the right edge. The same strip existed at both ends for a second reason — the plot was padded 16px inside the gridlines that frame it — so the window's own edges are now the grid's edges and the chart is filled from one side to the other.
+
+  **The device viewer no longer draws a box around itself while you type.** Clicking the phone put the browser's focus on the whole viewer, and a focus has to be shown — so a ring appeared around everything at once, the phone and the buttons and the status card, and it came back mid-sentence on the keystrokes you were sending to the device. The viewer no longer takes focus at all. Nothing depended on it: tapflow starts forwarding your keys when you click the screen, not when the browser focuses something, so typing at the phone works exactly as before. The one place that focus was doing real work is kept — restart a device and you are put back on the restart button when it comes back, instead of at the top of the page.
+
+- 916b02a: Add a stable page-level heading to Mac Resources, expose the selected Mac and its online/offline state to assistive technology via aria-current, and announce file-attachment validation errors tied to the attach button.
+  - @tapflowio/protocol@0.20.1
+  - @tapflowio/agent-core@0.20.1
+
+## 0.20.0
+
+### Minor Changes
+
+- 3f18f70: Gate the dashboard's Full reset toggle on an agent capability instead of the platform string.
+
+  `AgentCapability` gains `full-reset`, `IOSAgent` advertises it, and `SessionInfo` now carries the
+  agent's capabilities so the viewer can gate while picking a device — before any session exists to
+  join. The old `os !== 'android'` check said "Android cannot" when it meant "this agent did not say
+  it can", and got both directions wrong: an iOS agent too old to implement Full reset was still
+  offered the toggle, and an Android agent that implements it later would still have it hidden.
+
+- faeaae9: A viewer that reconnects now learns whether its device is on the network (#614).
+
+  `network:state` is produced by the agent, and the relay replays only three things to a re-joining
+  browser — so the network toggle had no value to render and would have shown a guessed position. The
+  relay now asks the agent to re-read the device, from the same block that already asks for a
+  keyframe, and the Android agent answers with an uncorrelated report.
+
+  The relay asks only agents that announce `network-control`, so an agent without the feature — one
+  predating this release, say — is never asked and a viewer never has to guess from a silence.
+
+  Caching it in the relay would have been cheaper and wrong: the relay caches only what it can
+  invalidate, and airplane mode changes when someone types `adb` in a terminal.
+
+- 4901c8c: Add the wire contract for taking a device under test off the network (#607): `network:set` from the
+  viewer, `network:state` and `network:error` back, and a `NetworkControlCapability` beside
+  `DeviceAgent` for the agents that implement it.
+
+  This is the contract, and it landed before the platforms so each one had something to build
+  against; both of them and the control ship in this same release.
+
+  **`network-control` in `capabilities` claims less than the other two entries do.** `clipboard` and
+  `full-reset` are settled facts about an agent's own code, but that string is sent once at
+  `agent:register`, before any device is booted or app launched — so it can only mean "this agent has
+  the code". Whether the mechanism actually takes is per device and per app, and `network:state`
+  carries that as `available` plus a closed `reason`. A single boolean was tried and rejected: with the
+  capability gating the control, `available: false` would have been unreachable, and the state it
+  describes — conditioned but no longer steerable — would have hidden the only control that could undo
+  it.
+
+  `offline` reports the **device**, not the request: one taken offline and then left unsteerable is
+  still offline, and saying otherwise would render "online" over a device whose app reaches nothing.
+  The payload shape and its reason set live in `@tapflowio/protocol` and are re-exported by
+  `agent-core`, the rule that package already follows for `ClipboardErrorPayload`.
+
+- 2bac3f4: Add a restart control to the device toolbar
+
+  The network control can report `not-armed`, whose remedy the protocol states as "reboot the device" —
+  and there was no way to reboot a device from the session screen. `input:error`'s `not-booted` has the
+  same shape. The only route was back to the device list, which loses the session.
+
+  The control sits last in the Device group and asks before it fires, since the state a tester has built
+  up on the device does not come back. It restarts only: wiping stays on the selector screen.
+
+  `device:boot` on a running device does nothing on its own — the non-erase path issues a boot the
+  simulator ignores — so a restart is a `device:shutdown` followed by a `device:boot`. Both already
+  existed on the wire, so no agent, relay or protocol change was needed.
+
+### Patch Changes
+
+- 6d20bba: Advertise the first teammate-ready DNS host from an imported TLS certificate in relay startup output, preferring a concrete SAN over `localhost`. DNS SANs take precedence over the legacy subject CN; certificates with unusable DNS SANs keep the safe `localhost` fallback and now explain it with a warning.
+- 9d0df7d: Make network-state request coalescing deterministic in tests and prevent a delayed trailing timer from sending a duplicate request after a new window begins.
+
+  <!-- changelog: internal — relay scheduling and test determinism, nothing a user can observe -->
+
+- 04c7090: **Take the device off the network from the browser.** The control that #607 asked for is on screen.
+
+  A button in the simulator toolbar puts an Android emulator into airplane mode and takes it back out, so the offline banner, the failed retry and the stale cached screen can be seen without touching a terminal. It appears only for an agent that says it can do this, which is why the iOS half needed no dashboard change when it landed alongside this one.
+
+  It has four positions rather than two, and that is deliberate. A device nobody has heard from yet and one whose report never came are drawn differently from each other and from both on and off — because saying "on the network" about a device nobody has heard from is exactly the mistake this feature exists to catch. Neither is disabled: clicking is what asks the device, so a session with no report has a way out rather than a dead end.
+
+  A device whose network tapflow can no longer change still shows where it is. That is a separate thing from not knowing, and the button says which of the two it is.
+
+  The toggle never moves on the click. It moves when the device answers, so what is on screen is where the device is rather than where someone asked it to go.
+
+- 5e2fcc5: Split the network-control reason set so each member carries a remedy, and confirm that a simulator's rule is actually being enforced before reporting it offline.
+
+  `unsupported-device` now means only what it says — the write was accepted, the read-back succeeded, and the device had not moved. Every other Android failure is `state-unconfirmed`, which a retry may fix. Two iOS members are new: `filter-unavailable` for a Mac that cannot take devices offline, and `enforcement-lost` for enforcement that stopped underneath a device that was already offline.
+
+  On iOS the rule is now confirmed over XPC before the other layers are applied, and a request that cannot be confirmed is refused rather than half-applied — applying the app-facing layers alone tells an app it is offline while its requests keep succeeding. Enforcement is watched while any device is offline, so an outage that used to pass silently is reported instead of leaving a tester signing off on requests that succeeded.
+
+  The dashboard says what to do per reason, stops offering a retry where a retry cannot help, and interrupts rather than re-colouring when a finished check has been invalidated.
+
+- 7152b21: Stop the network control describing a device that is rebooting, and settle what the toolbar's groups mean.
+
+  A device that restarts keeps its session, and the control only forgot what it knew when the _session_ changed — so for the 30–60 seconds an emulator takes to come back, the toolbar showed the position from before it. Worse than merely stale: the agent's boot path turns airplane mode off and reports the device online, so an amber "offline" sat over a device being reset to the opposite, and nothing ever replaced it. The control now forgets the moment the device stops being ready, and starts waiting for the report again.
+
+  The toolbar's buttons were grouped by a criterion nobody had written down. They are now grouped by what the tester is doing to the device — **move around the app → leave the device in a condition → take the state out of the session → change what the device is sitting in** — and the rule, with its worked examples, is in `packages/dashboard/AGENTS.md`. A new button has an answer before anyone argues: GPS goes in Environment, Shake in Device.
+
+  Where a button sits is now decided in one place. Android's toolbar was ordered by the _agent_, because its buttons arrive as a capability list and the dashboard rendered that array in array order — so reordering that list moved buttons in the browser, and nothing on either side would have said so. The dashboard names its own order now and looks each button up. A button the agent adds and no group claims does not render — deliberately, so that where it belongs is a decision rather than an accident, and a check fails if one is left unclaimed.
+
+  Also recorded rather than changed: `NetworkControlCapability` is an in-process API. `mcp-server` and `flow-runner` hold a relay client and address devices by session over the wire, so the network tool they would expose goes through `network:set`, which already names its session and answers with a correlated report. Two issues had been filed asking this interface to take a session id and report on the wire, on the premise that MCP calls it.
+
+- 1823117: The dashboard's icon set moved to lucide-react 1.x, from 0.577.
+
+  Housekeeping ahead of the network control for #607, which will use `radio-off` — an icon added in lucide v1.6.0. Not a necessity: 0.577 already carries `wifi-off`, `plane`, `signal` and `antenna`, and the slash could have been drawn by hand. It is a preference for the glyph that says "no radio at all", which is what airplane mode does, and doing the bump now keeps it out of the diff that adds the control.
+
+  Nothing you interact with changes. Forty-nine of the fifty icons in use are drawn from identical data; the fiftieth is the book on the sidebar's Docs link, and it has been redrawn — same book, rounder corners. All the JS the dashboard ships grows by 30 bytes.
+
+- d238c34: Stop drawing a working network control as a dead one (#607).
+
+  `NetworkUnavailableReason` gains `awaiting-app`, for a device whose injection is in place and which
+  no app has run under yet. That is not an edge case on iOS — the library is delivered when the device
+  boots but can only name its target when an app is launched, so **it is the state every session is in
+  until its app starts**, and it is the first thing a tester meets.
+
+  It had been reported as `not-armed`, and that value means something else: nothing was delivered, and
+  the remedy it prescribes is a reboot. Rebooting does not help here, and neither does the sentence the
+  dashboard drew from it — _"tapflow can no longer change it"_ was wrong twice over. Nothing had been
+  armed, so there was no "no longer"; and clicking the control **does** change the device, because
+  traffic-level control works in this state. What does not work is telling the app, which is the half
+  that needed saying.
+
+  So the control now says what is missing — _"Launch an app through tapflow so it is told too"_ — and
+  is drawn as what it is: actionable. It keeps its plain action name rather than the `Retry:` prefix,
+  which claims a previous attempt that never happened, and a device taken offline here stays amber,
+  because it really is offline.
+
+  **A control tapflow cannot currently steer is drawn as unusable wherever the device is pointing**,
+  where before it was drawn that way only at `online` and left washed out at `offline` — the same faint
+  rendering that reads as disabled on a button that still works, in another hue. A device whose state
+  has not been read yet is untouched by this and stays muted: it has had no attempt, so drawing one as
+  a failure claims something that never happened, in the opening seconds of every session.
+
+  That colour says the control is unusable **now**, and deliberately not that the device will never do
+  it. The dashboard reads this one member and still ignores the rest of the set, for the reason
+  recorded where it ignores them: every Android read failure currently arrives as `unsupported-device`,
+  so a rebooting device and a permanently incapable one are indistinguishable here, and nothing the
+  dashboard draws may tell those apart. `awaiting-app` is not in that set — an agent emits it only
+  about a fact it knows — which is what makes it safe to read alone.
+
+- Updated dependencies [becbe77]
+- Updated dependencies [3f18f70]
+- Updated dependencies [cb04a51]
+- Updated dependencies [5e2fcc5]
+- Updated dependencies [7152b21]
+- Updated dependencies [faeaae9]
+- Updated dependencies [4901c8c]
+- Updated dependencies [d238c34]
+  - @tapflowio/agent-core@0.20.0
+  - @tapflowio/protocol@0.20.0
+
 ## 0.19.0
 
 ### Minor Changes

@@ -1,6 +1,6 @@
 ---
-description: 작업 계획 수립 — 요구사항 + 테스트 케이스 정의 (Fable 5 사용)
-model: claude-fable-5
+description: 작업 계획 수립 — 요구사항 + 테스트 케이스 정의 (Fable 5.1 사용)
+model: claude-fable-5-1
 ---
 
 아래 토픽에 대한 Plan 문서를 작성한다: **$ARGUMENTS**

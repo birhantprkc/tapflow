@@ -20,11 +20,15 @@ function toolbar(network?: NetworkControl, recordState: RecordState = 'idle') {
 }
 
 const control = (over: Partial<NetworkControl> = {}): NetworkControl =>
-  ({ position: 'online', steerable: true, awaitingApp: false, pending: false, onToggle: () => {}, ...over })
+  ({ position: 'online', steerable: true, pending: false, onToggle: () => {}, ...over })
 
 /** The button, found by whichever action its current position offers. */
 const networkButton = () =>
   screen.queryByRole('button', { name: /(device (offline|online|network)|^Retry: )/ })
+
+/** The region the button points at: the record button carries its own `status` beside this one. */
+const networkStatus = () =>
+  document.getElementById(networkButton()!.getAttribute('aria-describedby')!)!
 
 /** What the button is called in a given position — read from the render, not restated here. */
 function networkButtonName(position: NetworkControl['position']) {
@@ -114,7 +118,7 @@ describe('SimulatorToolbar — network control', () => {
     // something to say, fails here.
     const said = (position: NetworkControl['position'], pending = false) => {
       const { unmount } = toolbar(control({ position, pending }))
-      const text = screen.getByRole('status').textContent
+      const text = networkStatus().textContent
       unmount()
       return text
     }
@@ -207,13 +211,92 @@ describe('SimulatorToolbar — network control', () => {
     // device taken offline on a write that could not be confirmed could not be brought back.
     //
     // Mutation: rendering `steerable: false` as `unknown` fails here.
-    const { unmount } = toolbar(control({ position: 'offline', steerable: false }))
+    //
+    // `state-unconfirmed` is the reason the paragraph above is literally about — a write that could
+    // not be confirmed — and it is the one where a retry can still land.
+    const { unmount } = toolbar(control({ position: 'offline', steerable: false, reason: 'state-unconfirmed' }))
     // The name says the direction **and** that the last attempt did not land. Putting the caveat only
     // in the description would leave it to a channel a verbosity setting can drop.
     expect(networkButton()!.getAttribute('aria-label')).toBe('Retry: bring device online')
     const id = networkButton()!.getAttribute('aria-describedby')!
     expect(document.getElementById(id)!.textContent).toContain('offline')
-    expect(document.getElementById(id)!.textContent).toContain('no longer change')
+    expect(document.getElementById(id)!.textContent).toContain('try again')
+    unmount()
+  })
+
+  it('does not offer a retry for a reason a retry cannot fix', () => {
+    // **The prefix's own justification was conditional and the condition has expired.** It read "not
+    // futile *while #618 leaves a transient failure indistinguishable from a permanent one*" — and
+    // #618 split them. A device that was read and had not moved, and a Mac that is not set up for
+    // this, are both states where clicking again does exactly nothing.
+    // And what replaces it is a marker in the **name**, not the colour. Leaving the plain actionable
+    // name there put the whole "this will not work" on a channel a screen-reader user does not have,
+    // with the description — which a verbosity setting can drop — as the only other one.
+    for (const reason of ['filter-unavailable', 'not-armed', 'hooks-not-installed', 'enforcement-lost'] as const) {
+      const { unmount } = toolbar(control({ position: 'online', steerable: false, reason }))
+      const name = networkButton()!.getAttribute('aria-label')
+      expect(name, `reason ${reason} offered a retry`).not.toMatch(/^Retry:/)
+      expect(name, `reason ${reason} left the failure to the colour alone`).toBe('Take device offline — unavailable')
+      unmount()
+    }
+  })
+
+  it('says what to do about it, one sentence per reason', () => {
+    // A member per thing a consumer must do differently is what the closed set is *for*, so each
+    // sentence has to be the one that belongs to its reason — and none of them may name the machinery.
+    // A tester is not going to install a system extension; what they can do is launch an app, restart
+    // a device, try again, or go and ask whoever runs the Mac.
+    //
+    // **Pinned to the actual words, because counting them did not work.** A first version asserted
+    // only "not the bare status", "no implementation nouns", and "seven distinct strings" — under
+    // which deleting any single `case` and letting it fall through to `default` still passed all
+    // three, including for the one reason whose destination the protocol declares mandatory.
+    const expected = [
+      ['awaiting-app', /launch an app/i],
+      ['not-armed', /restart the device/i],
+      ['state-unconfirmed', /try again/i],
+      ['unsupported-device', /did not change when tapflow asked/i],
+      ['filter-unavailable', /not set up .* network control guide/i],
+      ['enforcement-lost', /went back on the network on its own/i],
+      ['hooks-not-installed', /cannot tell this app/i],
+    ] as const
+    const seen = new Set<string>()
+    for (const [reason, fragment] of expected) {
+      const { unmount } = toolbar(control({ position: 'online', steerable: false, reason }))
+      const id = networkButton()!.getAttribute('aria-describedby')!
+      const text = document.getElementById(id)!.textContent ?? ''
+      expect(text, `reason ${reason} did not say its own sentence`).toMatch(fragment)
+      expect(text, `reason ${reason} names the machinery`).not.toMatch(/filter|extension|hook|dylib|kernel/i)
+      seen.add(text)
+      unmount()
+    }
+    expect(seen.size, 'two reasons are described the same way').toBe(expected.length)
+  })
+
+  it('marks an unconfirmed state with the pulse, and nothing else with it', () => {
+    // The pulse is the whole of how uncertainty is said. Rendering it as a position of `unknown` was
+    // tried and reverted — from there every click asks for offline again, so a device taken offline
+    // could not be brought back — and this is what replaced it. Nothing asserted it, so the line could
+    // be deleted with the suite green and the reverted design's only replacement gone with it.
+    const classesFor = (reason: NetworkControl['reason']) => {
+      const { unmount } = toolbar(control({ position: 'offline', steerable: false, reason }))
+      const cls = networkButton()!.className
+      unmount()
+      return cls
+    }
+    expect(classesFor('state-unconfirmed')).toMatch(/animate-pulse/)
+    expect(classesFor('filter-unavailable'), 'a settled failure must not pulse').not.toMatch(/animate-pulse/)
+  })
+
+  it('renders a reason it has never heard of rather than nothing', () => {
+    // Agents update on their own schedule, so a build older than the agent talking to it has to draw
+    // *something*. The `default` branch says the one thing true of every member without guessing.
+    const { unmount } = toolbar(control({
+      position: 'online', steerable: false,
+      reason: 'future-member' as NetworkControl['reason'],
+    }))
+    const id = networkButton()!.getAttribute('aria-describedby')!
+    expect(document.getElementById(id)!.textContent).toContain('cannot change it right now')
     unmount()
   })
 
@@ -301,7 +384,7 @@ describe('SimulatorToolbar — network control', () => {
   // Mutation: dropping `hover:` from any single position fails here.
   it.each([
     ['online, not steerable', control({ steerable: false })],
-    ['online, waiting for an app', control({ steerable: false, awaitingApp: true, position: 'offline' })],
+    ['online, waiting for an app', control({ steerable: false, reason: 'awaiting-app', position: 'offline' })],
     ['waiting', control({ position: 'waiting' })],
     ['unknown', control({ position: 'unknown' })],
     ['offline', control({ position: 'offline' })],
@@ -321,7 +404,7 @@ describe('SimulatorToolbar — network control', () => {
     // that share that flag: traffic control works here, so a dead-looking control says the opposite
     // of what a click does.
     const awaiting = (over: Partial<NetworkControl> = {}) =>
-      control({ steerable: false, awaitingApp: true, ...over })
+      control({ steerable: false, reason: 'awaiting-app', ...over })
 
     it('is not painted as a failure', () => {
       const { unmount } = toolbar(awaiting())
@@ -340,7 +423,7 @@ describe('SimulatorToolbar — network control', () => {
       toolbar(awaiting())
       // "tapflow can no longer change it" was wrong twice here: nothing had been armed, so there was
       // no "no longer", and clicking does change the device.
-      const said = screen.getByRole('status').textContent ?? ''
+      const said = networkStatus().textContent ?? ''
       expect(said).toContain('Launch an app')
       expect(said).not.toContain('no longer')
     })
@@ -351,7 +434,8 @@ describe('SimulatorToolbar — network control', () => {
     })
 
     it('leaves the real failures painted as failures', () => {
-      // The contrast that makes the colour mean something: same `steerable: false`, no `awaitingApp`.
+      // The contrast that makes the colour mean something: same `steerable: false`, a reason that is
+      // not `awaiting-app`.
       toolbar(control({ steerable: false }))
       expect(networkButton()!.className).toContain('text-destructive')
     })

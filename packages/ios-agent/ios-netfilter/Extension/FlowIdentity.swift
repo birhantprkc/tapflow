@@ -1,0 +1,540 @@
+import Foundation
+
+// The pure half of flow handling, kept in its own file **so it can be tested** (#690).
+//
+// The three kernel reads on that path — `sysctl(KERN_PROC)` for a process's parent,
+// `KERN_PROCARGS2` for its arguments, `proc_pidpath` for its executable — cannot be stood up in a
+// unit test, so they stay in `Provider.swift`. Everything decided *from* them is here, including the
+// climb that composes them: `attributeWalk` takes them as a `ProcessReader` rather than calling them.
+//
+// It is `internal` rather than `private` for the same reason: the test bundle compiles this file
+// directly (`tests.yml`), and a `private` function would not be visible to it.
+
+/// The simulator a `launchd_sim` argument string belongs to, or `nil`.
+///
+/// The argument string looks like this, with the NULs between arguments already replaced by spaces
+/// (`procArgs`):
+///
+/// ```text
+/// launchd_sim /Users/<u>/Library/Developer/CoreSimulator/Devices/<UDID>/data/var/run/launchd_bootstrap.plist
+/// ```
+///
+/// **The UDID appears in exactly one observable place — these arguments.** It is not in the executable
+/// path (every simulator on a runtime shares one `launchd_sim` binary in the simruntime) and not in the
+/// working directory (measured: `/`). `Provider.swift` has the rest of that reasoning.
+///
+/// The 36-character length check is what separates a real identifier from a `/Devices/` that happens to
+/// appear elsewhere in the arguments. **It is a length check and not a UUID check**, which is a floor
+/// rather than a fence: 36 characters of anything but `/` passes. That is deliberate for now — a
+/// stricter parse would have to be sure it agrees with CoreSimulator about what a device identifier may
+/// look like, and being wrong there drops attribution for a real device, which fails *open* and lets a
+/// simulator the tester took offline keep talking. A test pins the current behaviour so that tightening
+/// it later is a visible decision rather than a silent one.
+func extractUDID(from text: String) -> String? {
+    guard let marker = text.range(of: "/Devices/") else { return nil }
+    let udid = text[marker.upperBound...].prefix { $0 != "/" }
+    return udid.count == 36 ? String(udid) : nil
+}
+
+
+// MARK: - what passes whatever the rule says
+
+/// The port name resolution uses. Plain DNS only — see `passesRegardlessOfRule`.
+let dnsPort = 53
+
+/**
+ * A port from an endpoint, or `nil` when there is not one.
+ *
+ * **`0` is not a port and must not read as one.** The two endpoint properties disagree about it: one
+ * of them reports an unconnected flow as port `0` while the other reports nothing at all, so without
+ * this the log records a different channel for the same condition — and that log is what is supposed
+ * to make "the OS emptied a channel" visible rather than silent. Normalising here is what keeps the
+ * two answers comparable.
+ */
+func normalisedPort(_ raw: Int?) -> Int? {
+    guard let raw, raw > 0, raw <= 65535 else { return nil }
+    return raw
+}
+
+/**
+ * Which of the two endpoint channels yielded a port, and what it was.
+ *
+ * **The choosing is here and the reading is not**, which is the whole reason this function exists.
+ * `NEFilterSocketFlow` cannot be built in a unit test, so the downcast and the two property reads stay
+ * in `Provider.swift` where nothing can cover them — but everything decided *from* those values is
+ * decidable from the values alone, and that is the part with a test.
+ *
+ * **Order is load-bearing and so is the normalisation on both branches.** `remoteEndpoint` is
+ * deprecated and `remoteFlowEndpoint` replaces it, so the deprecated one is asked first while it still
+ * answers; and one of them reports an unconnected flow as `0` while the other omits it, so without
+ * normalising both the same condition reads as two different channels — which defeats the one thing
+ * the channel name in the log is for.
+ */
+func portFromChannels(hostEndpointPort: String?, flowEndpointPort: UInt16?) -> (port: Int?, how: String) {
+    if let s = hostEndpointPort, let p = normalisedPort(Int(s)) { return (p, "remoteEndpoint") }
+    if let f = flowEndpointPort, let p = normalisedPort(Int(f)) { return (p, "remoteFlowEndpoint") }
+    return (nil, "unreadable")
+}
+
+/**
+ * Whether a flow must be allowed even when its simulator is in the offline set.
+ *
+ * **Outbound UDP to port 53, and nothing else. Each of the three conditions is the reason, not a
+ * belt-and-braces check.**
+ *
+ * A dropped UDP flow gives its sender nothing — no error, no reset — so a resolver whose query is
+ * dropped waits out its own timeout. Measured on an offline simulator: a name already in the cache
+ * failed its connection in 6ms, while a name that had to be resolved took **25 seconds** in `curl`
+ * and left Safari on a white screen past 35. A tester reads that as the toggle not working. Allowing
+ * resolution turns every case into the first one: the name resolves, and the connection that follows
+ * is dropped at 6ms.
+ *
+ * **TCP is excluded because it never had the problem.** A dropped TCP flow fails in 6ms, measured —
+ * so opening TCP/53 would buy nothing and would leave a simulator reported offline holding a
+ * bidirectional connection to anything listening on 53, which is the shape a DNS tunnel takes.
+ *
+ * **Inbound is excluded because `remotePort` means the other end.** For an inbound flow that is the
+ * *sender's* port, so a peer sending from source port 53 would otherwise reach a device the tester
+ * was told is offline.
+ *
+ * **It is not the fidelity loss it looks like, but it is more than nothing** — see the note in
+ * `AGENTS.md`. The app under test keeps failing name resolution only where it uses POSIX
+ * `getaddrinfo`; `URLSession` resolves through Network.framework, which layer 2 does not reach, so
+ * that path now resolves and fails at connect instead.
+ *
+ * **Encrypted DNS is not covered.** DNS-over-TLS has a port of its own (853) and could be added;
+ * DNS-over-HTTPS shares 443 and could not. Neither is here because nothing has measured whether a
+ * simulator whose host is configured for either actually uses it.
+ */
+func passesRegardlessOfRule(remotePort: Int?, isUDP: Bool, isOutbound: Bool) -> Bool {
+    isOutbound && isUDP && remotePort == dnsPort
+}
+
+// MARK: - the audit token
+
+// `audit_token_t` is 8 x uint32 (auid, euid, egid, ruid, rgid, pid, asid, pidversion). The framework
+// hands it over as `Data`, so reading a field is an index into that run of words — and an index is
+// exactly the kind of thing that is right until someone counts wrong. Both functions are here rather
+// than in `Provider.swift` because a `Data` is something a test can build.
+
+/// The flow's process, or `nil` when the blob is not an audit token.
+///
+/// **The size guard is not defensive dressing.** Without it the read runs off whatever the framework
+/// handed over, and the pid that comes back attributes the flow to a process that has nothing to do
+/// with it — which is a device cut that nobody asked for, or a simulator that stays online.
+func pidFromAuditToken(_ data: Data) -> pid_t? {
+    guard data.count == MemoryLayout<audit_token_t>.size else { return nil }
+    return data.withUnsafeBytes { pid_t(bitPattern: $0.bindMemory(to: UInt32.self)[5]) }
+}
+
+/// The audit session, or `0` when the blob is not an audit token.
+///
+/// `0` rather than `nil` because the caller logs it and no session identifier is not an error worth
+/// a branch there.
+func asidFromToken(_ data: Data) -> UInt32 {
+    guard data.count == MemoryLayout<audit_token_t>.size else { return 0 }
+    return data.withUnsafeBytes { $0.bindMemory(to: UInt32.self)[6] }
+}
+
+// MARK: - process identity, and caching by it
+
+/**
+ * A process's pid and its **start time**.
+ *
+ * The start time is what makes a pid an identity. macOS reuses pids, and `launchd_sim`'s is reused
+ * readily — every simulator boot starts one, and a Mac that has booted a few dozen wraps the range.
+ * A cache keyed on the number alone therefore answers for a simulator that no longer exists, and the
+ * consequence is not a stale label: it is `handleNewFlow` cutting a device nobody asked to cut, with
+ * every log line agreeing that the udid was right. `(pid, start)` is unique for the life of the Mac.
+ *
+ * Not `pidversion` from the audit token, which is there at word 7 and would be the obvious source:
+ * it identifies the *flow's* process, and what has to be identified is its `launchd_sim` ancestor,
+ * which has no token here.
+ *
+ * `procSysctl` fills this in from `KERN_PROC` and stays in `Provider.swift` — the kernel read is the
+ * half a test cannot stand up. What a test can hold is that two different starts are two different
+ * devices, which is the whole point of the field: `UDIDCache` holds that for the dictionary's key,
+ * and `attributeWalk` holds it for what the caller hands in, which is a separate question.
+ */
+struct ProcIdentity: Hashable {
+    let pid: pid_t
+    let startSec: Int64
+    let startUsec: Int32
+}
+
+// launchd_sim outlives every flow of the simulator it hosts, so caching by its identity holds for the
+// whole boot and the per-flow cost stays at the parent walk. Only positive results are cached: a host
+// flow is rejected by the launchd_sim path check before any argument read, so it never pays for the
+// miss.
+//
+// **Keyed on the identity and not the pid**, for the reason on `ProcIdentity`. Entries are never
+// evicted, which is affordable because the key is a boot rather than a process — one per simulator
+// started while the provider has been running — and because it is *wrong* to evict on the same signal
+// that inserts: a pid whose entry is dropped is looked up again and re-cached from `KERN_PROCARGS2`,
+// which reads the CURRENT process's arguments. The stale answer would simply be re-derived. Keying it
+// away is the only fix that does not depend on noticing the exit.
+final class UDIDCache {
+    private var byRoot: [ProcIdentity: String] = [:]
+    private let lock = NSLock()
+
+    func lookup(_ root: ProcIdentity) -> String? {
+        lock.lock(); defer { lock.unlock() }
+        return byRoot[root]
+    }
+
+    func store(_ root: ProcIdentity, _ udid: String) {
+        lock.lock(); defer { lock.unlock() }
+        byRoot[root] = udid
+    }
+}
+
+// MARK: - what the heartbeat publishes
+
+/// How often the state file is refreshed with nothing happening — **1s while a device is offline, 5s
+/// otherwise.** The rate in force is written into the file, so a reader sizes its threshold from what
+/// it reads rather than from a constant it has to keep in sync with this one.
+///
+/// **A reader should allow at least three of these before calling the provider gone.** The numbers
+/// are measured rather than chosen: `SIGKILL` on the provider freezes the file immediately, launchd
+/// brings it back in about **5.8 seconds** (4 of 5 runs; one took 21.3), and the kernel passes that
+/// simulator's traffic for the whole of it — 23 to 27 requests per occurrence. At 5s pulses the
+/// threshold is 15s, so the commonest outage would be arithmetically invisible.
+///
+/// The fast rate is spent only where it buys something. An empty rule enforces nothing, so there is
+/// nothing to lose track of, and a file write every second for the life of the Mac would buy exactly
+/// that.
+func pulseSeconds(enforcing: Bool) -> TimeInterval { enforcing ? 1 : 5 }
+
+/**
+ * The per-device drop counts that belong in the next state file — **a prune, not a copy.**
+ *
+ * The difference is the whole value of the field. `filter` returns a new dictionary, so an earlier
+ * version left the counts in memory while publishing a pruned view: take a device offline, drop
+ * twelve flows, bring it back online, take it offline again, and the very next file said
+ * `{"A": 12}` before a single flow had been dropped in that episode. The agent reads that as
+ * "enforcement observed" — the exact lie the field exists to close, told with a number attached.
+ *
+ * So the caller assigns the result back. A count has to be per *episode*, not per provider lifetime,
+ * or "has it dropped anything since I took it offline" has no answer here.
+ *
+ * **That assignment is the load-bearing half and nothing here covers it.** It lives at
+ * `Provider.swift`'s `droppedByUDID = prunedDrops(droppedByUDID, rule: rule)`, which no test bundle
+ * compiles and no mutation reaches. Before this function was extracted the prune and the assignment
+ * were one statement, so breaking either broke both; they are separable now, and changing that line
+ * to a `let` restores the `{"A": 12}`-before-a-single-drop bug with every test green. Covering it
+ * needs a seam through `Heartbeat`, which is a larger change than this note.
+ *
+ * **Pruning too eagerly is the safe direction.** A transient unreadable `vendorConfiguration` would
+ * read as an empty rule and wipe the counts; they then restart from zero, and zero proves nothing by
+ * design. The other way round produces a false proof.
+ */
+func prunedDrops(_ counts: [String: Int], rule: Set<String>) -> [String: Int] {
+    counts.filter { rule.contains($0.key) }
+}
+
+// MARK: - what a flow turned out to be, and what that means
+
+/**
+ * What a flow's process turned out to be — **three outcomes, where the code used to have two**.
+ *
+ * `udidForPID` returned `String?`, and `nil` meant both "this is the Mac's own traffic" and "the
+ * walk failed". They were logged identically and counted not at all, so a simulator that should have
+ * been offline could reach the network because a `sysctl` returned an error, with the log calling it
+ * a host flow (#642).
+ *
+ * The walk that produces this is `attributeWalk`, at the bottom of this file; the three kernel reads
+ * it climbs through stay in `Provider.swift`. What is decidable from the answer itself is what it
+ * *means*, which is `decideFlow` below.
+ */
+enum Attribution: Equatable {
+    case simulator(String)
+    case host
+    case unresolved(String)
+}
+
+/// What `flowShape` reads off an `NEFilterFlow`. A value, so the verdict can be decided without one —
+/// `NEFilterSocketFlow` cannot be constructed in a test, which is the whole reason this type exists.
+struct FlowShape: Equatable {
+    let port: Int?
+    let how: String
+    let isUDP: Bool
+    let isOutbound: Bool
+}
+
+/// Which bucket a flow lands in for the heartbeat's counters.
+///
+/// **`idle` is its own case and does not fold into `host`.** Those flows were never attributed — the
+/// walk was skipped because the rule was empty. Counting them as host flows would put a number in the
+/// file meaning "we decided this belonged to the Mac", when nothing decided anything. The file is read
+/// to diagnose, and a diagnosis built on an invented decision is worse than a missing one.
+enum Outcome: Equatable { case simulator(dropped: Bool, udid: String), host, unresolved, idle, dns }
+
+/// The verdict and the bucket together, because they are one decision and were one `switch`.
+enum FlowVerdict: Equatable { case allow(Outcome), drop(Outcome) }
+
+/**
+ * **Whether this flow is allowed, and what it is counted as.**
+ *
+ * The half of `handleNewFlow` that does not touch the kernel. Everything it needs has already been
+ * read by the time it is called: the rule from `vendorConfiguration`, the attribution from the parent
+ * walk, and the endpoint from the flow.
+ *
+ * **It fails open on purpose, in two places.** An unresolved walk allows, because failing closed on a
+ * transient `sysctl` error would cut the user's own browser; and a `nil` attribution — which means the
+ * caller had no audit token — allows for the same reason. That is the gap `droppedByUDID` exists to
+ * close: a fresh state file proves the rule arrived, not that anything stopped, so a device whose
+ * flows consistently fail attribution keeps talking while the file stays correct.
+ *
+ * **Two branches here are unreachable from the only call site, deliberately.** `handleNewFlow`
+ * returns before calling this when the rule is empty, and the `Attribution` it passes is not
+ * optional — so `rule.isEmpty` and `attribution == nil` are fallbacks that make this function total,
+ * not paths production takes.
+ *
+ * The duplication is the price of a real thing: `Provider.swift`'s early return exists for the
+ * *walk*, not for the verdict. #685 measured 125,989 parent walks avoided by skipping attribution
+ * when nothing is offline, and moving that check in here would restore every one of them. So both
+ * sides keep it, the tests that grade these branches say what they are, and nothing here is allowed
+ * to read as if the shipping binary depended on it.
+ */
+/// `shape` is an `@autoclosure` so reading the endpoint stays on the branch that needs it — the
+/// original code computed it inside `if drop`, and folding the decision into one function must not
+/// quietly move that work onto every flow. Call sites read the same either way.
+func decideFlow(rule: Set<String>, attribution: Attribution?, shape: @autoclosure () -> FlowShape) -> FlowVerdict {
+    // The rule is read before the audit token, so the idle path touches neither.
+    if rule.isEmpty { return .allow(.idle) }
+    guard let attribution else { return .allow(.unresolved) }
+    switch attribution {
+    case .host: return .allow(.host)
+    case .unresolved: return .allow(.unresolved)
+    case .simulator(let udid):
+        guard rule.contains(udid) else { return .allow(.simulator(dropped: false, udid: udid)) }
+        let shape = shape()
+        if passesRegardlessOfRule(remotePort: shape.port, isUDP: shape.isUDP, isOutbound: shape.isOutbound) {
+            return .allow(.dns)
+        }
+        return .drop(.simulator(dropped: true, udid: udid))
+    }
+}
+
+// MARK: - the numbers the state file carries
+
+/**
+ * Everything the heartbeat counts, as a value.
+ *
+ * It was nine `private var`s on `Heartbeat`, which meant the arithmetic below could only be exercised
+ * by standing up the whole object — and that object writes a file as root. Pulled out so the counting
+ * is decidable on its own; the lock, the queue and the write stay where they were.
+ */
+struct FlowCounts: Equatable {
+    var simulator = 0
+    var host = 0
+    var unresolved = 0
+    var dropped = 0
+    var idle = 0
+    /// Flows an offline simulator was allowed anyway because they are name resolution.
+    ///
+    /// **A subset of `simulator`, like `dropped` is** — the first draft made it a sibling instead, so
+    /// `simulator − dropped` silently stopped meaning "allowed simulator flows" for anyone reading the
+    /// file. It stays out of `dropped` because that is the number the agent reads as evidence the
+    /// filter is enforcing, and a DNS allow is not that.
+    var dns = 0
+    /**
+     * Drops, per device (#654).
+     *
+     * **`unresolved` is not here and never can be.** Unresolved *means* the walk could not name an
+     * owner; bucketing it per device would invent the attribution whose absence defines it.
+     */
+    var droppedByUDID: [String: Int] = [:]
+    var walks = 0
+    var walkNanos: UInt64 = 0
+
+    /// Count one flow. **Only a walk that ran is a walk** — counting the `pid <= 0` short circuit
+    /// diluted the average with samples that measured nothing, so `walkNanos` is `nil` there.
+    mutating func record(_ outcome: Outcome, walkNanos: UInt64?) {
+        switch outcome {
+        case .simulator(let dropped, let udid):
+            simulator += 1
+            if dropped {
+                self.dropped += 1
+                droppedByUDID[udid, default: 0] += 1
+            }
+        case .host: host += 1
+        case .unresolved: unresolved += 1
+        case .idle: idle += 1
+        case .dns:
+            simulator += 1
+            dns += 1
+        }
+        if let nanos = walkNanos {
+            walks += 1
+            self.walkNanos += nanos
+        }
+    }
+
+    var averageWalkMicros: Double { walks > 0 ? Double(walkNanos) / Double(walks) / 1000.0 : 0 }
+}
+
+/**
+ * **The state file's body — the contract `SimulatorNetwork.ts` parses.**
+ *
+ * Hand-built rather than `Codable` because the field order is what a person reads first when
+ * diagnosing, and because two of the values are already JSON. What matters is that the shape is
+ * pinned somewhere: the agent picks fields out of this by name, and a rename here is a silent
+ * failure there.
+ *
+ * **`counts` is `inout` so the CALLER cannot forget the prune** — and that is all it buys. An earlier
+ * shape returned the pruned map for the caller to assign back, and a caller that dropped the
+ * assignment re-created the bug the prune exists to close: `{"A": 12}` published before a single flow
+ * had been dropped in that episode.
+ *
+ * **It does not stop this function serialising the wrong copy.** A review measured that: keep the
+ * assignment, serialise the pre-prune map, and all 68 tests pass while the file carries a count for a
+ * device that left the rule. The assignment and the serialisation are still two statements. What
+ * closes it is a test on the rendered JSON rather than on the retained map, which is why
+ * `testRenderingPrunesTheCountsItRenders` parses what comes back.
+ *
+ * The clock and the pid are parameters rather than reads, which is what makes this decidable at all.
+ */
+func renderState(_ counts: inout FlowCounts, rule: Set<String>, pid: Int32, at epochSeconds: Int) -> String {
+    // The rule arrives through `vendorConfiguration`, which this provider does not write and cannot
+    // constrain. Hand-quoting it made the whole file invalid JSON for any value carrying a quote or a
+    // backslash, and an unparseable file reads as "not enforcing" — the wrong answer, stated
+    // confidently, with nothing in the log to say why.
+    let rules = (try? JSONSerialization.data(withJSONObject: rule.sorted()))
+        .flatMap { String(data: $0, encoding: .utf8) } ?? "[]"
+    var json = "{\"at\":\(epochSeconds)"
+    // **Which provider wrote this.** A replacement leaves two of them briefly alive, both publishing
+    // to this one path, and only one is the session the kernel consults.
+    json += ",\"pid\":\(pid)"
+    json += ",\"pulseSeconds\":\(Int(pulseSeconds(enforcing: !rule.isEmpty)))"
+    json += ",\"rule\":\(rules)"
+    json += ",\"flows\":{\"simulator\":\(counts.simulator),\"host\":\(counts.host)"
+    json += ",\"unresolved\":\(counts.unresolved),\"dropped\":\(counts.dropped)"
+    json += ",\"idle\":\(counts.idle),\"dnsAllowed\":\(counts.dns)}"
+    counts.droppedByUDID = prunedDrops(counts.droppedByUDID, rule: rule)
+    let dropped = (try? JSONSerialization.data(withJSONObject: counts.droppedByUDID))
+        .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+    json += ",\"droppedByDevice\":\(dropped)"
+    json += ",\"attribution\":{\"walks\":\(counts.walks)"
+    json += ",\"avgMicros\":\(String(format: "%.1f", counts.averageWalkMicros))}}\n"
+    return json
+}
+
+// MARK: - when a write is due
+
+/// The per-flow rate limit. `force` is a rule change, which publishes whatever the clock says because
+/// a reader waiting on a confirmation should not wait out a rate limit for it.
+func writeIsDue(force: Bool, now: Double, lastWrite: Double) -> Bool {
+    force || now - lastWrite >= 1.0
+}
+
+/**
+ * The timer's rate limit. **One timer serves both rates** — it ticks at the fast one and this decides
+ * whether a write is due, so a rule change takes effect on the next tick with nothing to reschedule.
+ *
+ * The 0.25 is the timer's leeway: without it a 1s tick against a 1s threshold misses by a few
+ * milliseconds and writes every *other* tick, which would halve the rate this exists to set.
+ *
+ * **A rule this file has not published yet is due whatever the clock says.** `note` forces one on the
+ * same edge, which covers a Mac with traffic — but a Mac with no connections at all has only this
+ * timer, and the threshold it checks is the *idle* rate whenever the new rule is empty. Bringing the
+ * last device back online there published nothing for 4.75 seconds, and the agent's confirmation
+ * reads that silence as the rule not having landed.
+ */
+func pulseIsDue(unpublished: Bool, now: Double, lastWrite: Double, enforcing: Bool) -> Bool {
+    unpublished || now - lastWrite >= pulseSeconds(enforcing: enforcing) - 0.25
+}
+
+/**
+ * Where the state file is tried, in order — **and every one of them has to be readable by the agent**,
+ * which runs as the user while the provider runs as root.
+ *
+ * That rules out the obvious-looking ones. `NSHomeDirectory()` for root is `/var/root`, which is
+ * `drwxr-x---`, and root's `NSTemporaryDirectory()` is a `drwx------` folder under `/var/folders`. A
+ * file written there succeeds, logs a cheerful path, and is invisible to the only reader — worse than
+ * failing, because the loud "no writable path" line never fires.
+ *
+ * Measured: the first candidate works. `/tmp` has **not** been exercised, because the loop returns on
+ * the first success and never reaches it.
+ *
+ * **This list exists three times and nothing compiles all three** — here, `FILTER_STATE_FILES` in
+ * `packages/ios-agent/src/SimulatorNetwork.ts`, and again in `packages/cli/src/lib/net-filter.ts`.
+ * A Swift test can pin this copy and no more, so the cross-language half is a node check in
+ * `scripts/__tests__/` that reads all three and compares them. Without it the agent can be sent
+ * looking in a directory the provider never writes, with every suite green.
+ */
+let stateFileCandidates = [
+    "/Library/Application Support/tapflow",
+    "/tmp",
+]
+
+// MARK: - the parent walk
+
+/**
+ * The three live-kernel reads the walk needs, behind a value **so a test can stand in for them**.
+ *
+ * `sysctl(KERN_PROC)`, `proc_pidpath` and `KERN_PROCARGS2` cannot be stood up in a unit test, and
+ * they are also not where the decisions are. What is decidable is the shape of the climb: when to
+ * stop, what a stop means, which failures become `unresolved` rather than `host`, and when the cache
+ * spares an argument read. That is `attributeWalk`, and this is the seam it reaches the kernel
+ * through.
+ *
+ * **Closures rather than values, which matters here.** Three times in this file's history a read was
+ * turned into an argument and started being evaluated before the branch that needed it. A closure is
+ * not evaluated until it is called, so the walk still pays for exactly the levels it climbs.
+ */
+struct ProcessReader {
+    let parent: (pid_t) -> (ppid: pid_t, identity: ProcIdentity)?
+    let executablePath: (pid_t) -> String?
+    let arguments: (pid_t) -> String?
+}
+
+/// How far the climb goes before it gives up.
+///
+/// A process tree is a handful of levels deep; thirty-two is slack, not a limit anything reaches. It
+/// exists because a cycle — which the kernel should not produce and this code cannot rule out — would
+/// otherwise be an infinite loop **on the flow path**, taking the whole provider with it.
+let attributionWalkLimit = 32
+
+/**
+ * Which simulator a flow's process belongs to, or that it is the Mac's own, or that we could not tell.
+ *
+ * **Three outcomes, where the code used to have two.** `nil` meant both "the Mac's own traffic" and
+ * "the walk failed"; they were logged identically and counted not at all, so a simulator that should
+ * have been offline reached the network because a `sysctl` returned an error, with the log calling it
+ * a host flow (#642).
+ *
+ * The climb stops at `ppid <= 1` — a process whose parent is launchd, or the kernel. What that stop
+ * means is decided by the executable: every process inside a booted simulator descends from that
+ * simulator's `launchd_sim`, and the Mac's own top-level processes do not.
+ *
+ * **An unreadable path falls through on purpose.** The udid in the arguments is the stronger check,
+ * and losing a flow to a failed path read would be the wrong trade — it would report a simulator's
+ * traffic as the Mac's, which is the one direction that lets an offline device keep talking.
+ */
+func attributeWalk(_ pid: pid_t, reading read: ProcessReader, cache: UDIDCache) -> Attribution {
+    var current = pid
+    for _ in 0..<attributionWalkLimit {
+        guard let info = read.parent(current) else {
+            // The process is gone, or the kernel refused. Either way we do not know — and saying so
+            // is the whole point of this case existing separately from `.host`.
+            return .unresolved("sysctl failed at pid \(current)")
+        }
+        if info.ppid <= 1 {
+            if let path = read.executablePath(current), !path.hasSuffix("/launchd_sim") {
+                return .host   // a known top-level process that is not a simulator's launchd
+            }
+            // **Before the argument read, not after.** `KERN_PROCARGS2` is the expensive part of the
+            // walk and `launchd_sim` outlives every flow of its simulator, so the cache is what keeps
+            // the per-flow cost at the climb itself.
+            if let cached = cache.lookup(info.identity) { return .simulator(cached) }
+            guard let udid = read.arguments(current).flatMap(extractUDID) else {
+                return .unresolved("no UDID in the arguments of pid \(current)")
+            }
+            cache.store(info.identity, udid)
+            return .simulator(udid)
+        }
+        current = info.ppid
+    }
+    return .unresolved("parent chain did not terminate")
+}
