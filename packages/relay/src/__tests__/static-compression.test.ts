@@ -97,6 +97,18 @@ describe('static asset compression', () => {
     expect(res.body).not.toBe('BR_BYTES')
   })
 
+  it('reads the q parameter without regard to its case', async () => {
+    // RFC 9110 §5.6.6: parameter names are case-insensitive. `startsWith('q=')` missed `Q=`, fell
+    // through to the default weight of 1, and served brotli to a client that had refused it — the
+    // same defect as the wildcard case above, reached through a different door.
+    //
+    // **Mutation:** dropping `.toLowerCase()` from the parameter match must fail this test.
+    const res = await httpGet(port, '/assets/app.js', { 'Accept-Encoding': 'br;Q=0, gzip' })
+    expect(res.status).toBe(200)
+    expect(res.headers['content-encoding']).toBe('gzip')
+    expect(res.body).toBe('GZ_BYTES')
+  })
+
   it('sets Vary on an asset with no compressed sibling at all', async () => {
     // `Vary` is a cache-key declaration, not a description of this response: without it a shared
     // cache can store the uncompressed body and hand it to a client that accepts brotli. Deriving

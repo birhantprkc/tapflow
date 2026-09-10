@@ -2286,7 +2286,10 @@ export class RelayServer {
         const [name, ...params] = token.trim().split(';')
         const coding = name.trim().toLowerCase()
         if (coding !== codingName && coding !== '*') continue
-        const qParam = params.map((p) => p.trim()).find((p) => p.startsWith('q='))
+        // Lowercased because RFC 9110 §5.6.6 makes parameter names case-insensitive: `br;Q=0` was
+        // missed, fell through to the default weight of 1, and served brotli to a client that had
+        // refused it. The qvalue itself is numeric, so folding the whole token is safe.
+        const qParam = params.map((p) => p.trim().toLowerCase()).find((p) => p.startsWith('q='))
         const q = qParam ? Number(qParam.slice(2)) : 1
         if (Number.isNaN(q)) continue
         if (coding === '*') wildcard = Math.max(wildcard, q)
