@@ -429,6 +429,10 @@ export class SessionManager {
       agentName: group[0].agentName,
       platform: group[0].agentPlatform,
       resources: this.agentResources.get(group[0].agentSocket),
+      // `?? []` rather than passing the absence through: an agent that predates the field means
+      // "advertises nothing", and the viewer gates on membership. Leaving it undefined would make
+      // every consumer repeat the same fallback, and one of them would forget.
+      capabilities: group[0].agentCapabilities ?? [],
       devices: group.map((s) => ({
         id: s.deviceId,
         name: s.deviceName,

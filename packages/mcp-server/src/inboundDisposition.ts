@@ -85,6 +85,11 @@ export const INBOUND_DISPOSITION = {
     ignored: 'Same as `clipboard:data` — this package sends no `clipboard:write`, so a confirmation here answers '
       + 'nothing it asked for.',
   },
+  'network:state': {
+    ignored: 'No network tool here. Taking a device off the network is a manual-testing control a person '
+      + 'arms while watching the screen; an agent driving a flow has no use for a device it cannot reach.',
+  },
+  'network:error': { ignored: 'Same as `network:state` — nothing in this package sends a `network:set`.' },
   'keyboard:toggled': {
     ignored: 'Nothing here sends `input:keyboard:toggle`. It reports the on-screen keyboard\'s visibility, '
       + 'which is a viewer concern — this client has no surface to reflect it on.',

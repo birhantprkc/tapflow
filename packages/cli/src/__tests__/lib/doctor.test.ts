@@ -5,7 +5,7 @@ vi.mock('node:fs')
 vi.mock('node:net')
 
 import { execSync, spawnSync } from 'node:child_process'
-import { existsSync, readdirSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -13,6 +13,7 @@ import { runDoctorChecks } from '../../lib/doctor.js'
 
 const mockExistsSync = vi.mocked(existsSync)
 const mockReaddirSync = vi.mocked(readdirSync)
+const mockReadFileSync = vi.mocked(readFileSync)
 
 const mockExecSync = vi.mocked(execSync)
 const mockSpawnSync = vi.mocked(spawnSync)
@@ -411,5 +412,121 @@ describe('runDoctorChecks', () => {
     const sdk = result.android?.find((c) => c.label === 'Android SDK')
     expect(sdk?.ok).toBe(false)
     expect(sdk?.warn).toBeFalsy()
+  })
+})
+
+describe('Network hook symbols (#629)', () => {
+  // **Its own reset.** The `beforeEach` above lives inside the other `describe`, so without this the
+  // call records of every earlier test are still here — and the assertion that no developer tool ran
+  // read sixteen `xcodebuild -version` calls made by tests that had already finished.
+  beforeEach(() => {
+    vi.resetAllMocks()
+    // The common checks probe a port; without this they hang on an unmocked `createServer`.
+    mockPortAvailable(true)
+  })
+  afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs() })
+
+  // **`node:fs` is mocked in this file, so the check degrades to a warn unless a test sets it up.**
+  // That is why the suite stayed green while none of these branches existed: a passing count here was
+  // never evidence about this function.
+  const SDK = '/Xcode/iPhoneSimulator.sdk'
+  const symbolsCheck = (r: Awaited<ReturnType<typeof runDoctorChecks>>) =>
+    r.ios?.find((c) => c.label.startsWith('Network hook symbols'))
+
+  function withSdk(declared: string, opts: { stubs?: 'all' | 'none' | 'partial' } = {}) {
+    const stubs = opts.stubs ?? 'all'
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin')
+    mockExistsSync.mockImplementation((p) => {
+      const path = String(p)
+      if (path === '/Applications/Xcode.app') return true
+      // `partial` keeps only `libSystem.tbd`, which is the shape that matters: the three files
+      // partition the symbols, so a fraction of the evidence looks exactly like withdrawn symbols.
+      if (path.endsWith('Network.tbd') || path.endsWith('SystemConfiguration.tbd')) return stubs === 'all'
+      if (path.endsWith('.tbd')) return stubs !== 'none'
+      return true
+    })
+    mockExecSync.mockImplementation((cmd) => {
+      if (String(cmd).includes('--show-sdk-path')) return `${SDK}\n`
+      if (String(cmd).includes('simctl list devices')) return simctlNoneBooted
+      return ''
+    })
+    mockReadFileSync.mockReturnValue(declared as never)
+  }
+
+  // Nine, from two tables in `network-hook.m`. `hookSymbolsChecked.test.mjs` is what keeps this list
+  // and `HOOK_SYMBOLS` from drifting from the dylib; this one is about what `doctor` does with them.
+  const ALL = '_getaddrinfo _nw_path_get_status _nw_path_monitor_set_update_handler _nw_path_monitor_set_queue'
+    + ' _SCNetworkReachabilityGetFlags _SCNetworkReachabilitySetCallback _SCNetworkReachabilitySetDispatchQueue'
+    + ' _SCNetworkReachabilityScheduleWithRunLoop _SCNetworkReachabilityUnscheduleFromRunLoop'
+
+  it('passes when the SDK declares every symbol, and names the SDK it read', async () => {
+    withSdk(ALL)
+    const c = symbolsCheck(await runDoctorChecks('ios'))
+    expect(c?.ok).toBe(true)
+    // The label carries the SDK because the answer is about that SDK and not about the runtime a
+    // session will actually load — a Mac usually has several, older than its SDK.
+    expect(c?.label).toContain('iPhoneSimulator.sdk')
+  })
+
+  it('names the symbol that is missing, not merely that one is', async () => {
+    // "Something is missing" sends someone to read the `.tbd` files to find out which.
+    withSdk(ALL.replace('_nw_path_get_status ', ''))
+    const c = symbolsCheck(await runDoctorChecks('ios'))
+    expect(c?.ok).toBe(false)
+    expect(c?.warn, 'a session works without iOS network control, so this is not a failure').toBe(true)
+    expect(c?.detail).toContain('nw_path_get_status')
+    expect(c?.detail, 'a symbol that is present was reported as gone').not.toContain('getaddrinfo,')
+  })
+
+  it('names a reachability symbol too, which is the half that was added last', async () => {
+    // **Aimed at the new entries rather than at the mechanism.** The test above already proves the
+    // reporting works; what it cannot prove is that the three symbols added with the reachability set
+    // are in the list `doctor` reads. A list that silently lost them would pass everything above.
+    withSdk(ALL.replace('_SCNetworkReachabilitySetCallback ', ''))
+    const c = symbolsCheck(await runDoctorChecks('ios'))
+    expect(c?.ok).toBe(false)
+    expect(c?.detail).toContain('SCNetworkReachabilitySetCallback')
+    expect(c?.detail, 'a symbol that is present was reported as gone').not.toContain('SCNetworkReachabilityGetFlags,')
+  })
+
+  it('says it cannot tell when one stub file is absent, rather than that its symbols are gone', async () => {
+    // **One present, one missing — the case a `some` check waves through.** The two files partition
+    // the symbols, so reading only `libSystem.tbd` finds `getaddrinfo` and none of the three
+    // `nw_path_*`: a layout change would be reported as three withdrawn symbols, with a request to
+    // file a bug about it. Measured — with all stubs absent, `some` and `every` behave identically
+    // and the first version of this test could not tell them apart.
+    withSdk('_getaddrinfo only', { stubs: 'partial' })
+    const c = symbolsCheck(await runDoctorChecks('ios'))
+    expect(c?.ok).toBe(false)
+    expect(c?.detail, 'a missing stub file was reported as a missing symbol').not.toContain('does not declare')
+    expect(c?.detail).toContain('unknown')
+  })
+
+  it('survives a read that throws', async () => {
+    // Every probe in this file is a read wrapped in a catch, for the reason its header gives: an
+    // unwrapped throw here would reject the whole command and take the Android section with it.
+    withSdk(ALL)
+    mockReadFileSync.mockImplementation(() => { throw new Error('SDK replaced mid-update') })
+    const c = symbolsCheck(await runDoctorChecks('ios'))
+    expect(c?.ok).toBe(false)
+    expect(c?.warn).toBe(true)
+  })
+
+  it('does not run xcrun on a Mac with no Xcode', async () => {
+    // **The branch this check must stay out of.** Its own comment says why it exists: `xcrun` on a Mac
+    // without Xcode pops the Command Line Tools install dialog — out of a diagnostic command, at a
+    // designer or PM who ran `tapflow doctor` to find out why something does not work.
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin')
+    mockExistsSync.mockImplementation((p) => String(p) !== '/Applications/Xcode.app')
+    mockExecSync.mockImplementation(() => { throw new Error('xcrun must not be called here') })
+
+    const result = await runDoctorChecks('ios')
+    expect(symbolsCheck(result), 'the symbol check ran on the no-Xcode path').toBeUndefined()
+    // Scoped to `xcrun` rather than to every subprocess: the common checks shell out too, and it is
+    // the developer-tools binaries that pop the dialog.
+    const devTools = mockExecSync.mock.calls
+      .map((c) => String(c[0]))
+      .filter((cmd) => cmd.startsWith('xcrun') || cmd.startsWith('xcodebuild'))
+    expect(devTools, 'the no-Xcode path invoked developer tools').toEqual([])
   })
 })

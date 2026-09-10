@@ -1,6 +1,6 @@
 ---
 description: .work/archive(비공개)의 완료된 작업에서 공유 가치가 있는 설계 결정·근거를 골라 중복 없이 contributing/(공개 결정 기록)으로 승격한다. 작업 한 덩어리를 끝낸 뒤, 기여자가 "왜 이렇게 됐지"를 물을 결정이 archive에 쌓였을 때 사용.
-model: claude-opus-4-8
+model: claude-opus-5
 allowed-tools: Read, Write, Edit, Bash, Glob, Grep
 ---
 

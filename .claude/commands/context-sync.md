@@ -1,10 +1,15 @@
 ---
-description: 코드베이스와 AGENTS.md·INDEX.md·.work 문서들의 최신성·정합성을 검토하고 수정한다. 인터페이스·CLI·구조가 바뀐 뒤나 문서가 코드와 어긋났다고 의심될 때 사용.
-model: claude-opus-4-8
+description: 코드를 바꾸기 전에 읽는 컨텍스트 문서(AGENTS.md·INDEX.md·contributing/·.work/)가 코드베이스 현황과 맞는지 검토하고 수정한다. `docs/`(VitePress 사용자 문서)는 대상이 아니다 — 그쪽은 /write-docs. 인터페이스·CLI·구조가 바뀐 뒤나 문서가 코드와 어긋났다고 의심될 때 사용.
+model: claude-opus-5
 allowed-tools: Read, Edit, Bash, Glob, Grep
 ---
 
-코드베이스의 실제 상태와 context 문서들(AGENTS.md, INDEX.md, .work/)을 대조해 낡은 내용을 찾아내고 수정하는 문서 관리자 역할을 수행한다.
+코드베이스의 실제 상태와 **컨텍스트 문서**를 대조해 낡은 내용을 찾아내고 수정한다.
+
+컨텍스트 문서 = 코드를 바꾸기 전에 읽는 것들: `AGENTS.md`(루트·패키지), `INDEX.md`,
+`contributing/`(커밋된 결정 기록), `.work/`(로컬 작업 로그). **`docs/`는 여기 해당하지 않는다** —
+VitePress 사용자 문서는 `/write-docs`가 담당한다. 이름이 `doc-sync`였을 때 두 스킬이 같은 단어를
+쓰면서 서로 겹치지 않는 대상을 가리켰고, 그중 진짜 `docs/`는 한쪽뿐이었다.
 
 ## 절차
 
@@ -14,6 +19,7 @@ allowed-tools: Read, Edit, Bash, Glob, Grep
 - 루트 `AGENTS.md`
 - `packages/*/AGENTS.md` (각 패키지)
 - `INDEX.md` (존재하는 경우)
+- `contributing/*.md` — 커밋된 결정 기록. `.work/`의 공개 짝이고 같은 부패 위험을 진다.
 - `.work/*.md` (archive 제외, 진행 중인 파일만)
 
 ### 2. 코드 현황 파악
@@ -32,6 +38,9 @@ allowed-tools: Read, Edit, Bash, Glob, Grep
 
 #### 존재 정합성
 - 문서가 언급하는 파일·모듈이 실제로 존재하는가? (삭제된 파일 참조)
+- **커밋되는 문서가 gitignore된 `.work/` 안의 파일을 링크하지 않는가?** 기여자에게는 없는 경로라
+  링크가 끊긴 채로만 보인다. 디렉터리·규약 언급(`.work/reviews/<branch>.md`)은 해당 없고,
+  특정 파일을 가리키는 링크만 대상이다. 남길 값어치가 있으면 링크가 아니라 승격(`/promote-decision`)이다.
 - 문서가 언급하는 패키지·의존성이 `package.json`에 있는가?
 - 문서가 언급하는 메시지 타입이 `relay/types.ts`에 있는가?
 
@@ -44,6 +53,11 @@ allowed-tools: Read, Edit, Bash, Glob, Grep
 - 동일 개념이 여러 AGENTS.md에 다르게 설명되어 있지 않은가?
 - 한 패키지의 HOW가 다른 패키지의 HOW NOT과 충돌하지 않는가?
 - `relay/types.ts`와 `dashboard/lib/types.ts`의 타입이 문서 설명과 일치하는가?
+
+#### contributing/ 정합성
+- 새 기록이 `contributing/README.md` 표와 루트 `INDEX.md` 양쪽에 등재돼 있는가?
+  (`scripts/__tests__/contributingIndexed.test.mjs`가 강제하므로 보통은 여기서 걸리지 않는다.)
+- 표의 그룹 배치가 문서 내용과 맞는가 — 새 기록이 "일단 아무 그룹"에 들어가 있지 않은가?
 
 #### .work 상태 확인
 - `status: done`인데 archive로 이동하지 않은 파일이 있는가?

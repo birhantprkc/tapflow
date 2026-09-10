@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { PlatformError, ValidationError } from '@tapflowio/agent-core'
 import { AdbWrapper } from '../AdbWrapper'
 import type { AdbRunner } from '../adb'
@@ -236,6 +236,108 @@ describe('AdbWrapper', () => {
       const wrapper = new AdbWrapper(runner)
       await expect(wrapper.inputText('emulator-5554', '안녕')).rejects.toThrow(PlatformError)
       expect(runner.exec).not.toHaveBeenCalled()
+    })
+  })
+
+  // #607. Measured on Pixel_6_tapflow (API 34): `enable` exits 0, the state reads back as `enabled`
+  // with no delay, and `dumpsys connectivity` reports "Active default network: none" — so the OS is
+  // genuinely offline and the app's own connectivity callbacks fire without anything being faked.
+  describe('airplane mode', () => {
+    /** `cmd connectivity airplane-mode …` — set with an argument, read without one. */
+    const connectivity = (state: string, opts: { setExit?: Error } = {}) => {
+      const runner = mockRunner()
+      ;(runner.exec as ReturnType<typeof vi.fn>).mockImplementation(async (...args: string[]) => {
+        if (!args.includes('airplane-mode')) return ''
+        const isSet = args.includes('enable') || args.includes('disable')
+        if (isSet && opts.setExit) throw opts.setExit
+        return isSet ? '' : `${state}
+`
+      })
+      return runner
+    }
+
+    it('reads the state with no argument', async () => {
+      const runner = connectivity('enabled')
+      expect(await new AdbWrapper(runner).airplaneMode('emulator-5554')).toBe(true)
+      expect(runner.exec).toHaveBeenCalledWith(
+        '-s', 'emulator-5554', 'shell', 'cmd', 'connectivity', 'airplane-mode',
+      )
+    })
+
+    it('reads disabled as false', async () => {
+      expect(await new AdbWrapper(connectivity('disabled')).airplaneMode('emulator-5554')).toBe(false)
+    })
+
+    it('sets it on, then verifies by reading back', async () => {
+      const runner = connectivity('enabled')
+      await new AdbWrapper(runner).setAirplaneMode('emulator-5554', true)
+      expect(runner.exec).toHaveBeenCalledWith(
+        '-s', 'emulator-5554', 'shell', 'cmd', 'connectivity', 'airplane-mode', 'enable',
+      )
+      // The read-back is the point, not decoration — see the test below.
+      expect(runner.exec).toHaveBeenCalledWith(
+        '-s', 'emulator-5554', 'shell', 'cmd', 'connectivity', 'airplane-mode',
+      )
+    })
+
+    it('sets it off with disable', async () => {
+      const runner = connectivity('disabled')
+      await new AdbWrapper(runner).setAirplaneMode('emulator-5554', false)
+      expect(runner.exec).toHaveBeenCalledWith(
+        '-s', 'emulator-5554', 'shell', 'cmd', 'connectivity', 'airplane-mode', 'disable',
+      )
+    })
+
+    it('confirms the state when the read agrees', async () => {
+      const r = await new AdbWrapper(connectivity('enabled')).setAirplaneMode('emulator-5554', true)
+      expect(r).toEqual({ confirmed: true, offline: true })
+    })
+
+    // **The reason the read-back exists.** An image whose `cmd connectivity` does not know
+    // `airplane-mode` answers non-zero and throws from the write — but a command that succeeds and
+    // does nothing would otherwise be reported as a device taken offline. tapflow is a QA tool: a
+    // false "offline" gets signed off, and the bug it hides is filed against the app under test.
+    // `clearAppData` above guards the same shape for `pm clear`.
+    //
+    // **Reports rather than throws**, and `offline` is what the *device* said, not what was asked
+    // for. A caller that only learned "it failed" would have to guess which of the two states it is
+    // looking at, and guessing wrong here is exactly the false "offline" above.
+    it('reports unconfirmed, with the device state, when the write has no effect', async () => {
+      const r = await new AdbWrapper(connectivity('disabled')).setAirplaneMode('emulator-5554', true)
+      expect(r).toEqual({ confirmed: false, offline: false })
+    })
+
+    it('reports the same way when asked to turn it off and it stays on', async () => {
+      const r = await new AdbWrapper(connectivity('enabled')).setAirplaneMode('emulator-5554', false)
+      expect(r).toEqual({ confirmed: false, offline: true })
+    })
+
+    // **The write landed and the confirmation did not.** The device has probably already changed,
+    // so the requested value is the best evidence there is — falling back to the old one would
+    // report an offline device as online, the failure this whole path exists to prevent.
+    it('reports the requested state when the read-back itself fails', async () => {
+      const runner = mockRunner()
+      ;(runner.exec as ReturnType<typeof vi.fn>).mockImplementation(async (...args: string[]) => {
+        if (!args.includes('airplane-mode')) return ''
+        if (args.includes('enable') || args.includes('disable')) return ''   // write lands
+        return 'Connectivity service commands:'                             // read is unreadable
+      })
+      const r = await new AdbWrapper(runner).setAirplaneMode('emulator-5554', true)
+      expect(r).toEqual({ confirmed: false, offline: true })
+    })
+
+    // A write that fails is different: the device is unchanged, so the caller's own before-state is
+    // still true and there is nothing to report back — it throws.
+    it('throws when the write itself fails, leaving the caller its own state', async () => {
+      const runner = connectivity('disabled', { setExit: new Error('exit 255') })
+      await expect(new AdbWrapper(runner).setAirplaneMode('emulator-5554', true)).rejects.toThrow()
+    })
+
+    // Output tapflow cannot read is not "off" — reporting it as off is the same false negative the
+    // read-back exists to prevent, arrived at from the other side.
+    it('refuses to read an answer it does not recognise', async () => {
+      const runner = connectivity('Connectivity service commands:')   // the help text
+      await expect(new AdbWrapper(runner).airplaneMode('emulator-5554')).rejects.toThrow(PlatformError)
     })
   })
 

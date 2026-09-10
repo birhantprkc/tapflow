@@ -44,7 +44,7 @@ The cost of a broad name is ambiguity about what belongs — answered by the two
   - **`SchemaExact` ties each schema to its interface**, and refuses `z.custom<T>()` and a
     `const s: z.ZodType<T>` annotation by kind, because both produce `T` with no `any` for `IsAny` to
     catch and would compare `T` with itself.
-  - **The envelope is judged before the payload**, so a payload failure on one of the twelve correlated
+  - **The envelope is judged before the payload**, so a payload failure on one of the thirteen correlated
     browser requests comes back as `bad-payload` carrying the address and the correlator — which is what
     lets the relay answer it instead of dropping it. `ANSWERABLE` is that set; keeping it equal to the
     correlated request set is `scripts/__tests__/correlatedRequestsGated.test.mjs`'s job, because
@@ -406,7 +406,7 @@ verify `session.agentSocket === ws` before resolving, and these two do not.
 
 ## Browser-inbound messages are split by producer, and one union is shared
 
-A browser receives 29 message types. They come from two producers, and the difference matters to the
+A browser receives 31 message types. They come from two producers, and the difference matters to the
 **relay**, not to the consumer:
 
 - **`RelayToBrowser`** — the relay builds these itself, so `sendTo(socket, msg: RelayOutbound)` holds

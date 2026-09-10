@@ -1,0 +1,457 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		1EB5A4DC002983B05480C21D /* Provider.swift in Sources */ = {isa = PBXBuildFile; fileRef = C111B5C2387C9F74B90F719C /* Provider.swift */; };
+		59B2F5CC9B41626052345E26 /* NetFilterXPC.swift in Sources */ = {isa = PBXBuildFile; fileRef = C25D42D3D2B228816EA7E762 /* NetFilterXPC.swift */; };
+		6B305D9051451E0F1ED5823B /* RuleArguments.swift in Sources */ = {isa = PBXBuildFile; fileRef = D47C2445B92EBE27C4AED101 /* RuleArguments.swift */; };
+		9B983E07C8002FA5E682C120 /* TapflowNetFilterExt.systemextension in Embed System Extensions */ = {isa = PBXBuildFile; fileRef = 22203C023C48EF4D646161DC /* TapflowNetFilterExt.systemextension */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+		A487BFF363CBC58C4C27665F /* IPCListener.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2FD6F612A509F232BE16F3E /* IPCListener.swift */; };
+		B9EB98A005AB4F6624AB6336 /* NetFilterXPC.swift in Sources */ = {isa = PBXBuildFile; fileRef = C25D42D3D2B228816EA7E762 /* NetFilterXPC.swift */; };
+		EAAB4D2F265070333719C272 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF867352E788B5D199B6533A /* main.swift */; };
+		F5137EB914E55831493692EB /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0CDE906FDC73B161BA5D1C10 /* main.swift */; };
+		FAFD1C83502C8C97B77AB0B8 /* FlowIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = DB3E4F72359FE28D6623F356 /* FlowIdentity.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		BF7E102E9A435327A89D122F /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 0D903479A775082FB201734F /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = FAF50B1260728A889846EABF;
+			remoteInfo = TapflowNetFilterExt;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		23A708834D87FB0E9EF48A55 /* Embed System Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "$(SYSTEM_EXTENSIONS_FOLDER_PATH)";
+			dstSubfolderSpec = 16;
+			files = (
+				9B983E07C8002FA5E682C120 /* TapflowNetFilterExt.systemextension in Embed System Extensions */,
+			);
+			name = "Embed System Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
+/* Begin PBXFileReference section */
+		01A0098D2D8600D6F92C13BD /* Host.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Host.entitlements; sourceTree = "<group>"; };
+		0CDE906FDC73B161BA5D1C10 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
+		189934EAACC140743935067B /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		1F9E7D610872A4CD7579C356 /* Extension.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Extension.entitlements; sourceTree = "<group>"; };
+		22203C023C48EF4D646161DC /* TapflowNetFilterExt.systemextension */ = {isa = PBXFileReference; explicitFileType = "wrapper.system-extension"; includeInIndex = 0; path = TapflowNetFilterExt.systemextension; sourceTree = BUILT_PRODUCTS_DIR; };
+		808EF47BAC51B82D543F132F /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		C111B5C2387C9F74B90F719C /* Provider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Provider.swift; sourceTree = "<group>"; };
+		C25D42D3D2B228816EA7E762 /* NetFilterXPC.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetFilterXPC.swift; sourceTree = "<group>"; };
+		D2FD6F612A509F232BE16F3E /* IPCListener.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IPCListener.swift; sourceTree = "<group>"; };
+		D47C2445B92EBE27C4AED101 /* RuleArguments.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuleArguments.swift; sourceTree = "<group>"; };
+		DB3E4F72359FE28D6623F356 /* FlowIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FlowIdentity.swift; sourceTree = "<group>"; };
+		FEA8687E0D5DB021E56B18B1 /* TapflowNetFilter.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = TapflowNetFilter.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		FF867352E788B5D199B6533A /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXGroup section */
+		6DEB8D1CCB59783F5A6092C0 /* Host */ = {
+			isa = PBXGroup;
+			children = (
+				01A0098D2D8600D6F92C13BD /* Host.entitlements */,
+				808EF47BAC51B82D543F132F /* Info.plist */,
+				0CDE906FDC73B161BA5D1C10 /* main.swift */,
+				D47C2445B92EBE27C4AED101 /* RuleArguments.swift */,
+			);
+			path = Host;
+			sourceTree = "<group>";
+		};
+		97977EF52AB4E7501C0BB58E /* Shared */ = {
+			isa = PBXGroup;
+			children = (
+				C25D42D3D2B228816EA7E762 /* NetFilterXPC.swift */,
+			);
+			path = Shared;
+			sourceTree = "<group>";
+		};
+		9D4F49B162A123E2B19CEA24 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				FEA8687E0D5DB021E56B18B1 /* TapflowNetFilter.app */,
+				22203C023C48EF4D646161DC /* TapflowNetFilterExt.systemextension */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		EAD76FBE577A46C4949F8CA2 /* Extension */ = {
+			isa = PBXGroup;
+			children = (
+				1F9E7D610872A4CD7579C356 /* Extension.entitlements */,
+				DB3E4F72359FE28D6623F356 /* FlowIdentity.swift */,
+				189934EAACC140743935067B /* Info.plist */,
+				D2FD6F612A509F232BE16F3E /* IPCListener.swift */,
+				FF867352E788B5D199B6533A /* main.swift */,
+				C111B5C2387C9F74B90F719C /* Provider.swift */,
+			);
+			path = Extension;
+			sourceTree = "<group>";
+		};
+		ECB29164E971B09B1CB895BC = {
+			isa = PBXGroup;
+			children = (
+				EAD76FBE577A46C4949F8CA2 /* Extension */,
+				6DEB8D1CCB59783F5A6092C0 /* Host */,
+				97977EF52AB4E7501C0BB58E /* Shared */,
+				9D4F49B162A123E2B19CEA24 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		3354B79A702CAACC7090928E /* TapflowNetFilter */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 4AA357771E1E0EA101271E9C /* Build configuration list for PBXNativeTarget "TapflowNetFilter" */;
+			buildPhases = (
+				68CFDFEFECD0C8E20380EA1E /* Sources */,
+				23A708834D87FB0E9EF48A55 /* Embed System Extensions */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				6B0541B614E161F58880A296 /* PBXTargetDependency */,
+			);
+			name = TapflowNetFilter;
+			packageProductDependencies = (
+			);
+			productName = TapflowNetFilter;
+			productReference = FEA8687E0D5DB021E56B18B1 /* TapflowNetFilter.app */;
+			productType = "com.apple.product-type.application";
+		};
+		FAF50B1260728A889846EABF /* TapflowNetFilterExt */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = DE0AEAD341C5519D7E9C0F65 /* Build configuration list for PBXNativeTarget "TapflowNetFilterExt" */;
+			buildPhases = (
+				705CD6168845A15A225FA7B6 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = TapflowNetFilterExt;
+			packageProductDependencies = (
+			);
+			productName = TapflowNetFilterExt;
+			productReference = 22203C023C48EF4D646161DC /* TapflowNetFilterExt.systemextension */;
+			productType = "com.apple.product-type.system-extension";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		0D903479A775082FB201734F /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+					3354B79A702CAACC7090928E = {
+						DevelopmentTeam = 6FBS3QP893;
+						ProvisioningStyle = Manual;
+					};
+					FAF50B1260728A889846EABF = {
+						DevelopmentTeam = 6FBS3QP893;
+						ProvisioningStyle = Manual;
+					};
+				};
+			};
+			buildConfigurationList = 6383794F568F621C12BFBD9B /* Build configuration list for PBXProject "TapflowNetFilter" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = ECB29164E971B09B1CB895BC;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 9D4F49B162A123E2B19CEA24 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				3354B79A702CAACC7090928E /* TapflowNetFilter */,
+				FAF50B1260728A889846EABF /* TapflowNetFilterExt */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXSourcesBuildPhase section */
+		68CFDFEFECD0C8E20380EA1E /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B9EB98A005AB4F6624AB6336 /* NetFilterXPC.swift in Sources */,
+				6B305D9051451E0F1ED5823B /* RuleArguments.swift in Sources */,
+				F5137EB914E55831493692EB /* main.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		705CD6168845A15A225FA7B6 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				FAFD1C83502C8C97B77AB0B8 /* FlowIdentity.swift in Sources */,
+				A487BFF363CBC58C4C27665F /* IPCListener.swift in Sources */,
+				59B2F5CC9B41626052345E26 /* NetFilterXPC.swift in Sources */,
+				1EB5A4DC002983B05480C21D /* Provider.swift in Sources */,
+				EAAB4D2F265070333719C272 /* main.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		6B0541B614E161F58880A296 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = FAF50B1260728A889846EABF /* TapflowNetFilterExt */;
+			targetProxy = BF7E102E9A435327A89D122F /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		208003444BAC98E3FB5C838B /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = Extension/Extension.entitlements;
+				COMBINE_HIDPI_IMAGES = YES;
+				INFOPLIST_FILE = Extension/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = dev.tapflow.netfilter.ext;
+				PRODUCT_NAME = dev.tapflow.netfilter.ext;
+				PROVISIONING_PROFILE_SPECIFIER = "Tapflow Net Filter Ext DevID";
+				SDKROOT = macosx;
+			};
+			name = Debug;
+		};
+		24089D36CEBF9094AD3DE045 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = Host/Host.entitlements;
+				COMBINE_HIDPI_IMAGES = YES;
+				INFOPLIST_FILE = Host/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = dev.tapflow.netfilter;
+				PROVISIONING_PROFILE_SPECIFIER = "Tapflow Net Filter Host DevID";
+				SDKROOT = macosx;
+			};
+			name = Release;
+		};
+		3F9E9A8A99EE60AB52BAC575 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = Host/Host.entitlements;
+				COMBINE_HIDPI_IMAGES = YES;
+				INFOPLIST_FILE = Host/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = dev.tapflow.netfilter;
+				PROVISIONING_PROFILE_SPECIFIER = "Tapflow Net Filter Host DevID";
+				SDKROOT = macosx;
+			};
+			name = Debug;
+		};
+		5B45B66BC5DE84F6EFB9FDB6 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = Extension/Extension.entitlements;
+				COMBINE_HIDPI_IMAGES = YES;
+				INFOPLIST_FILE = Extension/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = dev.tapflow.netfilter.ext;
+				PRODUCT_NAME = dev.tapflow.netfilter.ext;
+				PROVISIONING_PROFILE_SPECIFIER = "Tapflow Net Filter Ext DevID";
+				SDKROOT = macosx;
+			};
+			name = Release;
+		};
+		8D12450DAB3A3A657124B7D7 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_IDENTITY = "Developer ID Application";
+				CODE_SIGN_STYLE = Manual;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = 6FBS3QP893;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 15.0;
+				MARKETING_VERSION = 1.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5;
+			};
+			name = Debug;
+		};
+		E3B6D09E8D513D4178CAE250 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_IDENTITY = "Developer ID Application";
+				CODE_SIGN_STYLE = Manual;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = 6FBS3QP893;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 15.0;
+				MARKETING_VERSION = 1.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		4AA357771E1E0EA101271E9C /* Build configuration list for PBXNativeTarget "TapflowNetFilter" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				3F9E9A8A99EE60AB52BAC575 /* Debug */,
+				24089D36CEBF9094AD3DE045 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		6383794F568F621C12BFBD9B /* Build configuration list for PBXProject "TapflowNetFilter" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				8D12450DAB3A3A657124B7D7 /* Debug */,
+				E3B6D09E8D513D4178CAE250 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		DE0AEAD341C5519D7E9C0F65 /* Build configuration list for PBXNativeTarget "TapflowNetFilterExt" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				208003444BAC98E3FB5C838B /* Debug */,
+				5B45B66BC5DE84F6EFB9FDB6 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 0D903479A775082FB201734F /* Project object */;
+}

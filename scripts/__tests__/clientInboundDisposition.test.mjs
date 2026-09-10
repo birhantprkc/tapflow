@@ -115,7 +115,7 @@ describe('both clients declare what they do with every browser-inbound message',
       it('parsed every entry — 29, the browser-inbound surface', () => {
         // The compiler already refuses a missing key, so this is the parser's honesty check rather than
         // the coverage one. Pinned from the measurement: 29 as of #542, which added `device:shutdown-error`.
-        expect(table.size).toBe(29)
+        expect(table.size).toBe(31)
       })
 
       it('every entry is exactly one of settles / does / ignored', () => {

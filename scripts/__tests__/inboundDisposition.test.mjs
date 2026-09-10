@@ -35,6 +35,7 @@ const FILES = {
   SessionList: 'packages/dashboard/components/SessionList.tsx',
   useAgentSession: 'packages/dashboard/hooks/useAgentSession.ts',
   useClipboardBridge: 'packages/dashboard/hooks/useClipboardBridge.ts',
+  useNetworkControl: 'packages/dashboard/hooks/useNetworkControl.ts',
   MacResources: 'packages/dashboard/src/pages/MacResources.tsx',
 }
 
@@ -65,7 +66,7 @@ describe('inbound disposition', () => {
     // The compiler already refuses a missing key, so this is not the coverage assertion; it is the
     // parser's own honesty check. Without it the two assertions below pass on an empty map.
     // 29 as of #542: `device:shutdown-error` gave the shutdown pair the failure member it lacked.
-    expect(table_entries.size).toBe(29)
+    expect(table_entries.size).toBe(31)
   })
 
   it('every entry is exactly one of at / ignored', () => {
@@ -142,7 +143,7 @@ describe('inbound disposition', () => {
     expect(thin).toEqual([])
   })
 
-  it('the six ignored messages are the ones the measurement found', () => {
+  it('the ignored messages are the ones a decision put there', () => {
     // Pinned so that "handled" quietly becoming "ignored" is a decision someone makes here, in a diff,
     // rather than a branch that got deleted. Growing this list is allowed; doing it silently is not.
     const ignored = [...table_entries].filter(([, v]) => /\bignored:/.test(v)).map(([t]) => t).sort()
@@ -152,6 +153,9 @@ describe('inbound disposition', () => {
       'input:done',
       'input:type-done',
       'input:type-error',
+      // `network:state` and `network:error` were here, with a note saying they would become `at:`
+      // when the viewer landed. It has, and they did — which is the whole point of writing "no branch
+      // yet" down rather than leaving an absent branch to speak for itself.
       'session:deviceInfo',
     ])
   })

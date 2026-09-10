@@ -1,4 +1,4 @@
-import { RelayServer, initDb, config, createCertProvider, startTlsBackgroundTasks, buildCorsOrigins, proxyWithoutPublicUrlWarning } from '@tapflowio/relay'
+import { RelayServer, initDb, config, createCertProvider, startTlsBackgroundTasks, buildCorsOrigins, proxyWithoutPublicUrlWarning, resolveRelayDisplayHost } from '@tapflowio/relay'
 import { AgentRegistry } from '@tapflowio/agent-core'
 import fs from 'fs'
 import path from 'path'
@@ -49,15 +49,16 @@ export async function cmdStart(opts: StartOptions): Promise<void> {
   // LAN HTTPS for the secure-context (Smooth/WebCodecs) path — same wiring as `tapflow relay start`.
   let tls: { cert: string; key: string } | undefined
   let certProvider: ReturnType<typeof createCertProvider> | null = null
+  let displayHost = 'localhost'
   if (config.tls) {
     certProvider = createCertProvider(config.tls, { dataDir: config.local.dataDir })
     const material = await certProvider.ensureCert()
     tls = { cert: material.cert, key: material.key }
+    displayHost = resolveRelayDisplayHost(config.tls, material.cert, warn)
   }
   const httpScheme = tls ? 'https' : 'http'
   const wsScheme = tls ? 'wss' : 'ws'
-  // A domain-bound cert won't validate against localhost, so advertise the cert's domain to teammates.
-  const displayHost = config.tls?.mode === 'byo-api-token' ? config.tls.domain : 'localhost'
+  const agentConnectHost = tls && displayHost.toLowerCase() !== 'localhost' ? displayHost : '<this-ip>'
   // The co-located agent connects over localhost; the agent accepts the domain cert there (see isLocalhostWss).
   const relayUrl = `${wsScheme}://localhost:${RELAY_PORT}`
 
@@ -83,7 +84,7 @@ export async function cmdStart(opts: StartOptions): Promise<void> {
       `Relay  : ${httpScheme}://${displayHost}:${RELAY_PORT}`,
       ...(publicUrl ? [`Public : ${publicUrl}`] : []),
       'No agent environment detected — running relay only.',
-      `Connect a Mac agent:  tapflow agent start --relay ${wsScheme}://<this-ip>:${RELAY_PORT} --token <agent-PAT>`,
+      `Connect a Mac agent:  tapflow agent start --relay ${wsScheme}://${agentConnectHost}:${RELAY_PORT} --token <agent-PAT>`,
       `  Issue an 'agent'-scope token in the dashboard (Settings → Tokens).`,
       'Press Ctrl+C to stop.',
     ])

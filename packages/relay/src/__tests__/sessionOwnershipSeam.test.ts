@@ -43,11 +43,12 @@ describe('session ownership seam', () => {
 
   afterEach(async () => { await server.stop() })
 
-  async function registerAgent(name: string, devices = 1) {
+  async function registerAgent(name: string, devices = 1, capabilities?: string[]) {
     const agent = new WebSocket(`ws://localhost:${port}`)
     await waitForOpen(agent)
     agent.send(JSON.stringify({
       type: 'agent:register', platform: 'ios', agentName: name,
+      ...(capabilities ? { capabilities } : {}),
       devices: Array.from({ length: devices }, (_, i) => ({
         id: `dev${i}`, name: `iPhone ${i}`, platform: 'ios', status: 'shutdown',
       })),
@@ -329,6 +330,200 @@ describe('session ownership seam', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  // ── #614: the network condition a re-joining viewer cannot otherwise learn ──────────────────
+  //
+  // Sibling of the IDR block above and deliberately not folded into it: the two share a window size
+  // and not a policy. IDR drops inside the window because the next periodic keyframe repairs it;
+  // nothing re-produces a `network:state`, so this one coalesces onto the trailing edge.
+
+  /** What an agent must announce for the relay to ask it anything about the network. */
+  const NETWORK_AGENT = ['clipboard', 'network-control']
+
+  /** Collect `network:request-state` frames arriving at an agent socket. */
+  function watchRequests(agent: WebSocket) {
+    const seen: unknown[] = []
+    agent.on('message', (d) => {
+      const m = JSON.parse(String(d)) as { type?: string }
+      if (m.type === 'network:request-state') seen.push(m)
+    })
+    return seen
+  }
+
+  type NetworkRequester = (() => void) & { dispose(): void }
+
+  function networkRequesterFor(sessionId: string): NetworkRequester | undefined {
+    const requesters = (server as unknown as {
+      networkStateRequesters: Map<string, NetworkRequester>
+    }).networkStateRequesters
+    return requesters.get(sessionId)
+  }
+
+  /** Join, then make the agent announce a ready device — `readySent` is what gates the request.
+   *
+   *  Deliberately stops before re-joining: the request rides the *replay* to a viewer that comes back,
+   *  and on the first join there is nothing to replay yet. Each test re-joins for itself, so the
+   *  control below is the same shape as the positives with one thing removed. */
+  async function joinReady(sessionId: string, agent: WebSocket, browser: WebSocket) {
+    browser.send(JSON.stringify({ type: 'session:start', sessionId }))
+    await waitForType(browser, 'session:joined')
+    agent.send(JSON.stringify({ type: 'device:ready', sessionId, payload: { deviceId: 'dev0' } }))
+    await waitForType(browser, 'device:ready')
+  }
+
+  async function rejoin(sessionId: string, browser: WebSocket) {
+    browser.send(JSON.stringify({ type: 'session:start', sessionId }))
+    await waitForType(browser, 'session:joined')
+  }
+
+  it('asks the agent what the device network is doing when a viewer re-joins', async () => {
+    const { agent, sessionIds } = await registerAgent('seam-net-1', 1, NETWORK_AGENT)
+    const sessionId = sessionIds[0]!
+    const seen = watchRequests(agent)
+    const browser = await browserSocket()
+    await joinReady(sessionId, agent, browser)
+    await rejoin(sessionId, browser)
+    await barrier(agent)
+
+    expect(seen).toHaveLength(1)
+    expect(seen[0]).toEqual({ type: 'network:request-state', sessionId })
+
+    agent.close(); browser.close()
+  })
+
+  it('asks nothing for a session that never announced a ready device', async () => {
+    // The control. Without it the assertion above passes on a relay that fires the request from the
+    // top of `handleSessionStart`, which would reach a session with no device at all.
+    //
+    // Mutation: hoisting the call out of the `readySent` block fails here.
+    const { agent, sessionIds } = await registerAgent('seam-net-2', 1, NETWORK_AGENT)
+    const sessionId = sessionIds[0]!
+    const seen = watchRequests(agent)
+    const browser = await browserSocket()
+    await rejoin(sessionId, browser)
+    await rejoin(sessionId, browser)
+    // `session:joined` is the trigger's echo, so the barrier is a round trip on the agent's own socket
+    // — anything the relay sent it before answering the join has reached this end by the time it
+    // returns.
+    await barrier(agent)
+
+    expect(seen).toHaveLength(0)
+
+    agent.close(); browser.close()
+  })
+
+  it('keeps one requester across repeated re-joins', async () => {
+    // The deterministic helper test owns the timing policy. This integration seam proves each re-join
+    // reaches the same per-session requester, rather than silently making a new budget each time.
+    const { agent, sessionIds } = await registerAgent('seam-net-3', 1, NETWORK_AGENT)
+    const sessionId = sessionIds[0]!
+    const browser = await browserSocket()
+    await joinReady(sessionId, agent, browser)
+    await rejoin(sessionId, browser)
+
+    const requester = networkRequesterFor(sessionId)
+    expect(requester).toBeDefined()
+
+    const reached = vi.fn()
+    const requesters = (server as unknown as {
+      networkStateRequesters: Map<string, NetworkRequester>
+    }).networkStateRequesters
+    const observedRequester = Object.assign(
+      () => { reached(); requester!() },
+      { dispose: () => requester!.dispose() },
+    )
+    requesters.set(sessionId, observedRequester)
+
+    await rejoin(sessionId, browser)
+    await rejoin(sessionId, browser)
+    expect(reached).toHaveBeenCalledTimes(2)
+    expect(networkRequesterFor(sessionId)).toBe(observedRequester)
+
+    agent.close(); browser.close()
+  })
+
+  it('disposes a requester when the session is forgotten', async () => {
+    // The helper's unit test proves that dispose cancels a pending trailing edge. This seam holds the
+    // RelayServer half: every session-removal path must invoke that method before dropping the map entry.
+    const { agent, sessionIds } = await registerAgent('seam-net-4', 1, NETWORK_AGENT)
+    const sessionId = sessionIds[0]!
+    const browser = await browserSocket()
+    await joinReady(sessionId, agent, browser)
+    await rejoin(sessionId, browser)
+
+    const requester = networkRequesterFor(sessionId)
+    expect(requester).toBeDefined()
+    const dispose = vi.spyOn(requester!, 'dispose')
+
+    browser.send(JSON.stringify({ type: 'session:leave', sessionId }))
+    await barrier(browser)
+
+    expect(dispose).toHaveBeenCalledTimes(1)
+    expect(networkRequesterFor(sessionId)).toBeUndefined()
+
+    agent.close(); browser.close()
+  })
+
+  it('asks nothing of an agent that never claimed it could do this', async () => {
+    // The control the capability gate needs, and the reason it is not the IDR's blind send: an agent
+    // without the code never answers, and an unanswered ask is indistinguishable from a failed read —
+    // so a viewer arming a deadline would report "could not read" on every re-join for an agent that
+    // already said, in `session:joined`, that it cannot. iOS is that agent until #607's last slice.
+    //
+    // Registered exactly like the positives with the one string removed, so what differs is the claim
+    // and not the setup. Mutation: dropping the `agentCapabilities` check fires here.
+    const { agent, sessionIds } = await registerAgent('seam-net-nocap', 1, ['clipboard'])
+    const sessionId = sessionIds[0]!
+    const seen = watchRequests(agent)
+    const browser = await browserSocket()
+    await joinReady(sessionId, agent, browser)
+    await rejoin(sessionId, browser)
+    await barrier(agent)
+
+    expect(seen).toHaveLength(0)
+
+    agent.close(); browser.close()
+  })
+
+  it('serves a viewer that comes back on a new socket after a dirty disconnect', async () => {
+    // **The path this whole slice exists for, and the one the other tests do not walk.** They re-join
+    // on the same live socket (#515), which `session:leave` and a clean close both clear. A browser
+    // that dies in its close handler runs `clearBrowser` and *not* `forgetSessionState`, so its
+    // requester survives into the re-join. That is the ordinary case: a laptop lid, a Wi-Fi blip, a
+    // tab reload. The deterministic helper test owns the timing policy; this one pins that lifecycle.
+    const { agent, sessionIds } = await registerAgent('seam-net-blip', 1, NETWORK_AGENT)
+    const sessionId = sessionIds[0]!
+    const first = await browserSocket('same-client')
+    await joinReady(sessionId, agent, first)
+    await rejoin(sessionId, first)
+
+    const requesters = (server as unknown as {
+      networkStateRequesters: Map<string, NetworkRequester>
+    }).networkStateRequesters
+    const retained: NetworkRequester = Object.assign(vi.fn(), { dispose: vi.fn() })
+    requesters.set(sessionId, retained)
+
+    // Dies without saying goodbye. `terminate` rather than `close` so no close frame is negotiated.
+    const closed = new Promise<void>((resolve) => first.once('close', resolve))
+    first.terminate()
+    await closed
+
+    const second = await browserSocket('same-client')
+    await rejoin(sessionId, second)
+
+    expect(retained).toHaveBeenCalledTimes(1)
+    expect(networkRequesterFor(sessionId)).toBe(retained)
+
+    // The reply belongs to whichever socket holds the session when it arrives, not the one that armed
+    // the requester before the dirty disconnect.
+    agent.send(JSON.stringify({
+      type: 'network:state', sessionId, payload: { offline: true, available: true },
+    }))
+    const state = await waitForType(second, 'network:state')
+    expect(state['payload']).toEqual({ offline: true, available: true })
+
+    agent.close(); second.close()
   })
 
   async function runIdrCount() {

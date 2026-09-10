@@ -30,5 +30,5 @@ The sole contract that platform implementations (ios-agent, android-agent) depen
 
 ## Directory Structure
 
-- `src/` — `DeviceAgent` interface, `AgentRegistry`, shared types, `createLogger` (leveled console logger)
+- `src/` — `DeviceAgent` interface, `AgentRegistry`, shared types, `createLogger` (leveled console logger), and the **optional capability interface** an agent implements alongside `DeviceAgent` rather than inside it: `NetworkControlCapability`. (`AudioStreamCapability` was the other and is gone — nothing implemented it, nothing detected it, and audio ships through the agents' own per-session streamers.) That split is what the first **HOW** rule and the second **HOW NOT** rule require between them — the root [AGENTS.md](../../AGENTS.md)'s ISP entry names the principle. A platform that cannot do one of these implements neither the interface nor a stub, and advertises the capability string instead.
 - `src/utils/` — shared implementation utils for ios-agent, android-agent, and the relay; not exposed through the `DeviceAgent` interface. Non-obvious ones in `stream.ts`: `disableNagle` (TCP_NODELAY — kills the ~40ms Nagle/delayed-ACK stall on small LAN writes) and `createKeyframeAwareSender` (drop-to-keyframe — why: relay AGENTS.md § Compound).

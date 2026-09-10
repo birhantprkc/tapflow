@@ -198,6 +198,7 @@ const EXPECTED_REPLY = {
   'input:type': 'input:type-error',
   'clipboard:read': 'clipboard:error',
   'clipboard:write': 'clipboard:error',
+  'network:set': 'network:error',
   'input:touch:end': 'input:error',
   'input:pinch:end': 'input:error',
   'input:key': 'input:error',

@@ -20,6 +20,7 @@ import {
   prodReachableNames,
   prodVersionChanges,
 } from './prod-reach.mjs'
+import { proseLines } from './lib/prose-lines.mjs'
 
 // Inverted on purpose: everything under `packages/` ships unless named here. Listing what
 // ships instead left a NEW published package invisible to the gate — the case that most needs
@@ -272,34 +273,6 @@ function shipsBetween(file, before, after) {
  *
  * Exported for the tests.
  */
-/**
- * The lines of a markdown body that are actually prose: no fenced block, no indented block, and
- * — with `skipFrontmatter` — nothing inside the leading `---` delimiters.
- *
- * Shared on purpose. Both markers below are switches that turn a gate OFF, so a body that merely
- * QUOTES one must not trip it; every doc in this repo prints both verbatim. `extractReason` had
- * this guard and `parseBackfills` was written without it, which is exactly the kind of drift a
- * second copy invites.
- */
-function* proseLines(body, { skipFrontmatter = false } = {}) {
-  const lines = body.split(/\r?\n/)
-  let i = 0
-  if (skipFrontmatter && lines[0]?.trim() === '---') {
-    i = 1
-    while (i < lines.length && lines[i].trim() !== '---') i++
-    i++                                            // step past the closing delimiter
-  }
-  let fenced = false
-  for (; i < lines.length; i++) {
-    const raw = lines[i]
-    const line = raw.trim()
-    if (/^(```|~~~)/.test(line)) { fenced = !fenced; continue }
-    if (fenced) continue
-    if (/^ {4,}|^\t/.test(raw)) continue           // indented code block
-    yield { raw, line }
-  }
-}
-
 export function extractReason(body) {
   for (const { line } of proseLines(body)) {
     const m = line.match(/^<!--\s*no-changeset:\s*(.*?)\s*-->$/)
@@ -380,8 +353,7 @@ export function ignoredOnlyChangesets(files, ignored, read) {
  *
  *     <!-- changelog: internal — protocol typing, nothing a user can observe -->
  *
- * The reason is required for the same purpose it is required on `no-changeset`: skipping is a decision
- * somebody wrote down, not something that happens by forgetting.
+ * The marker itself records the decision; prose after `internal` is optional.
  *
  * **What this covers, stated rather than implied:** a branch that touches a changeset — added, amended or
  * renamed — and ships published source. It does **not** cover a branch with no changeset (its
@@ -394,7 +366,12 @@ export function ignoredOnlyChangesets(files, ignored, read) {
  * can need it for one of them.
  */
 export function changelogEntryOwed(files, read) {
-  return files.filter((f) => !/^<!--\s*changelog:\s*internal\b.*-->$/m.test(read(f)))
+  return files.filter((f) => {
+    for (const { line } of proseLines(read(f), { skipFrontmatter: true })) {
+      if (/^<!--\s*changelog:\s*internal\b.*-->$/.test(line)) return false
+    }
+    return true
+  })
 }
 
 function main() {

@@ -152,9 +152,10 @@ const ALLOWED = new Set([
   // shape instead of by name — and the cost is worth paying, since name matching missed two of five
   // copies of one shape when this work was planned.
   'agent-core:UIElementFrame',
-  // `AgentSession` in mcp-server and flow-runner is `SessionInfo` minus `resources` — a narrower view
-  // for a client that does not read them, not a copy. Its field set differs so it never matches;
-  // listed so the next reader knows it was considered rather than missed.
+  // `AgentSession` in mcp-server and flow-runner is `SessionInfo` minus `resources` and
+  // `capabilities` — a narrower view for a client that reads neither, not a copy. Its field set
+  // differs so it never matches; listed so the next reader knows it was considered rather than
+  // missed.
 ])
 
 describe('wire payload types are declared once, in @tapflowio/protocol', () => {
@@ -169,7 +170,7 @@ describe('wire payload types are declared once, in @tapflowio/protocol', () => {
     expect(count('ChromeData')).toBe(11)
     expect(count('ChromeButton')).toBe(13)
     expect(count('DeviceSummary')).toBe(7)
-    expect(count('SessionInfo')).toBe(4)
+    expect(count('SessionInfo')).toBe(5)
   })
 
   it('guards the payload shapes by name, so a shape cannot silently leave', () => {

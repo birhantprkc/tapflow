@@ -72,6 +72,11 @@ export const INBOUND_DISPOSITION = {
     ignored: 'Same as `clipboard:data` — no clipboard step exists, so a confirmation here answers nothing a flow '
       + 'asked for.',
   },
+  'network:state': {
+    ignored: 'No network step exists. A flow that took its own device offline would be asserting against a '
+      + 'device it can no longer drive, and the step after it could not report why it failed.',
+  },
+  'network:error': { ignored: 'Same as `network:state` — nothing here sends a `network:set`.' },
   'keyboard:toggled': {
     ignored: 'Nothing here sends `input:keyboard:toggle`. `inputText` drives a paste handshake and does not '
       + 'depend on the on-screen keyboard\'s visibility.',

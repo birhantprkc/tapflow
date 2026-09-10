@@ -93,6 +93,19 @@ export interface SessionInfo {
   agentName?: string
   platform?: string
   resources?: AgentResources
+  /** What this agent implements, mirroring `AgentRegister.capabilities`.
+   *
+   *  It rides the listing as well as `session:joined` because the viewer has to gate controls
+   *  **while picking a device**, which happens before any session exists to join — Full reset
+   *  (#447) is armed on the picker, not inside the session.
+   *
+   *  **Required, like every other producer field.** There is one producer (`SessionManager.list()`)
+   *  and it always emits an array, so no relay can send the listing without it — and none ever
+   *  will, because the dashboard ships inside the relay package (`files: [public]`) and cannot skew
+   *  from it. An agent that predates the capability is expressed by `[]`, not by the key being
+   *  absent; the door already defaults it that way (`validate/index.ts`). Optional here would
+   *  describe a frame nobody sends and hand every consumer a `?.` to carry for good. */
+  capabilities: string[]
   devices: DeviceSummary[]
 }
 
@@ -214,6 +227,34 @@ export interface StreamRequestIdr {
   sessionId: string
 }
 
+/**
+ * Ask the agent to re-read the device's network condition and report it (#614).
+ *
+ * Shaped after `stream:request-idr` above, and sent from the same place — the relay's re-join replay
+ * block. A viewer that reconnects has no other way to learn whether the device is offline:
+ * `NetworkState` is agent-produced, and the relay cannot cache it the way it caches `chromeData` and
+ * `deviceInfo`. Those become false only on a reboot or an agent death, both of which the relay
+ * observes; airplane mode changes when someone types `adb` in a terminal, and on iOS the state is
+ * "is the injected dylib armed", which is not a thing the relay can observe at all. **The relay caches
+ * only what it can invalidate**, so this asks rather than remembers.
+ *
+ * Uncorrelated, like its neighbour: the answer is a `network:state` with no `requestId`, which is the
+ * fourth unsolicited producer that message declares. An agent that predates this ignores the frame.
+ *
+ * **That silence is not self-healing, unlike an ignored IDR request.** A dropped keyframe request is
+ * repaired by the next periodic one; nothing re-produces a network state. The read path also has no
+ * error message, because there is no requester to address one to — so a viewer will have to arm its
+ * own deadline after joining and say it could not read. **No viewer does yet**: the control is not on
+ * screen, and this describes the obligation the one that lands takes on, not behaviour that exists.
+ *
+ * The relay sends this only to an agent whose `capabilities` include `network-control`, so the
+ * silence never means "this agent does not implement it" — that is already known before the ask.
+ */
+export interface NetworkRequestState {
+  type: 'network:request-state'
+  sessionId: string
+}
+
 // Optional, unlike every other correlated request, because **the relay originates this one** — the
 // idle timer at `RelayServer.ts` shuts a device down with no browser behind it. This is one interface
 // serving both `BrowserToRelay` and `RelayToAgent`, so required here would be unsatisfiable there.
@@ -269,6 +310,7 @@ export interface UiTreeRequest {
 export type RelayToAgent =
   | AgentRegistered
   | StreamRequestIdr
+  | NetworkRequestState
   | DeviceShutdown
   | AppInstallToAgent
   | AppLaunchToAgent
@@ -531,6 +573,214 @@ export interface ClipboardError extends SessionScoped {
   payload?: ClipboardErrorPayload
 }
 
+/**
+ * Why network control is not available on this device right now.
+ *
+ * A closed set for the same reason `InputErrorReason` is one: **a member exists per thing a
+ * consumer must do differently**, not per internal state an agent can be in. Each of these makes a
+ * different sentence on screen, which is what a single `available: boolean` could not do — and a
+ * machine field nobody branches on is the shape this package forbids by name (#492).
+ */
+export type NetworkUnavailableReason =
+  /**
+   * The agent cannot reach inside this app, and knows it rather than suspecting it.
+   *
+   * Two observables, and they are different enough to name: the hooks were delivered and **proved by
+   * trying** that they did not take, or the library that would be injected is **not on the machine
+   * at all** — a damaged install, whose remedy is to reinstall rather than to retry. Both are
+   * settled facts, which is what separates this member from `state-unconfirmed`.
+   *
+   * It was written for the first alone, and the second arrived with #653. The distinction that
+   * matters to a consumer is unchanged — the control is dead and no button helps — so they stay one
+   * member; but "the agent proved this by trying" was the whole doc, and it is false of the second.
+   *
+   * **A third arrived with #629, and it is not a settled fact — it is a deadline.** An app was
+   * launched and wrote no verdict at all within the time one takes to write it, which happens when
+   * the library is present and armed and dyld still does not load it: a wrong architecture, a runtime
+   * change, a signature. Nothing was observed, and the member is chosen *because* nothing was.
+   *
+   * That makes it weaker than the two above and it is still this member rather than
+   * `state-unconfirmed`, because the consumer's move is the same and `state-unconfirmed` promises that
+   * looking again helps. Looking again does not help here; launching a different app might. Anyone
+   * treating this member as proof should read this paragraph first.
+   */
+  | 'hooks-not-installed'
+  /** Nothing was delivered for this boot — a re-arm that did not happen, or a device booted outside
+   *  tapflow. Distinct from the above because the answer is to reboot the device, not to give up. */
+  | 'not-armed'
+  /**
+   * Delivered, and waiting for an app to run under it.
+   *
+   * **The member that separates the two above from a device that is simply not being used yet.** On
+   * iOS the injection is put in place when the device boots but can only name its target when an app
+   * is launched, so between those two moments nothing has been proved either way — and both of the
+   * reasons above would say something false about it. `not-armed` prescribes a reboot, which fixes
+   * nothing here; `hooks-not-installed` says the agent cannot reach inside the app, which nothing has
+   * established while the launch is still in flight.
+   *
+   * What a consumer must do differently: **say what is missing, and do not draw the control as
+   * dead.** Traffic-level control does work in this state — a device taken offline here really does
+   * stop reaching the network — so a rendering that reads "tapflow cannot change this" is wrong in
+   * the one direction that makes a working control look broken. What it cannot do is make the app
+   * *believe* it, which is the half the sentence has to carry.
+   */
+  | 'awaiting-app'
+  /**
+   * **The device was asked, answered, and had not moved.** The write was accepted, the read-back
+   * *succeeded*, and it still reported the old value — a command that exists, is accepted, and does
+   * nothing. That observable is the whole of what this member claims (#618). Every other Android
+   * failure — a write that threw, a read that threw, an answer that did not parse — is
+   * `state-unconfirmed`.
+   *
+   * **What it does not claim is a cause, and an earlier draft of this paragraph did.** It said this
+   * was an image whose `cmd connectivity` predates the API, which is the obvious reading and is
+   * contradicted by the repo's own measurement: such an image *throws from the write*
+   * (`AdbWrapper.test.ts`), so it arrives as `state-unconfirmed` and never here. What does land here
+   * — a policy restriction, a rule that has not taken effect yet — has not been measured, so nothing
+   * is known about whether it lasts.
+   *
+   * So a consumer must **not** render this as permanent, and should keep offering the retry. The
+   * distinction this member buys is that the device answered, which is worth a different sentence
+   * from "we could not tell"; it does not buy a verdict about the future.
+   */
+  | 'unsupported-device'
+  /**
+   * **A read that could not be confirmed, so what the device is doing is not known.** On Android that
+   * is an adb round trip failing: the write threw, or the read threw, or the answer did not parse. On
+   * iOS it is the injected library's verdict file arriving in a shape that says nothing — caught
+   * mid-write, since the library writes it non-atomically, but equally a file that parses and carries
+   * no verdict. What it is *not* is a verdict about the device — the same shape is produced by a
+   * device mid-reboot, a dropped adb connection, an image too old to have the command, and a read
+   * that landed on a file with nothing in it to read.
+   *
+   * It said **Android only** while Android was the only producer. That was a note about who emits it,
+   * not about what it means, and iOS reaching the same state did not change the meaning.
+   *
+   * What a consumer must do differently: **keep the position it already had and let the tester
+   * retry.** `offline` here is the freshest evidence there is rather than a fresh reading — the last
+   * confirmed value when a read failed, and the *requested* value when a write landed and could not be
+   * read back, because a write that was accepted is better evidence than the state before it. What it
+   * is never is `false` as a stand-in for "unknown": a device that went offline and then became
+   * unreadable is still offline.
+   *
+   * It must not be rendered as an unknown *position*. That was tried and reverted: from `unknown`
+   * every click asks for offline again, so nothing can bring the device back online through the UI.
+   * Say the uncertainty some other way — the position is not the channel for it.
+   */
+  | 'state-unconfirmed'
+  /**
+   * **iOS only.** This Mac cannot take a device offline: the host-side network filter is not
+   * installed, not approved, or not enforcing. Nothing about the device is wrong, and no device is
+   * affected — the request was **refused**, so no layer was applied.
+   *
+   * **`offline` is still the device's real state, and it is not always `false`.** An earlier draft of
+   * this paragraph said it was, which would have been a promise the producer does not keep: not being
+   * able to *change* the rule is not the same as nothing enforcing it, so a device that was already
+   * offline is refused and stays offline. A consumer that drew `false` from this doc would render a
+   * device it cannot reach as online — the exact direction the whole member exists to prevent.
+   *
+   * Refusing is the point. Two of the three layers work without the filter and neither blocks
+   * traffic: the app would be told it is offline while its requests keep succeeding, which is
+   * precisely the sign-off a tester must never be able to give.
+   *
+   * What a consumer must do differently: **send the tester to the setup steps**, which happen on the
+   * agent Mac and need administrator rights. A retry from a browser cannot fix this and must not be
+   * offered.
+   */
+  | 'filter-unavailable'
+  /**
+   * **iOS only.** The device *was* offline and enforcement stopped underneath it — the filter died,
+   * was disabled, or came back holding a different rule. The layers have been taken down, so
+   * `offline` is `false` and the device is back on the network.
+   *
+   * **This one invalidates work that already happened**, which no other member does. Between the
+   * moment enforcement stopped and the moment it was noticed, requests the tester believed were
+   * blocked were succeeding. Measured on the reference Mac: a provider killed and restarted by
+   * launchd leaves the kernel passing traffic for about 5.8 seconds, and 23–27 requests got through
+   * per occurrence.
+   *
+   * So it is the one reason that has to interrupt rather than re-colour: a tester who has already
+   * signed off has to be told that what they saw did not hold. It arrives unsolicited — there is no
+   * request it answers.
+   */
+  | 'enforcement-lost'
+
+/**
+ * What the device's network is doing, and whether tapflow can steer it.
+ *
+ * **Answers `network:set`, and is also sent unsolicited** — on `device:ready`, when a boot re-arms
+ * the injection, when a session's condition is cleared, and in reply to `network:request-state` from
+ * a viewer's re-join (#614). So `requestId` is optional, and absent
+ * means *this frame is not the answer to a request* — never "an old agent" (see
+ * 「Lifecycle correlation」 in AGENTS.md for what that optionality costs and who pays it).
+ *
+ * `available` is separate from the `network-control` capability on purpose. The capability is
+ * announced once at `agent:register`, before any device is booted or app launched, so it can only
+ * ever mean "this agent has the code". Whether the hooks actually took is per device and per app,
+ * and this is where that lives.
+ */
+/** The device is off the network right now, or is not, and tapflow can still change that. */
+export interface NetworkSteerable {
+  /**
+   * Whether the device is off the network **right now**, as far as the agent can tell.
+   *
+   * **This describes the device, not the request.** A device taken offline and then left
+   * unsteerable is *still offline* — see `NetworkNotSteerable`, which carries the same field for
+   * that reason. Reporting `false` as a stand-in for "the request did not land" would render
+   * "online" over a device whose app can reach nothing, sending every bug filed after it to the app
+   * under test.
+   */
+  offline: boolean
+  available: true
+}
+
+/** Whatever the device's network is doing, tapflow cannot steer it — and this is why.
+ *
+ * **Not "no longer".** That wording assumed the control had been working and stopped, which two
+ * members contradict: `filter-unavailable` is a Mac that never could, and `state-unconfirmed` is one
+ * adb round trip that failed under a control that is otherwise fine. */
+export interface NetworkNotSteerable {
+  /** Still the device's real state. See `NetworkSteerable.offline`. */
+  offline: boolean
+  available: false
+  /** **Required here, and absent from the steerable member.** Written as prose first — "set when
+   *  `available` is false, and only then" — which a single interface could not enforce: it admitted
+   *  both `{ available: false }` with nothing to show a tester and `{ available: true, reason }`.
+   *  Each value makes a different sentence on screen, so an unavailable state with no reason is a
+   *  control that says it does not work and cannot say why. */
+  reason: NetworkUnavailableReason
+}
+
+/**
+ * What a device's network is doing and whether tapflow can steer it.
+ *
+ * **Two named members rather than one interface with an optional field**, so the invariant is the
+ * compiler's rather than a comment's. **And named rather than inline** so `agent-core` can
+ * re-export instead of declaring a second copy — the rule `types.ts` already follows for
+ * `ClipboardErrorPayload` — and so `scripts/__tests__/protocolPayloadTypes.test.mjs` can see the
+ * shapes. That check reads named declarations; an inline payload is invisible to it, and so is a
+ * union alias whose members are anonymous.
+ */
+export type NetworkStatePayload = NetworkSteerable | NetworkNotSteerable
+
+export interface NetworkState {
+  type: 'network:state'
+  /** Inline rather than `extends SessionScoped`: that base is the **failure** family — every member
+   *  of it carries a `message` and `protocolMessageNames` enforces that. This one reports state, not
+   *  a failure, so it names its session the way `clipboard:data` does. */
+  sessionId: string
+  requestId?: string
+  payload: NetworkStatePayload
+}
+
+/** A `network:set` that could not be dispatched or that the device refused. Relay-or-agent, because
+ *  the relay answers one it cannot deliver rather than letting the viewer's control sit armed. */
+export interface NetworkError extends SessionScoped {
+  type: 'network:error'
+  message: string
+  requestId: string
+}
+
 export type RelayOrAgentToBrowser =
   | SessionChrome
   | SessionDeviceInfo
@@ -546,6 +796,7 @@ export type RelayOrAgentToBrowser =
   // `mcp-server` and `flow-runner` key on the `input:type-*` pair and ignore an `input:error` entirely,
   // which is why widening `TERMINAL_INPUT_TYPES` was never the fix for it.
   | InputTypeError
+  | NetworkError
   | ClipboardError
 
 export interface AgentsListed {
@@ -810,6 +1061,7 @@ export type AgentToBrowser =
   | InputTypeDone
   | KeyboardToggled
   | ClipboardData
+  | NetworkState
   | ClipboardWriteDone
 
 /** Everything a browser socket can receive, whoever produced it. This is what a viewer's message
@@ -1069,6 +1321,20 @@ export type ClipboardRequest =
   | ClipboardRead
   | ClipboardWrite
 
+/**
+ * Take the device under test off the network, or put it back (#607).
+ *
+ * `requestId` is **required**, like the clipboard pair: every producer is a viewer acting on a
+ * control, so an id is always available, and requiring it makes a missing one a compile error
+ * rather than a reply the viewer drops.
+ */
+export interface NetworkSet {
+  type: 'network:set'
+  sessionId: string
+  requestId: string
+  payload: { offline: boolean }
+}
+
 
 export interface AgentsList {
   type: 'agents:list'
@@ -1266,4 +1532,5 @@ export type BrowserToRelay =
   | InputRotate
   | InputKeyboardToggle
   | ClipboardRequest
+  | NetworkSet
 

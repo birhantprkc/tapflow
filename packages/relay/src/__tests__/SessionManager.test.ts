@@ -435,6 +435,27 @@ describe('SessionManager', () => {
       expect(listed[0].devices[0]!.sessionId).toBe(idA)
     })
 
+    // #447: the viewer has to gate Full reset *while picking a device*, which is before any
+    // `session:joined` exists — so `capabilities` has to ride the listing, not only the join.
+    it('carries the agent capabilities so the picker can gate on them', () => {
+      const sm = new SessionManager()
+      sm.create(
+        mockSocket(),
+        [{ id: 'd1', name: 'X', platform: 'ios', status: 'shutdown' }],
+        'MyMac', 'ios', undefined, ['clipboard', 'full-reset'],
+      )
+      expect(sm.list('asker', () => true)[0].capabilities).toEqual(['clipboard', 'full-reset'])
+    })
+
+    // An agent that predates the field registers without it. `[]` — "advertises nothing" — is the
+    // answer that makes the viewer hide the control, which is the whole point of gating on a
+    // capability rather than on the platform string: an old iOS agent cannot do Full reset either.
+    it('reports an agent that advertised nothing as empty, not undefined', () => {
+      const sm = new SessionManager()
+      sm.create(mockSocket(), [{ id: 'd1', name: 'X', platform: 'ios', status: 'shutdown' }], 'MyMac')
+      expect(sm.list('asker', () => true)[0].capabilities).toEqual([])
+    })
+
     it('is busy for someone else, and not for the holder', () => {
       // `busy` used to be `browserSocket !== null` — "someone holds it", which is a different question
       // from "you cannot have it". `QASession` renders `disabled={isBusy}`, so a tester whose socket

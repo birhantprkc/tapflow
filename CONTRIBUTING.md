@@ -1,6 +1,6 @@
 # Contributing to tapflow
 
-> Common rules: [AGENTS.md](./AGENTS.md) | Full index: [INDEX.md](./INDEX.md)
+> Common rules: [AGENTS.md](./AGENTS.md) | Full index: [INDEX.md](./INDEX.md) | Community standards: [Code of Conduct](./CODE_OF_CONDUCT.md)
 
 ## Development setup
 
@@ -45,6 +45,14 @@ docs/             ← documentation site (VitePress)
 playground/       ← local integration test environment
 ```
 
+## The two READMEs are one document
+
+`packages/cli/README.md` is what npm renders for the published CLI, and it is `README.md` with two URL
+prefixes absolutised — npm resolves neither repo-relative paths nor `blob/main` links. **Edit both, and
+write the cli copy's links absolute.** `scripts/__tests__/readmeSync.test.mjs` compares them and runs in
+CI; a block that genuinely has to differ goes between `<!-- readme-sync:exempt <reason> -->` markers in
+both files. Today one does: GitHub renders `<video>` and npm does not.
+
 ## Claiming an issue
 
 Issues are not assigned in advance. Open a draft PR or post your findings on the issue and it is yours — a comment reserving one does not hold it, so no issue sits blocked behind an intent that never lands.
@@ -57,6 +65,7 @@ Check the labels before you start: `requires: macOS` means the change runs again
 - Always create new branches from `origin/main` (`git fetch origin && git checkout -b feature/{topic} origin/main`). Your local `main` may be behind.
 - **Backfilling a changeset for an earlier PR?** Name what it covers, on its own line: `Backfills: #413` (quoting it inside a code block does not count, same as the marker below). The release-time audit judges each merge on its own, so without that line it keeps reporting the original merge as a gap for the rest of the cycle — and the only way to tell a real gap from a filled one is to match them up by hand.
 - **Every PR that changes published source needs a changeset.** The CI `changeset` job fails otherwise, and it is a required status check on the `protect-main` ruleset, so that failure blocks the merge; `pnpm changeset:check` runs the same check locally against committed work. Skip it only by stating why in the PR body, on a line of its own: `<!-- no-changeset: reason -->` (quoting it inside a code block does not count). A comment-only or test-only change is a fair skip — the point is that it is a decision, not an omission.
+- **A dashboard change names `@tapflowio/relay`**, never `@tapflowio/dashboard`. The dashboard is private and `ignore`d in `.changeset/config.json`, so `pnpm changeset` does not offer it in the package list at all. It is built into the relay's `public/` and ships inside that package, which is where its release note belongs. Naming both in one changeset is rejected by `changeset version`.
 - Releases are driven by [changesets](https://github.com/changesets/changesets). A tag push triggers GitHub Actions → npm publish + GitHub Release. Merging to main does not auto-publish.
 - Never publish with raw `npm publish` — it does not rewrite `workspace:*` dependencies between packages; the changesets → pnpm publish path does.
 
@@ -102,6 +111,14 @@ v0.3.0-rc.1      # release candidate, no new features
 
 **On every PR that touches user-facing behaviour**, add an entry under `## [Unreleased]`. Keep entries concise — one line per item, starting with a backtick-quoted identifier when applicable.
 
+**Not every changeset earns an entry.** Protocol typing and internal refactors would fill the file with noise a self-hoster cannot act on, so a changeset opts out from inside its own body, on a line of its own:
+
+```markdown
+<!-- changelog: internal — protocol typing, nothing a user can observe -->
+```
+
+The marker goes in the changeset rather than the PR body, because it classifies that one change — a PR carrying two changesets can need it for only one of them. `internal` is matched literally, so `<!-- changelog: docs-only -->` does not opt out. The CI `changeset` job checks only that `CHANGELOG.md` was touched; no check can tell whether the prose matches the diff.
+
 **Breaking Changes** go in `### Breaking Changes` with a one-line description and a `Migrate:` hint. For complex migrations, a separate `MIGRATION.md` may be added, but prefer keeping it inline unless the guide exceeds ~10 lines.
 
 **At release time**, rename `## [Unreleased]` to `## [x.y.z] - YYYY-MM-DD`, add a fresh empty `## [Unreleased]` above it, and append a comparison link at the bottom:
@@ -117,6 +134,12 @@ All packages:
 
 ```sh
 pnpm test
+```
+
+Repository scripts suite (cross-package static checks):
+
+```sh
+pnpm test:scripts
 ```
 
 A specific package:
@@ -137,6 +160,8 @@ Run the tests for any changed packages before opening a PR. New behavior must be
 **No flaky tests.** Use `vi.useFakeTimers()` instead of `setTimeout` waits. Fix `Date.now()` with `vi.setSystemTime()`. Clean up global state in `beforeEach`/`afterEach`. Never depend on real network ports or file paths.
 
 **Mock only at system boundaries** — real network, OS calls, external processes. Internal module interactions run against real code.
+
+**Name the mutation.** For every test, know the production change that would make it fail. For a test asserting that something does *not* happen, make that change and watch it fail before you commit — an absence assertion passes when nothing happens at all, so a green run on its own is not evidence it holds anything. [test-and-guard-coverage.md](./contributing/test-and-guard-coverage.md) collects the cases where that went wrong, including a guard bypassed four ways with the whole suite green.
 
 ## Technical internals
 

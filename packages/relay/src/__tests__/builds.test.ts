@@ -2,21 +2,8 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from
 import fs from 'fs'
 import path from 'path'
 import os from 'os'
-import { spawnSync } from 'child_process'
 import { initDb, getDb, closeDb } from '../db'
-
-// ── fixture helpers ────────────────────────────────────────────────────────
-
-function makeTestZip(tmpDir: string, appName: string, plistXml: string): string {
-  const appDir = path.join(tmpDir, `${appName}.app`)
-  fs.mkdirSync(appDir, { recursive: true })
-  fs.writeFileSync(path.join(appDir, 'Info.plist'), plistXml)
-  // minimal binary placeholder (Mach-O magic is not needed for zip structure test)
-  fs.writeFileSync(path.join(appDir, appName), Buffer.from([0xcf, 0xfa, 0xed, 0xfe]))
-  const zipPath = path.join(tmpDir, `${appName}.app.zip`)
-  spawnSync('zip', ['-r', zipPath, `${appName}.app`], { cwd: tmpDir })
-  return zipPath
-}
+import { makeAppZip, writeZipFixture } from './helpers/zipFixture'
 
 const XML_PLIST = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -37,7 +24,7 @@ describe('Migration 004: apps/builds split', () => {
     initDb(path.join(tmpDir, 'test.db'))
   })
 
-  afterAll(() => { fs.rmSync(tmpDir, { recursive: true }) })
+  afterAll(() => { closeDb(); fs.rmSync(tmpDir, { recursive: true }) })
 
   it('apps table has bundle_id_key, platform, no file_path', () => {
     const cols = (getDb().prepare('PRAGMA table_info(apps)').all() as { name: string }[]).map(c => c.name)
@@ -95,7 +82,7 @@ describe('upsertApp: bundle_id grouping', () => {
     upsertApp = mod.upsertApp
   })
 
-  afterAll(() => { fs.rmSync(tmpDir, { recursive: true }) })
+  afterAll(() => { closeDb(); fs.rmSync(tmpDir, { recursive: true }) })
 
   it('iOS then Android with same bundle_id → single app, platform=both', () => {
     const db = getDb()
@@ -145,7 +132,7 @@ describe('upload: app_id provided but bundle_id differs → new app', () => {
     upsertApp = mod.upsertApp
   })
 
-  afterAll(() => { fs.rmSync(tmpDir, { recursive: true }) })
+  afterAll(() => { closeDb(); fs.rmSync(tmpDir, { recursive: true }) })
 
   it('bundle_id가 다른 앱을 app_id 지정 업로드 시 새 앱에 라우팅된다', () => {
     const db = getDb()
@@ -318,7 +305,7 @@ describe('extractAppZipInfo', () => {
 
   beforeAll(async () => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tapflow-zip-test-'))
-    zipPath = makeTestZip(tmpDir, 'CoffeeApp', XML_PLIST)
+    zipPath = makeAppZip(tmpDir, 'CoffeeApp', XML_PLIST)
     const mod = await import('../api/builds')
     extractAppZipInfo = mod.extractAppZipInfo
   })
@@ -335,7 +322,7 @@ describe('extractAppZipInfo', () => {
   })
 
   it('extracts metadata when .app name contains spaces', () => {
-    const spacedZip = makeTestZip(tmpDir, 'Food Truck', XML_PLIST)
+    const spacedZip = makeAppZip(tmpDir, 'Food Truck', XML_PLIST)
     const info = extractAppZipInfo(spacedZip)
     expect(info).not.toBeNull()
     expect(info!.bundleId).toBe('com.example.coffee')
@@ -343,8 +330,7 @@ describe('extractAppZipInfo', () => {
 
   it('returns null for a zip with no .app directory', () => {
     const emptyZip = path.join(tmpDir, 'empty.zip')
-    fs.writeFileSync(path.join(tmpDir, 'readme.txt'), 'hello')
-    spawnSync('zip', [emptyZip, 'readme.txt'], { cwd: tmpDir })
+    writeZipFixture(emptyZip, [{ name: 'readme.txt', data: 'hello' }])
     const info = extractAppZipInfo(emptyZip)
     expect(info).toBeNull()
   })

@@ -1,5 +1,104 @@
 # @tapflowio/android-agent
 
+## 0.20.1
+
+### Patch Changes
+
+- @tapflowio/protocol@0.20.1
+- @tapflowio/agent-core@0.20.1
+- @tapflowio/audiotap-helper@0.3.2
+
+## 0.20.0
+
+### Minor Changes
+
+- becbe77: Refuse an ambiguous device instead of picking one, and drop the audio capability interface
+
+  `AndroidAgent`'s session-less entry points resolved their device with
+  `deviceStates.values().next().value` — the entry the relay happened to register first. On a Mac
+  running two emulators that meant answering about a device nobody asked about, and for
+  `setNetworkOffline` it meant taking a device off the network while somebody else was testing on it.
+  `IOSAgent` has refused this since the same feature shipped; Android never got the fix.
+
+  Eleven entry points now go through one resolver that throws when it cannot choose. `sessionId` keeps
+  answering, deliberately: a read's worst case is naming the wrong device, and it answers before any
+  device is chosen.
+
+  `AudioStreamCapability` and `hasAudioCapability` are removed. Nothing implemented them, nothing
+  detected them, and audio has no `AgentCapability` string because it is not gated — the dashboard plays
+  whatever frames arrive. The audio _data_ types move to `agent-core`'s shared types and keep their
+  names.
+
+- ca397f4: Take an Android emulator off the network and put it back (#607), via airplane mode.
+
+  `adb shell cmd connectivity airplane-mode` takes the **OS** offline rather than lying to the app, so
+  the app's own connectivity callbacks fire and the status bar follows with nothing faked. Measured on
+  API 34: `dumpsys connectivity` reports no active network and a ping from the guest fails.
+
+  Every write is confirmed by reading the state back. An image that does not know the subcommand exits
+  non-zero and is reported as a device that cannot do this — an answer the viewer can render, not an
+  error — but a command that succeeds and changes nothing would otherwise be reported as a device
+  taken offline, and tapflow's output is a judgement about someone else's app.
+
+  A device left offline by whoever had it last is cleared **on the way up**, not at teardown. Airplane
+  mode lives in the AVD's userdata and outlives `emu kill`, and a session that ended in a crash or a
+  closed terminal never reaches a teardown path at all.
+
+- faeaae9: A viewer that reconnects now learns whether its device is on the network (#614).
+
+  `network:state` is produced by the agent, and the relay replays only three things to a re-joining
+  browser — so the network toggle had no value to render and would have shown a guessed position. The
+  relay now asks the agent to re-read the device, from the same block that already asks for a
+  keyframe, and the Android agent answers with an uncorrelated report.
+
+  The relay asks only agents that announce `network-control`, so an agent without the feature — one
+  predating this release, say — is never asked and a viewer never has to guess from a silence.
+
+  Caching it in the relay would have been cheaper and wrong: the relay caches only what it can
+  invalidate, and airplane mode changes when someone types `adb` in a terminal.
+
+- df94718: Honour Full reset on Android: `handleDeviceBoot` reads `resetMode`, and the emulator is launched with
+  `-wipe-data`.
+
+  `-no-snapshot` was already there and is not this — it is a cold boot, which skips the snapshot and
+  keeps `userdata`, so nothing wiped anything before. Because `-wipe-data` only applies at launch, an
+  emulator that is already running is stopped and relaunched, the same answer iOS gives for `simctl
+erase` refusing a booted device.
+
+  Whether one is running is asked of the process rather than of adb, since adb reports an emulator that
+  is still coming up as shut down, and a second emulator on the same AVD would race its lock file. With
+  nothing running the launch is immediate; a running one is stopped first and launches once its process
+  is confirmed gone.
+
+  The probe holds both of those apart from a third state — the lookup could not run — which launches
+  nothing at all. Neither does an emulator that will not exit. Proceeding in either case would report a
+  Full reset that never happened: the relaunch loses the lock and exits unseen, and the survivor is what
+  the agent finds and announces ready.
+
+  The agent advertises the `full-reset` capability now, which is what puts the toggle on screen.
+
+### Patch Changes
+
+- 5e2fcc5: Split the network-control reason set so each member carries a remedy, and confirm that a simulator's rule is actually being enforced before reporting it offline.
+
+  `unsupported-device` now means only what it says — the write was accepted, the read-back succeeded, and the device had not moved. Every other Android failure is `state-unconfirmed`, which a retry may fix. Two iOS members are new: `filter-unavailable` for a Mac that cannot take devices offline, and `enforcement-lost` for enforcement that stopped underneath a device that was already offline.
+
+  On iOS the rule is now confirmed over XPC before the other layers are applied, and a request that cannot be confirmed is refused rather than half-applied — applying the app-facing layers alone tells an app it is offline while its requests keep succeeding. Enforcement is watched while any device is offline, so an outage that used to pass silently is reported instead of leaving a tester signing off on requests that succeeded.
+
+  The dashboard says what to do per reason, stops offering a retry where a retry cannot help, and interrupts rather than re-colouring when a finished check has been invalidated.
+
+- Updated dependencies [becbe77]
+- Updated dependencies [3f18f70]
+- Updated dependencies [cb04a51]
+- Updated dependencies [5e2fcc5]
+- Updated dependencies [7152b21]
+- Updated dependencies [faeaae9]
+- Updated dependencies [4901c8c]
+- Updated dependencies [d238c34]
+  - @tapflowio/agent-core@0.20.0
+  - @tapflowio/protocol@0.20.0
+  - @tapflowio/audiotap-helper@0.3.1
+
 ## 0.19.0
 
 ### Minor Changes

@@ -62,4 +62,15 @@ describe('parseBackfills', () => {
   it('allows prose after the references on the same line', () => {
     expect(parseBackfills(body('Backfills: #413 — the shortcuts never worked before it'))).toEqual([413])
   })
+
+  it.each([
+    ['a shorter fence nested inside a longer one', '````md', '```md', 'Backfills: #413', '```', '````', 'Backfills: #414'],
+    ['a closing fence with an info string', '```md', '``` not-a-close', 'Backfills: #413', '```', 'Backfills: #414'],
+  ])('ignores a reference inside %s and resumes after it', (_name, ...lines) => {
+    expect(parseBackfills(body(...lines))).toEqual([414])
+  })
+
+  it('reads an unindented reference between four-space-indented fence-like lines', () => {
+    expect(parseBackfills(body('    ```md', 'Backfills: #413', '    ```'))).toEqual([413])
+  })
 })

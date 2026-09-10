@@ -31,7 +31,6 @@ describe('MjpegStreamer — 성능', () => {
     // 캡처 1회에 500ms가 걸리는 상황
     const CAPTURE_DELAY = 500
     const INTERVAL_MS = 100
-    const DURATION_MS = 2000
 
     let resolveCapture!: () => void
     const slowScreenshot = vi.fn(() =>
@@ -54,8 +53,10 @@ describe('MjpegStreamer — 성능', () => {
     resolveCapture()
     await vi.advanceTimersByTimeAsync(CAPTURE_DELAY + INTERVAL_MS)
 
-    // 총 호출 수는 2 이하 (무제한 병렬 호출이 발생하지 않았음)
-    expect(slowScreenshot.mock.calls.length).toBeLessThanOrEqual(2)
+    // Exactly two: the guard let the second capture start, and let only one start. An upper bound
+    // alone is green when the streamer never resumes at all — measured: dropping `capturing = false`
+    // wedges it after one frame and `toBeLessThanOrEqual(2)` passes on the single call.
+    expect(slowScreenshot).toHaveBeenCalledTimes(2)
   })
 
   it('10초 시뮬레이션에서 cancel 후 추가 호출 없음', async () => {

@@ -2,6 +2,7 @@
 // regressions CI cannot otherwise expose: CI could stay green while accidentally publishing a
 // single-architecture image, and the digest smoke path cannot run in PR CI without maintainer
 // registry credentials.
+// The WebSocket guard only verifies that the smoke step still invokes the probe.
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'fs'
 import { join, dirname } from 'path'
@@ -39,6 +40,11 @@ describe('docker-publish runtime smoke test', () => {
   it('smokes the pushed digest on the credentialed publish path', () => {
     const select = stepBlock('Select image for smoke test')
     expect(select).toContain('SMOKE_IMAGE=${IMAGE}@${{ steps.build.outputs.digest }}')
+  })
+
+  it('keeps the WebSocket upgrade probe in the smoke step', () => {
+    const smoke = stepBlock('Smoke test image runtime')
+    expect(smoke).toContain('node scripts/docker-publish-websocket-smoke.mjs')
   })
 
   it('excludes stale TypeScript incremental build metadata from Docker context', () => {

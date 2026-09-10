@@ -14,6 +14,8 @@ status: living
 
 `AndroidAgent`: controls Android emulators/devices via ADB and streams H.264 video over two backends — **gRPC host-encode** (emulators, the default) and **scrcpy** (real devices, and the fallback when gRPC is unavailable). Runs alongside `ios-agent` on the same Mac.
 
+It also toggles **airplane mode** per device (#607) — the Android half of the network control. Unlike iOS, the device has a radio, so `cmd connectivity airplane-mode` is the whole mechanism — but `AdbWrapper.setAirplaneMode` writes and then **reads back**, and the read-back is the load-bearing half: it is what produces `confirmed`, and an unconfirmed write is reported as unavailable rather than as success. An image that accepts the command and does nothing looks exactly like one that worked, until you ask.
+
 ## HOW
 
 - ADB commands are isolated in `AdbWrapper`, swappable with an `AdbRunner` mock in tests.
@@ -64,6 +66,51 @@ Measured against a killed emulator: the gRPC RPC rejects in **4ms** with `14 UNA
 - AVD name is the stable key for `Device.id` (`"avd:<name>"`). ADB serial is kept only in the internal `serialMap`.
 - `ANDROID_HOME` or `ADB_PATH` environment variable is required. Missing → clear error and immediate exit.
 - Apple Silicon Mac: `system-images;android-34;google_apis;arm64-v8a` image required.
+
+### An entry point with no session refuses rather than choosing
+
+The members that take no session id — `screenshot`, `installApp`, `launchApp`, `queryUITree`,
+`stream`, the three touch methods, `openUrl`, and `NetworkControlCapability`'s two — go through
+`soleLiveOrNone()`. It **throws when more than one device is live**, naming the count.
+
+`IOSAgent.soleOf` has done this since #607 and its comment carries the reason: *"Refusing beats
+guessing: this interface has no way to say which device is meant, and picking one silently is the whole
+defect being fixed here."* This class did not, and eleven members each took
+`deviceStates.values().next().value` — the entry the relay happened to register first — because each was
+written from the one above it. For a read that answers about a device nobody asked about; for
+`setNetworkOffline` it takes a device off the network while somebody else is testing on it (#617).
+
+**Liveness is `adb` reporting the emulator attached, and ownership is what narrows it.** `deviceStates`
+holds one entry per *registered* AVD and a Mac reports every AVD it has, so registration is not
+liveness — but neither is having a serial, quite: `AdbWrapper.listDevices` syncs that map from
+`adb devices` on every call, so a developer's own emulator is in it too. (`IOSAgent.soleDeviceState`
+says this map is "only populated on launch"; that is wrong, and it is the claim this change was first
+written on.) `ownedDevices` records the AVDs tapflow launched and is preferred when more than one is
+live, so the common desk — your emulator plus a tester's — resolves instead of refusing.
+`IOSAgent.soleLiveDeviceState` narrows the same way, after a version that did not made every caller
+refuse on a two-simulator desk.
+
+Two things stay as they were, deliberately:
+
+- **`sessionId`** still takes the first entry. A read's worst case is naming the wrong device, and it
+  answers *before* a device is chosen — refusing would make "which session am I on" an error on a
+  healthy two-emulator Mac. `IOSAgent.sessionId` is identical.
+- **Absence stays a no-op for the touch methods.** They have always been silent without a device, and
+  `touchStart` returns `void` so a throw is the only signal it could give. `soleLive()` is the variant
+  that demands a device; `soleLiveOrNone()` is the one they use.
+
+**Ambiguity is an error even for input, and there this class diverges from iOS on purpose.**
+`IOSAgent.liveDeviceState` returns `undefined` when it cannot choose, so a tap on a two-simulator desk
+silently does nothing. Silence is the failure mode this repo keeps removing — a tester taps, nothing
+moves, and no channel says why. `touchMove` was made `async` for the same reason: it declared
+`Promise<void>` and could not throw before, so a caller that wrote `.catch()` on that signature would
+have been broken by the one path this change added.
+
+**None of this touches the wire path.** Anything carrying a session resolves through
+`serialFor(sessionId)` and always has — the browser names its session on every message.
+
+`scripts/__tests__/agentEntryPointsRefuse.test.mjs` holds it for the twelfth member, and names the one
+exemption rather than pattern-matching it, so the next exemption has to be a decision.
 
 ### A screenshot reply names what was produced, never what was asked for
 

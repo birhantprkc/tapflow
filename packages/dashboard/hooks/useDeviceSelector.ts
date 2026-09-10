@@ -13,16 +13,25 @@ export function useDeviceSelector(
   // which mode it was launched under.
   const [appliedResetMode, setAppliedResetMode] = useState<'app-only' | 'full-erase'>('app-only')
 
-  /** Only iOS acts on Full reset today (#447). */
-  const fullResetSupported = os !== 'android'
+  /** Whether the agent holding this device honours `resetMode: 'full-erase'`.
+   *
+   *  This was `os !== 'android'`, which says "Android cannot" when what it means is "this agent did
+   *  not say it can" — and the two differ in both directions (#447). An iOS agent too old to
+   *  implement Full reset still reports `platform: 'ios'`, so the platform check offered a control
+   *  that agent has no code for; and `AndroidAgent` implements `-wipe-data` now, which the platform
+   *  check would still be hiding. That second half landed without touching this file, which is the
+   *  argument for gating this way rather than a prediction about it.
+   *
+   *  No session picked yet means nothing known yet, so the control stays hidden. */
+  const fullResetSupported = selectedSession?.capabilities.includes('full-reset') ?? false
 
   /** Full reset is a one-shot intent — "erase the next device I pick" — not a setting that stays
    *  on. Leaving a session is a conditional re-render, not an unmount, so without this the toggle
    *  survives back-to-the-list and silently erases the *next* device too (#439). */
   const consumeResetMode = useCallback(() => {
-    // Android ignores resetMode outright — AndroidAgent never reads it (#447). Applying it there
-    // would disarm the toggle having erased nothing, which reads as "done"; the UI disables the
-    // switch for the same reason, and this keeps the two from drifting apart.
+    // Applying a mode the agent does not honour would disarm the toggle having erased nothing,
+    // which reads as "done"; the UI hides the switch for the same reason, and this keeps the two
+    // from drifting apart.
     setAppliedResetMode(fullResetSupported ? resetMode : 'app-only')
     setResetMode('app-only')
   }, [resetMode, fullResetSupported])

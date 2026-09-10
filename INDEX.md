@@ -41,6 +41,8 @@ Common rules are in the root [AGENTS.md](./AGENTS.md).
 |------|----------|
 | [CONTRIBUTING.md](./CONTRIBUTING.md) | Branch, release, and commit conventions |
 | [packages/dashboard/DESIGN.md](./packages/dashboard/DESIGN.md) | Dashboard design system — color tokens, typography, elevation, component specs |
+| [packages/ios-agent/netprobe/README.md](./packages/ios-agent/netprobe/README.md) | The network probe app — what it reports, why the reachability getter and listener are two separate lines, and how to arm layer 2 by hand |
+| [packages/ios-agent/ios-netfilter/README.md](./packages/ios-agent/ios-netfilter/README.md) | The macOS network-filter system extension — why a content filter and not a transparent proxy, the container app's exit codes, and building it (paid Apple account, notarization, the load-bearing `CFBundleVersion` bump) |
 | [.internal/PRD.md](./.internal/PRD.md) | Product requirements (local only) |
 | [docs/AGENTS.md](./docs/AGENTS.md) | VitePress work rules — shiki code blocks, CSS customization notes |
 
@@ -76,5 +78,5 @@ Committed *why* behind non-obvious decisions. Read the relevant one **before** c
 | [awdl-wifi-latency-diagnosis.md](./contributing/awdl-wifi-latency-diagnosis.md) | diagnosis | Periodic Wi-Fi stream hitch traced to AWDL via ICMP ping — method and evidence |
 | [workshop-lab-fork-observations.md](./contributing/workshop-lab-fork-observations.md) | reference | Third-party workshop-lab fork: independent iOS-sim capacity data (~4 seats/32GB) + where our extension seams stop |
 | [adversarial-review.md](./contributing/adversarial-review.md) | rules | How to run the pre-PR review and the cross-cutting design pass — channel design, prompt skeleton, why a cleared list ages with the diff, why a fix falsifies the prose beside it, why the same review costs 4 minutes or 106 |
-| [test-and-guard-coverage.md](./contributing/test-and-guard-coverage.md) | rules | What a test or a static check must **execute** to hold its claim — absence assertions verified only by the mutation that creates the absence, four ways a guard gets bypassed, why the success path gets the first mutation |
+| [test-and-guard-coverage.md](./contributing/test-and-guard-coverage.md) | rules | What a test or a static check must **execute** to hold its claim — absence assertions verified only by the mutation that creates the absence, four ways a guard gets bypassed, why the success path gets the first mutation, and the three ways a probe passes for the wrong reason — including the one no mutation can find |
 | [security-bumps.md](./contributing/security-bumps.md) | rules | Why a security bump is `pnpm update` before `pnpm.overrides` — fourteen inert entries measured, why the override key comes from the GHSA advisory and not the Dependabot alert, why the key and its replacement are both capped to one major |

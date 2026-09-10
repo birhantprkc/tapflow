@@ -13,16 +13,13 @@
     &nbsp;·&nbsp;
     <strong>2-line setup</strong>
     &nbsp;·&nbsp;
-    <strong>Self-hosted · Free · MIT</strong>
+    <strong>MIT</strong>
   </p>
 
   <p>
-    <a href="https://github.com/jo-duchan/tapflow/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="MIT License" /></a>
-    <a href="https://nodejs.org"><img src="https://img.shields.io/badge/node-%3E%3D22-brightgreen" alt="Node.js ≥ 22" /></a>
     <img src="https://img.shields.io/badge/platform-macOS%20agent-lightgrey" alt="macOS Agent" />
     <a href="https://github.com/jo-duchan/tapflow/releases"><img src="https://img.shields.io/github/v/release/jo-duchan/tapflow?include_prereleases&sort=semver" alt="Latest release" /></a>
     <a href="https://github.com/jo-duchan/tapflow/commits/main"><img src="https://img.shields.io/github/last-commit/jo-duchan/tapflow" alt="Last commit" /></a>
-    <a href="https://github.com/jo-duchan/tapflow/blob/main/ROADMAP.md"><img src="https://img.shields.io/badge/roadmap-v0.x→v1.0-blueviolet" alt="Roadmap" /></a>
   </p>
 
   <p>
@@ -36,12 +33,14 @@
   </p>
 </div>
 
+<!-- readme-sync:exempt npm-has-no-video -->
 <div align="center">
   <a href="https://github.com/user-attachments/assets/dbba8bde-74b6-4fb9-bdb6-3919bc4295c4" target="_blank" rel="noopener noreferrer">
     <img src="https://raw.githubusercontent.com/jo-duchan/tapflow/main/docs/public/demo-thumbnail.png" alt="tapflow demo — click to play" width="100%" />
   </a>
   <p><em>Click to play</em></p>
 </div>
+<!-- /readme-sync:exempt -->
 
 <p align="center"><em>Streams over H.264 with a zero-buffer decoder (no MSE) — <a href="https://github.com/jo-duchan/tapflow/blob/main/contributing/streaming-latency-log.md">latency measurements ↗</a></em></p>
 
@@ -237,7 +236,7 @@ Full docs: **[www.tapflow.dev](https://www.tapflow.dev)**
 
 ## Contributing
 
-tapflow is actively developed and PRs are welcome — see [CONTRIBUTING.md](https://github.com/jo-duchan/tapflow/blob/main/CONTRIBUTING.md) for branch strategy, commit conventions, and an architecture overview. For deep dives, the [contributor notes](https://github.com/jo-duchan/tapflow/blob/main/CONTRIBUTING.md#technical-internals) cover the SimulatorKit reverse-engineering and the streaming render pipeline.
+tapflow is actively developed and PRs are welcome — see [CONTRIBUTING.md](https://github.com/jo-duchan/tapflow/blob/main/CONTRIBUTING.md) for branch strategy, commit conventions, and an architecture overview. For deep dives, the [contributor notes](https://github.com/jo-duchan/tapflow/blob/main/CONTRIBUTING.md#technical-internals) cover the SimulatorKit reverse-engineering and the streaming render pipeline. Everyone taking part is expected to follow the [Code of Conduct](https://github.com/jo-duchan/tapflow/blob/main/CODE_OF_CONDUCT.md).
 
 **Requirements**: Node.js ≥ 22, pnpm ≥ 9
 

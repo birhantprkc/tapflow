@@ -53,16 +53,31 @@ const { QASession } = await import('../pages/QASession')
 const device = (id: string, name: string, platform = 'ios') => ({
   id, name, platform, status: 'shutdown', osVersion: 'iOS 18.3', sessionId: 'sess-1', busy: false,
 })
+// `capabilities` is what gates the toggle now, not `platform` (#447). Both shipped agents advertise
+// `full-reset` as of the Android wipe; `ANDROID_AGENTS` keeps a list without it on purpose — it is
+// no longer a portrait of AndroidAgent but of **any** agent that does not implement the feature,
+// which is what the gate is actually written against and what the tests below need.
 const AGENTS: SessionInfo[] = [{
   agentName: 'studio-mac',
   platform: 'ios',
+  capabilities: ['clipboard', 'full-reset'],
   devices: [device('dev-a', 'iPhone 15'), device('dev-b', 'iPhone SE')],
 }]
 const ANDROID_AGENTS: SessionInfo[] = [{
   agentName: 'studio-mac',
   platform: 'android',
+  capabilities: ['clipboard'],
   devices: [device('dev-a', 'Pixel 7', 'android')],
 }]
+const MIXED_CAPABILITY_AGENTS: SessionInfo[] = [
+  ...AGENTS,
+  {
+    agentName: 'legacy-mac',
+    platform: 'ios',
+    capabilities: ['clipboard'],
+    devices: [device('dev-c', 'iPhone 14')],
+  },
+]
 
 /** The breadcrumb is rendered by the layout, outside QASession — and once a session is open it is
  *  the only way back to the Mac list, which is the path this issue is about. */
@@ -163,8 +178,22 @@ describe('QASession — Full reset applies to exactly one pick (#439)', () => {
 
     expect(screen.queryByRole('switch')).not.toBeInTheDocument()
 
+    // This only pins Android's default mount; the armed capability guard is covered by the
+    // mixed-agent case below.
     await user.click(screen.getByText('Pixel 7'))
     expect(viewerMounts).toEqual([{ deviceId: 'dev-a', resetMode: 'app-only' }])
+  })
+
+  it('does not carry an armed full reset to an agent that lacks the capability', async () => {
+    const user = userEvent.setup()
+    await openDeviceList(user, MIXED_CAPABILITY_AGENTS)
+
+    await user.click(screen.getByRole('switch'))
+    await user.click(screen.getByRole('button', { name: '← All Macs' }))
+    await user.click(screen.getByText('legacy-mac'))
+    await user.click(screen.getByText('iPhone 14'))
+
+    expect(viewerMounts).toEqual([{ deviceId: 'dev-c', resetMode: 'app-only' }])
   })
 
   it('mounts a fresh viewer per pick — the per-mount reset guard depends on it', async () => {

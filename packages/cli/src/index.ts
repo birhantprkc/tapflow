@@ -18,7 +18,7 @@ import { cmdReset } from './commands/reset.js'
 import { cmdStatus } from './commands/status.js'
 import { cmdLogs } from './commands/logs.js'
 import { cmdFlowRun, type FlowRunOptions } from './commands/flow-run.js'
-import { cmdMigrateDataDir } from './commands/migrate.js'
+import { cmdMigrateDataDir, cmdMigrateNetFilter } from './commands/migrate.js'
 
 process.on('unhandledRejection', (err) => {
   console.error(err instanceof Error ? err.message : String(err))
@@ -126,9 +126,25 @@ cli
   })
 
 cli
-  .command('migrate <subcommand>', 'Migration commands (subcommand: data-dir)')
-  .action((subcommand: string) => {
-    if (subcommand === 'data-dir') return cmdMigrateDataDir()
+  .command('migrate <subcommand>', 'Migration commands (subcommand: data-dir | net-filter)')
+  // Named for what it ignores rather than `--force`. `migrate` is one command with a positional, so
+  // cac offers every option to every subcommand and the help text cannot say otherwise — a flag
+  // called `--force` here would read as `init --force` does (overwrite a file) rather than as this
+  // (replace a network filter while somebody is testing through it).
+  .option('--ignore-running-devices', 'net-filter only: replace the filter even though devices are in use')
+  .action((subcommand: string, options: { ignoreRunningDevices?: boolean }) => {
+    if (subcommand === 'data-dir') {
+      // **Rejected rather than ignored**, for the same reason the flag is named that way: cac accepts
+      // it here, and an option that silently does nothing reads as one that worked.
+      if (options.ignoreRunningDevices) {
+        console.error('--ignore-running-devices applies to `migrate net-filter` only.')
+        process.exit(1)
+      }
+      return cmdMigrateDataDir()
+    }
+    if (subcommand === 'net-filter') {
+      return cmdMigrateNetFilter({ ignoreRunningDevices: options.ignoreRunningDevices })
+    }
     console.error(`Unknown subcommand: migrate ${subcommand}`)
     process.exit(1)
   })

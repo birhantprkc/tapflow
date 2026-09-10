@@ -9,6 +9,8 @@ import { useDecoderStream } from '@/hooks/useDecoderStream';
 import type { Decoder } from '@/lib/decoders/types';
 import { useFps } from '@/hooks/useFps';
 import { SimulatorToolbar } from './shared/SimulatorToolbar';
+import { useNetworkControl } from '@/hooks/useNetworkControl';
+import type { NetworkMessageHandler } from '@/hooks/useNetworkControl';
 import { SimulatorInfoCard } from './shared/SimulatorInfoCard';
 import { DeepLinkDialog } from './DeepLinkDialog';
 import { Button } from '@/components/ui/button';
@@ -47,7 +49,14 @@ interface AndroidViewerProps {
   binaryFrameHandlerRef: React.RefObject<BinaryFrameHandler | undefined>;
   clipboardHandlerRef: React.MutableRefObject<ClipboardMessageHandler | undefined>;
   clipboardSupported: boolean;
+  networkHandlerRef: MutableRefObject<NetworkMessageHandler | undefined>;
+  networkSupported: boolean;
   onRecordingUploaded?: () => void;
+  /** Restart control (#628). Owned by `DeviceViewer`, which sequences the shutdown and the boot. */
+  rebootPending: boolean;
+  onReboot: () => void;
+  /** The toolbar's restart button, so `DeviceViewer` can put focus back on it after a restart. */
+  restartButtonRef: MutableRefObject<HTMLButtonElement | null>;
   screenWidth?: number;
   screenHeight?: number;
   /** Rounded-corner radius as a fraction of width — the emulator bakes the device's corners into
@@ -60,7 +69,8 @@ export function AndroidViewer({
   sessionId, buildId, send, openUrl, launchApp, connected, joined,
   deviceReady, installing, installed, installError, bootError,
   launching, androidButtons,
-  binaryFrameHandlerRef, clipboardHandlerRef, clipboardSupported, onRecordingUploaded,
+  binaryFrameHandlerRef, clipboardHandlerRef, clipboardSupported, networkHandlerRef, networkSupported, onRecordingUploaded,
+  rebootPending, onReboot, restartButtonRef,
   screenWidth, screenHeight, cornerRadius,
   perfHookRef,
 }: AndroidViewerProps) {
@@ -68,6 +78,7 @@ export function AndroidViewer({
   const containerRef = useRef<HTMLDivElement>(null);
   const decoderRef = useRef<Decoder | null>(null);
   const { fps, frameCount } = useFps();
+
   const { recordState, recordCanvasRef, startClientRecording, stopClientRecording } = useClientRecording({ sessionId, buildId, onRecordingUploaded });
 
   const [deepLinkOpen, setDeepLinkOpen] = useState(false);
@@ -234,6 +245,11 @@ export function AndroidViewer({
   useClipboardBridge({
     sessionId, send, active: keyboardActive, supported: clipboardSupported,
     handlerRef: clipboardHandlerRef, sendChord, onError: (m) => toast.error(m),
+  })
+
+  const network = useNetworkControl({
+    sessionId, send, supported: networkSupported, deviceReady, handlerRef: networkHandlerRef,
+    onError: (m) => toast.error(m),
   })
 
   // ── Keyboard forwarding ───────────────────────────────────────────────────
@@ -464,28 +480,53 @@ export function AndroidViewer({
     cursor: 'none',
   };
 
-  const platformSlot = (
+  /**
+   * **The agent says which buttons exist; this file says where they go (#634).**
+   *
+   * `androidButtons` arrives from the agent's `ANDROID_BUTTONS`, and it is a *capability* list — the
+   * key codes are the reason it lives there. Rendering it in array order let that list's ordering
+   * leak out as a layout decision: reordering it in `android-agent` moved buttons in the browser,
+   * and nothing on either side would have said so. The two platforms had not actually drifted — the
+   * buttons they share sat in the same relative places — so this closes the way they could.
+   *
+   * So membership still comes from the agent, and the order below is this file's. Anything the agent
+   * reports that is not named here simply does not render, which is the safe direction: a new key
+   * code shows up in the toolbar only once somebody has decided which group it belongs to.
+   */
+  const NAVIGATION_BUTTONS = ['home', 'back', 'recent_apps'] as const;
+  const DEVICE_BUTTONS = ['volume_up', 'volume_down', 'power'] as const;
+
+  const buttonIcon = (name: string) =>
+    name === 'back' ? <ArrowLeft className="h-4 w-4" />
+      : name === 'recent_apps' ? <LayoutGrid className="h-4 w-4" />
+      : name === 'volume_up' ? <Volume2 className="h-4 w-4" />
+      : name === 'volume_down' ? <Volume1 className="h-4 w-4" />
+      : name === 'power' ? <Power className="h-4 w-4" />
+      : <Home className="h-4 w-4" />;
+
+  const buttonsIn = (order: readonly string[]) => (
     <>
-      {androidButtons?.map((btn) => (
-        <Tooltip key={btn.name}>
-          <TooltipTrigger asChild>
-            <Button variant="ghost" size="icon" className="h-8 w-8"
-              aria-label={btn.accessibilityTitle}
-              onClick={() => send({ type: 'input:button', sessionId, requestId: newRequestId(), payload: { name: btn.name } })}
-            >
-              {btn.name === 'back' ? <ArrowLeft className="h-4 w-4" />
-                : btn.name === 'recent_apps' ? <LayoutGrid className="h-4 w-4" />
-                : btn.name === 'volume_up' ? <Volume2 className="h-4 w-4" />
-                : btn.name === 'volume_down' ? <Volume1 className="h-4 w-4" />
-                : btn.name === 'power' ? <Power className="h-4 w-4" />
-                : <Home className="h-4 w-4" />}
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent side="left">{btn.accessibilityTitle}</TooltipContent>
-        </Tooltip>
-      ))}
+      {order
+        .map((name) => androidButtons?.find((b) => b.name === name))
+        .filter((b): b is AndroidButton => b !== undefined)
+        .map((btn) => (
+          <Tooltip key={btn.name}>
+            <TooltipTrigger asChild>
+              <Button variant="ghost" size="icon" className="h-8 w-8"
+                aria-label={btn.accessibilityTitle}
+                onClick={() => send({ type: 'input:button', sessionId, requestId: newRequestId(), payload: { name: btn.name } })}
+              >
+                {buttonIcon(btn.name)}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="left">{btn.accessibilityTitle}</TooltipContent>
+          </Tooltip>
+        ))}
     </>
   );
+
+  const navigationSlot = buttonsIn(NAVIGATION_BUTTONS);
+  const deviceSlot = buttonsIn(DEVICE_BUTTONS);
 
   const launchSlot = installed && buildId ? (
     <Tooltip>
@@ -504,7 +545,21 @@ export function AndroidViewer({
   ) : null;
 
   return (
-    <div className="flex items-start justify-center gap-16">
+    // **This region is not focusable, and that is the fix rather than an omission.** It carried
+    // `tabIndex={-1}` for a while, which put it out of the tab order and still let a *mouse* focus it —
+    // a click on anything unfocusable inside lands on the container — so a ring drew itself around the
+    // whole viewer on every tap, and then around it again on every keystroke once `:focus-visible` was
+    // tried, because this viewer forwards keys to the device from a `window` listener.
+    //
+    // The question underneath was whether the region should hold focus at all, and it should not:
+    // keystrokes reach the device through `keyboardActive`, which only `handlePointerDown` sets. Focus
+    // here granted nothing, so the indicator drawn for it advertised nothing. Whether the device screen
+    // should be operable from the keyboard is a real question and a separate one — #747.
+    <div
+      role="region"
+      aria-label="Device screen"
+      className="flex items-start justify-center gap-16"
+    >
       <canvas ref={recordCanvasRef} style={{ display: 'none' }} />
       <DeepLinkDialog open={deepLinkOpen} onOpenChange={setDeepLinkOpen} openUrl={openUrl} />
 
@@ -515,8 +570,11 @@ export function AndroidViewer({
         onRecordToggle={handleRecordToggle}
         recordState={recordState}
         onRotate={handleRotate}
-        platformSlot={platformSlot}
+        navigationSlot={navigationSlot}
+        deviceSlot={deviceSlot}
         launchSlot={launchSlot}
+        network={networkSupported ? { position: network.position, steerable: network.steerable, reason: network.reason, pending: network.pending, onToggle: network.toggle } : undefined}
+        reboot={{ pending: rebootPending, onReboot, buttonRef: restartButtonRef }}
       />
 
       <div className="flex items-start gap-8">
@@ -527,13 +585,7 @@ export function AndroidViewer({
           className="relative"
           style={{ width: containerW, height: containerH, backgroundColor: '#010101', borderRadius: `${screenRadius}px`, overflow: 'hidden' }}
         >
-          {decoderUnsupported ? (
-            <div className="absolute inset-0 flex items-center justify-center p-4 text-center">
-              <span style={{ color: 'rgba(255,255,255,0.6)', fontSize: '0.875rem' }}>
-                이 환경에서는 스트리밍을 표시할 수 없습니다.<br />Chrome/Edge 또는 HTTPS 환경에서 다시 시도해 주세요.
-              </span>
-            </div>
-          ) : (
+          {!decoderUnsupported && (
             <>
               <div
                 ref={surfaceHostRef}
@@ -585,6 +637,7 @@ export function AndroidViewer({
           joined={joined} fps={fps} connected={connected}
           deviceReady={deviceReady} bootError={bootError}
           installing={installing} installError={installError}
+          decoderUnsupported={decoderUnsupported}
           keyboardActive={keyboardActive}
         />
       </div>

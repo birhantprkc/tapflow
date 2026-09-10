@@ -49,7 +49,7 @@ iOS build format: `.app.zip` **or** `.tar.gz`/`.tgz` (EAS `eas build` simulator 
   on the input pair. Without it this door would have converted an answered failure into silence: a
   malformed `open-url` used to reach the agent, whose guard answered, and `IOSAgent.ts` names this
   validation as what takes that over. The cost is worst on the inputs, because `awaitInputAck` reports
-  silence from a never-acked session as **success** (#457). The twelve answerable requests,
+  silence from a never-acked session as **success** (#457). The thirteen answerable requests,
   `ANSWERABLE` in the protocol and the replies in `refuseMalformed` are held to one derived set by
   `scripts/__tests__/correlatedRequestsGated.test.mjs`.
 

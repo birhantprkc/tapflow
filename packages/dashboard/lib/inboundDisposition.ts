@@ -54,15 +54,28 @@ export const INBOUND_DISPOSITION = {
   'clipboard:data': { at: 'DeviceViewer, useClipboardBridge' },
   'clipboard:error': { at: 'DeviceViewer, useClipboardBridge' },
   'clipboard:write-done': { at: 'DeviceViewer, useClipboardBridge' },
+  // The viewer is the only consumer that acts on these — it owns the control. Both were `ignored`
+  // while the protocol was ahead of the UI (#607); the control landed and this is what closed that gap.
+  //
+  // `DeviceViewer` routes both into one handler because they answer the same request. They are not the
+  // same answer: a `network:state` says where the device is, and a `network:error` says the request
+  // never reached one — so it clears the wait and moves nothing.
+  'network:state': { at: 'DeviceViewer, useNetworkControl' },
+  'network:error': { at: 'DeviceViewer, useNetworkControl' },
   'device:boot-error': { at: 'DeviceViewer, SessionList' },
   'device:booting': { at: 'DeviceViewer' },
   'device:ready': { at: 'DeviceViewer, SessionList' },
-  'device:shutdown-done': { at: 'SessionList' },
-  // The relay's half of the pair (#542), so it reaches whichever socket asked — which for this app is
-  // `SessionList` or `useAgentSession`. Only the first is named because `at` answers *which files compare
-  // `.type` against this literal*, and only `SessionList` does — the other hook receives it and has no
-  // branch, which is right: its three senders fire on the way out of a view and nothing there waits.
-  'device:shutdown-error': { at: 'SessionList' },
+  // `DeviceViewer` joined this pair with #628: a reboot is a `device:shutdown` followed by a
+  // `device:boot`, because `device:boot` alone no-ops on a running device. Its shutdown is the only
+  // **correlated** one this app sends — `useAgentSession`'s three fire on the way out of a view and
+  // are deliberately id-less — so the viewer compares before it acts and `SessionList` does not.
+  'device:shutdown-done': { at: 'DeviceViewer, SessionList' },
+  // The relay's half of the pair (#542), so it reaches whichever socket asked. `useAgentSession` is not
+  // among them and never was: it only ever sends `agents:list` and `device:shutdown`, never
+  // `session:start`, so it does not become the session's `browserSocket` — and it has no branch for
+  // this, which is right, because its three senders fire on the way out of a view and nothing there
+  // waits. Both names below do compare `.type` against this literal, which is what `at` answers.
+  'device:shutdown-error': { at: 'DeviceViewer, SessionList' },
   // **`useAgentSession`'s branch cannot fire, and it is still named here.** L5d measured it: all five
   // producers are `sendTo(ws, …)` to the socket that sent `session:start`, and that hook's socket only ever
   // sends `agents:list` and `device:shutdown`. So relay failures do **not** surface in the device list, which

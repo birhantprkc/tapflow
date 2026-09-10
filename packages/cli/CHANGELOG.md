@@ -1,5 +1,192 @@
 # tapflow
 
+## 0.20.1
+
+### Patch Changes
+
+- a6ab06d: TLS startup instructions now use the certificate-resolved hostname for remote agent connections instead of leaving a misleading host placeholder.
+- 06db7d9: **Replacing the iOS network filter no longer takes the Mac's network down with it.** The filter is a
+  content filter, so every new connection on the Mac waits for the provider to decide, not only the
+  simulator's. `migrate net-filter` replaced the extension while that configuration stayed switched on,
+  which killed the process that decides and left new connections waiting for an answer nobody would
+  give. Measured on 2026-09-02: the Mac's own traffic timed out and a restart was the only way back.
+  Already-open connections kept working, so the visible symptom was a dead browser next to things that
+  carried on.
+
+  The replace now switches the filter off first and `--install` turns it back on. The window that
+  remains was measured across ~300 probes on a same-version disable/enable cycle: about four seconds of
+  raised latency, no failures, because the kernel passes traffic for a provider that has not applied
+  its settings yet. That cycle did not swap the provider process, so a real replacement is **expected**
+  to behave the same way over a longer window rather than measured to.
+
+  The disable runs before the activation, and the binary asked to perform it is the one this
+  package shipped rather than whatever was already installed. **A later entry in this same release
+  moves a second disable ahead of the copy too**, because the copy into `/Applications` turned out
+  not to be as inert as this paragraph originally claimed: macOS runs the extension from its own
+  directory, which is why it keeps filtering for an app you deleted, but the copy still prompts it
+  to restart on its own schedule. The shipped order is now off, copy, off, activate. Asking
+  whatever was already installed would have been wrong twice over: a build older than the flag
+  does not refuse it, it falls through to writing `isEnabled = true`, and a Mac whose app had been
+  deleted had nothing to ask while its extension was still activated and filtering.
+
+  **It also refuses while devices are in use.** Booted simulators, attached emulators and a relay
+  serving on `:4000` all count, because the filter is host-wide and the person affected is not
+  necessarily the person at the keyboard. `--ignore-running-devices` replaces it anyway;
+  `tapflow migrate data-dir` rejects that flag rather than ignoring it. The gate sits in the shared
+  install routine, so `tapflow setup ios` is covered too.
+
+  **And a filter that was switched off is no longer reported as up to date.** `systemextensionsctl`
+  describes the system extension, not `NEFilterManager.isEnabled`, so a Mac interrupted between the
+  disable and the install had the right app, the right activated extension, no filter, and `doctor ios`
+  all green — with the only thing that would restore it being the run that had just declined to do
+  anything. Being current now means enforcing as well as matching, in all three places that ask:
+  `doctor ios` says the filter is switched off and names the command that turns it back on, and neither
+  `migrate net-filter` nor `setup ios` reports a stopped filter as nothing to do.
+
+- 49f95e4: Keep iOS network control working after the filter is upgraded, and stop the upgrade from taking the Mac's network down.
+
+  Replacing the network filter's system extension leaves the previous one holding the XPC service name, so the new provider could not vend its listener and `--confirm` answered "no listener" while the filter was enforcing normally. The agent read that as "not confirmed" and the dashboard's **Take device offline** control went unavailable on every Mac that had upgraded. It now falls back to the provider's own state file, which is the channel the CLI already preferred.
+
+  The upgrade also switches the filter off _before_ it copies the app into `/Applications`, not only before activating it. Copying the app makes macOS restart the filter session on its own timing, and a filter session going down arms a kernel-wide IP drop — that is what took a Mac's network down for 2m34s on 2026-09-02, and the previous ordering was winning the race by 69 milliseconds.
+
+  Also: the provider publishes a rule change immediately instead of waiting for its next idle pulse, its state file names which provider wrote it, and a listener that fails to start now says so rather than logging success.
+
+- 3ead059: **`tapflow migrate net-filter` now checks that the filter actually came back before saying it did.**
+  The host binary's exit 0 means macOS did not refuse the change, which is smaller than "it works" —
+  the configuration reaches the provider afterwards with nothing coming back — and by that point the
+  command has switched the filter off in order to replace it safely. So a run could report _iOS network
+  control is available now_ over a Mac where nothing was filtering.
+
+  It now waits, up to thirty seconds, for a filter to report itself running — one that started _after_
+  the install, not the previous provider's last heartbeat — and leaves as soon as one does.
+  `tapflow setup ios` does the same when it installs the filter.
+
+  When none appears the command says so and **exits non-zero** instead of claiming success, because
+  that state is the one where the configuration is switched on and nothing is answering for it. Usually
+  it is simply still starting, and `tapflow doctor ios` will say so a moment later; if new connections
+  on the Mac have stopped, the command names the `--off` that takes the filter out of the path.
+
+- 79d5c1b: **A release that changes nothing but the filter's host binary no longer replaces the system
+  extension.** `build.sh` stamped one `CFBundleVersion` into the host app and the extension alike, so
+  any rebuild bumped both and macOS replaced a running provider — which interrupts every new connection
+  on the Mac until the replacement is up. Three of the six filter rebuilds so far touched nothing
+  outside `Host/` and paid that for nothing.
+
+  The extension now keeps its version when its own inputs are unchanged. Those inputs are everything
+  except `Host/`, `project.yml` and `build.sh` included, because both change what the extension binary
+  is without touching a line of Swift — and an extension that changed without its version changing is
+  replaced **silently**, leaving the old provider running with every check green.
+
+  **The first rebuild after this still bumps it once**, since `build.sh` is itself an extension input.
+  That is one replace, and the change that made a replace survivable landed first.
+
+  **Two versions means the checks that compare them had to be told apart.** `isNetFilterCurrent` and
+  `tapflow doctor ios` were comparing the host app's version against the extension macOS runs, which
+  only ever agreed because one number was written into both. Left alone, doctor would have reported a
+  Mac whose `/Applications` app is stale as fully healthy — and that binary is the agent's own path to
+  the filter, so an older one meets flags it does not understand. Doctor now names the app when only
+  the app is behind, and says to run `tapflow migrate net-filter`.
+
+  **And an install it cannot judge is refused rather than guessed at.** macOS keeps an extension
+  enforcing when its container app is deleted; the extension's version used to stand in for the host's,
+  and now only gives a lower bound. In that state tapflow says so and names both remedies instead of
+  replacing a filter that may be newer than the one it carries.
+
+- Updated dependencies [a2be8e0]
+- Updated dependencies [3d2aade]
+- Updated dependencies [49f95e4]
+- Updated dependencies [79d5c1b]
+- Updated dependencies [07d4b40]
+- Updated dependencies [da07ac4]
+- Updated dependencies [ea2b5cc]
+- Updated dependencies [916b02a]
+  - @tapflowio/ios-agent@0.20.1
+  - @tapflowio/relay@0.20.1
+  - @tapflowio/android-agent@0.20.1
+  - @tapflowio/agent-core@0.20.1
+  - @tapflowio/flow-runner@0.20.1
+
+## 0.20.0
+
+### Minor Changes
+
+- 964c145: Check the hook's symbols before use, and stop telling a tester to launch an app they already launched
+
+  Two halves of the same failure. Before a launch: `doctor ios` now reads the iPhoneSimulator SDK's
+  export stubs and warns if this Xcode no longer provides a symbol the injected library rebinds — the
+  install is all-or-none, so one missing symbol takes iOS network control down, and a tester would find
+  out by launching an app and reading a dead control. Reading only: no simulator is booted, installed to
+  or launched into.
+
+  After a launch: a library that is present and armed but never loaded by dyld writes no verdict, and
+  that was reported as `awaiting-app` — "launch an app through tapflow", to someone who had, for the life
+  of the session. Once a launch has had time to report and none has arrived, it now says the injection
+  could not be confirmed rather than asking again for something already done.
+
+  **Which is an observation, not a proof.** Nothing was seen, and that is why the answer changed: the
+  alternative was to keep asserting the one thing known to be false. It is a deadline, and the reason set
+  says so where a consumer reads it.
+
+### Patch Changes
+
+- 6d20bba: Advertise the first teammate-ready DNS host from an imported TLS certificate in relay startup output, preferring a concrete SAN over `localhost`. DNS SANs take precedence over the legacy subject CN; certificates with unusable DNS SANs keep the safe `localhost` fallback and now explain it with a warning.
+- f04c2e7: Stop a second tapflow agent from putting the first one's devices back online, and refuse the configuration that made it possible.
+
+  The iOS filter rule is host-wide, and the agent wrote its **whole** offline set on every run — so the host replaced the rule with it. `arm()` runs on every device boot, and a freshly started agent knows of no offline device: starting a second agent therefore put every device the first had taken offline back online, silently, while that tester watched an offline control over an app whose traffic was working. The rule is now changed by a delta the caller names, so an agent removes nothing it was not asked about. The cleanup the whole-set write provided is kept in a more precise form: arming a device names that device, so a rule left behind by a dead process is cleared when that device next boots.
+
+  `tapflow agent start` also refuses when a tapflow agent for the same platform is already running on the Mac, and says so. One agent manages every simulator on its machine — the relay already treats two as one, since agent identity there is the machine's hardware id plus the platform — so the second one was never a supported setup; it just failed later and without a sentence. Nothing changes for the ordinary case of many simulators and many testers on one agent.
+
+  And the filter's container app now exits non-zero on an argument it does not recognise. It used to fall through to writing an empty rule, so a newer agent asking an older installed app a question it could not answer — `--confirm` — did not get a refusal, it **erased the rule**.
+
+- d4a5965: Ship the iOS network filter with tapflow, and give the CLI the three commands that install, migrate and check it.
+
+  The filter is the one layer of the offline toggle that lives on the Mac, and until now tapflow did not distribute it — the feature was complete and unusable by anyone who could not build and sign it themselves. The signed, notarized app now travels inside `@tapflowio/ios-agent`, so `tapflow setup ios` offers it on a new machine — asked for, like every other install that command performs — and `tapflow migrate net-filter` covers a machine set up before the feature existed, or one where setup was declined.
+
+  `tapflow doctor ios` reports three things separately: installed, approved, and **running the version this tapflow carries**. The third is not the same question as the first two — replacing an extension finishes only on restart, so the app on disk can be current while macOS still runs the old one, and that is exactly the state where the dashboard says the Mac is not set up. The version comparison therefore reads what macOS has activated rather than what is in `/Applications`.
+
+  Installing refuses to replace a newer filter than the one it carries: `/Applications` holds one copy for the whole Mac while each install judges it by its own dependencies, so an older checkout would otherwise downgrade the filter a newer agent depends on.
+
+- cb04a51: Write the injected library's verdict file atomically, so a healthy app stops reporting that its state could not be confirmed.
+
+  The library wrote the file with `fopen(path, "w")`, which truncates it in place. The agent reads that file on every `state()` call — the relay triggers one on `device:ready`, on a viewer's re-join and after every toggle — so a read landing inside the write is reachable on a session where nothing is wrong, and what it gets is half a file. The reader cannot tell that from a real answer, so the network control reported `state-unconfirmed` for no cause. It now writes beside the target and `rename`s onto it: a reader sees the whole old file or the whole new one.
+
+  The dylib is a committed prebuilt with no recorded build recipe, so `packages/ios-agent/build-nethook.sh` now holds one. Its flags were recovered from the committed binary rather than remembered, and confirmed by a rebuild whose every section matched byte for byte.
+
+  Two things that were invisible now report. `bin/libtapflow-nethook.dylib` is a committed prebuilt, and every test that exercised the network hook injected a _fake_ path — so editing the source and shipping the previous binary was silent. It is now recorded against its sources like the network filter next door, with the difference stated in the guard: a failure here is the contributor's to fix, because no signing key is involved.
+
+  And the library itself had no diagnosis at all. `DYLD_INSERT_LIBRARIES` naming a path that does not exist is ignored by dyld without a word, so a damaged install launched the app unhooked and wrote no verdict — leaving the control asking the tester to launch an app through tapflow, for the whole session, while the app they launched was running in front of them. `tapflow doctor ios` now reports the library, and the agent says so instead of asking for something already done.
+
+- Updated dependencies [6d20bba]
+- Updated dependencies [9d0df7d]
+- Updated dependencies [becbe77]
+- Updated dependencies [ca397f4]
+- Updated dependencies [f04c2e7]
+- Updated dependencies [3f18f70]
+- Updated dependencies [04c7090]
+- Updated dependencies [fee8244]
+- Updated dependencies [d4a5965]
+- Updated dependencies [cb04a51]
+- Updated dependencies [5e2fcc5]
+- Updated dependencies [7152b21]
+- Updated dependencies [d238c34]
+- Updated dependencies [f497d0a]
+- Updated dependencies [faeaae9]
+- Updated dependencies [4901c8c]
+- Updated dependencies [964c145]
+- Updated dependencies [df94718]
+- Updated dependencies [17c5787]
+- Updated dependencies [ecf34dd]
+- Updated dependencies [2bac3f4]
+- Updated dependencies [1823117]
+- Updated dependencies [636caf5]
+- Updated dependencies [d238c34]
+- Updated dependencies [7f44ff7]
+  - @tapflowio/relay@0.20.0
+  - @tapflowio/agent-core@0.20.0
+  - @tapflowio/android-agent@0.20.0
+  - @tapflowio/ios-agent@0.20.0
+  - @tapflowio/flow-runner@0.20.0
+
 ## 0.19.0
 
 ### Minor Changes

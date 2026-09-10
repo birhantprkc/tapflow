@@ -10,6 +10,7 @@ vi.mock('@tapflowio/relay', () => ({
   loadedEnvPath: null,
   createCertProvider: vi.fn(),
   startTlsBackgroundTasks: vi.fn(() => () => {}),
+  resolveRelayDisplayHost: vi.fn(() => 'localhost'),
   buildCorsOrigins: vi.fn(() => []),
   proxyWithoutPublicUrlWarning: vi.fn(() => null),
 
@@ -24,12 +25,20 @@ vi.mock('../../lib/tunnel-runner.js', () => ({
 }))
 
 import { execSync } from 'node:child_process'
-import { RelayServer, initDb, config } from '@tapflowio/relay'
+import { RelayServer, initDb, config, createCertProvider, resolveRelayDisplayHost } from '@tapflowio/relay'
 import { AgentRegistry } from '@tapflowio/agent-core'
 import { startConfiguredTunnel } from '../../lib/tunnel-runner.js'
 import { cmdStart } from '../../commands/start.js'
 
 const mockExecSync = vi.mocked(execSync)
+
+function agentConnectLine(output: string[]): string {
+  const start = output.findIndex((entry) => entry.includes('tapflow agent start --relay'))
+  expect(start).toBeGreaterThanOrEqual(0)
+  const end = output.findIndex((entry, index) => index >= start && entry.includes('--token <agent-PAT>'))
+  expect(end).toBeGreaterThanOrEqual(start)
+  return output.slice(start, end + 1).join(' ')
+}
 
 function testHasAdb(): boolean {
   try {
@@ -80,6 +89,7 @@ describe('cmdStart', () => {
     })
 
     vi.mocked(config).tunnel = null
+    vi.mocked(config).tls = null
     vi.mocked(startConfiguredTunnel).mockResolvedValue({ tunnel: mockTunnel as never, publicUrl: 'http://my-mac.tailnet.ts.net:4000' })
   })
 
@@ -105,6 +115,79 @@ describe('cmdStart', () => {
     await cmdStart({})
 
     expect(callOrder.indexOf('initDb')).toBeLessThan(callOrder.indexOf('RelayServer'))
+  })
+
+  it('import-cert 인증서의 DNS host를 출력', async () => {
+    vi.mocked(config).tls = { mode: 'import-cert', certPath: '/cert.pem', keyPath: '/key.pem' }
+    vi.mocked(createCertProvider).mockReturnValue({
+      ensureCert: vi.fn().mockResolvedValue({ cert: 'CERT', key: 'KEY' }),
+    } as never)
+    vi.mocked(resolveRelayDisplayHost).mockReturnValue('relay.example.com')
+    const output: string[] = []
+    vi.spyOn(console, 'log').mockImplementation((...args) => output.push(args.join(' ')))
+
+    await cmdStart({})
+
+    expect(resolveRelayDisplayHost).toHaveBeenCalledWith(config.tls, 'CERT', expect.any(Function))
+    expect(output.join('\n')).toContain('https://relay.example.com:4000')
+  })
+
+  it('TLS relay-only agent-connect 안내에 인증서 host를 사용', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('linux')
+    mockExecSync.mockImplementation((cmd) => {
+      if ((cmd as string) === 'which adb') throw new Error('not found')
+      return ''
+    })
+    vi.mocked(config).tls = { mode: 'import-cert', certPath: '/cert.pem', keyPath: '/key.pem' }
+    vi.mocked(createCertProvider).mockReturnValue({
+      ensureCert: vi.fn().mockResolvedValue({ cert: 'CERT', key: 'KEY' }),
+    } as never)
+    vi.mocked(resolveRelayDisplayHost).mockReturnValue('relay.example.com')
+    const output: string[] = []
+    vi.spyOn(console, 'log').mockImplementation((...args) => output.push(args.join(' ')))
+
+    await cmdStart({})
+
+    const line = agentConnectLine(output)
+    expect(line).toContain('wss://relay.example.com:4000')
+    expect(line).not.toContain('<this-ip>')
+  })
+
+  it('HTTP relay-only agent-connect 안내는 host placeholder를 유지', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('linux')
+    mockExecSync.mockImplementation((cmd) => {
+      if ((cmd as string) === 'which adb') throw new Error('not found')
+      return ''
+    })
+    const output: string[] = []
+    vi.spyOn(console, 'log').mockImplementation((...args) => output.push(args.join(' ')))
+
+    await cmdStart({})
+
+    const line = agentConnectLine(output)
+    expect(line).toContain('ws://<this-ip>:4000')
+    expect(line).not.toContain('ws://localhost:4000')
+  })
+
+  it.each(['localhost', 'Localhost'])('TLS host가 %s로 fallback되면 relay-only agent-connect 안내는 placeholder를 유지', async (displayHost) => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('linux')
+    mockExecSync.mockImplementation((cmd) => {
+      if ((cmd as string) === 'which adb') throw new Error('not found')
+      return ''
+    })
+    vi.mocked(config).tls = { mode: 'import-cert', certPath: '/cert.pem', keyPath: '/key.pem' }
+    vi.mocked(createCertProvider).mockReturnValue({
+      ensureCert: vi.fn().mockResolvedValue({ cert: 'CERT', key: 'KEY' }),
+    } as never)
+    vi.mocked(resolveRelayDisplayHost).mockReturnValue(displayHost)
+    const output: string[] = []
+    vi.spyOn(console, 'log').mockImplementation((...args) => output.push(args.join(' ')))
+
+    await cmdStart({})
+
+    const line = agentConnectLine(output)
+    expect(line).toContain('wss://<this-ip>:4000')
+    expect(line).not.toContain(`wss://${displayHost}:4000`)
   })
 
   it('macOS + adb 있으면 iOS와 Android 모두 연결', async () => {

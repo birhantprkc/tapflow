@@ -3,11 +3,11 @@ import http from 'http'
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
-import { spawnSync } from 'child_process'
 import { RelayServer } from '../RelayServer'
 import { initDb, getDb, closeDb } from '../db'
 import { makePasswordHash } from '../api/auth'
 import { signJwt } from '../middleware/auth'
+import { writeZipFixture } from './helpers/zipFixture'
 
 // multipart/form-data 바디를 직접 구성한다 (busboy 파싱용).
 function multipartBody(boundary: string, parts: { name: string; filename?: string; contentType?: string; data: Buffer | string }[]): Buffer {
@@ -106,10 +106,8 @@ describe('upload size-limit handling', () => {
   })
 
   it('빌드: .app 디렉토리 없는 zip은 400 + 영어 안내', async () => {
-    const readme = path.join(uploadsDir, 'readme.txt')
-    fs.writeFileSync(readme, 'hello')
     const noAppZip = path.join(uploadsDir, 'noapp.zip')
-    spawnSync('zip', ['-j', noAppZip, readme])
+    writeZipFixture(noAppZip, [{ name: 'readme.txt', data: 'hello' }])
     const boundary = 'X4'
     const body = multipartBody(boundary, [{ name: 'file', filename: 'app.zip', contentType: 'application/zip', data: fs.readFileSync(noAppZip) }])
     const r = await httpPostMultipart(port, '/api/v1/builds', body, boundary, cookie)

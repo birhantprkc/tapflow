@@ -1,0 +1,5 @@
+# The network-filter app is a signed, notarized macOS bundle. Git's own heuristic calls five of its
+# files text — including `_CodeSignature/CodeResources`, which the signature seals byte for byte — so a
+# clone with `core.autocrlf=true` would rewrite line endings and break the signature. The failure
+# surfaces as the freshness guard saying the app is not the recorded one, which is true and misleading.
+packages/ios-agent/bin/TapflowNetFilter.app/** binary

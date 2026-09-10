@@ -5,7 +5,7 @@ import { tmpdir } from 'os'
 import { randomUUID } from 'crypto'
 import { spawnSync } from 'child_process'
 import { WebSocket } from 'ws'
-import type { BootAbandonReason, ClipboardErrorPayload, Device, DeviceAgent, UIElement } from '@tapflowio/agent-core'
+import type { BootAbandonReason, ClipboardErrorPayload, Device, DeviceAgent, NetworkControlCapability, NetworkStatePayload, UIElement } from '@tapflowio/agent-core'
 import { createLogger, PlatformError, ValidationError, bootAbandonMessage, BOOT_NO_SESSION_STATE } from '@tapflowio/agent-core'
 import type {
   AgentControlOutbound, InputErrorReason, ClipboardReplyBody, OpenUrlReplyBody,
@@ -15,7 +15,13 @@ import type {
 const logger = createLogger('ios-agent')
 
 // Typed so a typo cannot ship silently — the viewer gates the whole clipboard bridge on this.
-const AGENT_CAPABILITIES: AgentCapability[] = ['clipboard']
+// `full-reset` is honoured in `handleDeviceBoot`, which shuts a running device down before
+// `simctl erase` (which refuses anything but a shut-down device) and boots it again.
+// `network-control` claims what the other two claim: this agent has the code. Whether the injection
+// actually took is per device and per app, and `network:state.available` carries that — the split the
+// protocol documents. Added last, after the handler and the boot-time arming, because the string on
+// its own is what puts a control on screen.
+const AGENT_CAPABILITIES: AgentCapability[] = ['clipboard', 'full-reset', 'network-control']
 
 // Human prose for each reason. Not in `@tapflowio/protocol`: that package's main entry must stay
 // runtime-free so it erases under `import type` and never reaches the dashboard bundle — a lookup
@@ -64,6 +70,7 @@ import {
 } from '@tapflowio/agent-core/utils'
 import type { AudioFrame } from '@tapflowio/agent-core'
 import { SimctlWrapper, isDeviceMissingError, ClipboardTooLargeError, firstLine } from './SimctlWrapper.js'
+import { SimulatorNetwork } from './SimulatorNetwork.js'
 import {
   MAX_CLIPBOARD_BYTES, clipboardByteLength,
   CLIPBOARD_SENTINEL_PREFIX as SENTINEL_PREFIX, isClipboardSentinel as isSentinel,
@@ -101,6 +108,9 @@ export interface IOSAgentOptions {
   token?: string
   /** Handshake(연결~agent:registered) 타임아웃 ms. 기본 10초, 테스트용 주입 가능. */
   handshakeTimeoutMs?: number
+  /** The three-layer network control (#607). Injectable so a test can point it somewhere harmless;
+   *  defaults to one wired to this agent's simctl (and, under vitest, to nothing real). */
+  network?: SimulatorNetwork
 }
 
 interface DeviceState {
@@ -151,8 +161,9 @@ interface DeviceState {
   audioVolume: number
 }
 
-export class IOSAgent implements DeviceAgent {
+export class IOSAgent implements DeviceAgent, NetworkControlCapability {
   private readonly simctl: SimctlWrapper
+  private readonly network: SimulatorNetwork
   private readonly fps: number
   private readonly intervalMs: number | undefined
   private readonly reconnectDelays: number[]
@@ -191,6 +202,26 @@ export class IOSAgent implements DeviceAgent {
     ws.send(JSON.stringify(msg))
   }
   private deviceStates = new Map<string, DeviceState>()
+  /**
+   * Devices **this agent booted**, by device id.
+   *
+   * Separate from `DeviceState.booted` because the two answer different questions and have different
+   * lifetimes. `booted` is liveness and is a cache: `initDeviceStates` rebuilds the whole map on
+   * every `agent:registered`, so it does not survive a reconnect. This does — the agent process is
+   * the same one across a reconnect — and it is what says *which* device is tapflow's when a
+   * developer has a second simulator of their own open.
+   *
+   * Without it, a reconnect on a two-simulator desk left the capability entry points asking simctl,
+   * getting two live devices, and refusing both. Written only where a boot succeeds; never by
+   * `ackInput`, which verifies liveness and proves nothing about ownership.
+   *
+   * **The `DeviceAgent.boot`/`shutdown` delegates do not touch this**, and that is deliberate: they
+   * hand a device id straight to simctl without opening a session, so a device they start is not one
+   * this agent is driving. Nothing in the repo calls either — the same position `stream()` is in — so
+   * wiring ownership through them would be a mechanism built for a caller that does not exist. A
+   * future caller that wants both should go through the boot handler rather than around it.
+   */
+  private readonly ownedDevices = new Set<string>()
   // Last app launched per device (deviceId → bundleId). The XCUITest tree backend
   // queries by bundleId; kept outside DeviceState so it survives a relay reconnect
   // (which clears deviceStates) while the app keeps running in the simulator.
@@ -214,6 +245,25 @@ export class IOSAgent implements DeviceAgent {
       throw new PlatformError('IOSAgent requires macOS (xcrun simctl is macOS-only)')
     }
     this.simctl = simctl ?? new SimctlWrapper()
+    // **Never the real filter under vitest.** Layer 1 is a system extension installed on the
+    // developer's Mac, and `arm()` runs on every boot — so a suite that booted a mock device was
+    // launching the notarized container app and rewriting the host's live filter configuration, once
+    // per boot test, on any machine where tapflow's own filter is installed. Nothing in the suite
+    // said so, because the class reports a missing container app rather than failing.
+    //
+    // Pointed at a path that does not exist rather than stubbed out: that is the same state a machine
+    // without the app is in, so the tests exercise the real class along its real reporting path
+    // (`filter-unavailable`) instead of a double that could drift from it. Same shape, and the same
+    // reason, as `sleepBlocker` below.
+    this.network = options.network ?? new SimulatorNetwork(
+      this.simctl,
+      process.env.VITEST ? { filterHostBinary: path.join(tmpdir(), 'tapflow-no-filter-host') } : {},
+    )
+    // **Wired here rather than in the constructor call above, and the difference is coverage.** An
+    // injected `SimulatorNetwork` — which is what every test uses — would otherwise never carry the
+    // handler, so the only path that tells a tester enforcement was lost was reachable in production
+    // and in nothing else.
+    this.network.setEnforcementLostHandler((deviceId) => { this.reportEnforcementLost(deviceId) })
     this.fps = options.fps ?? 30
     this.intervalMs = options.intervalMs
     this.reconnectDelays = options.reconnectDelays ?? [1000, 2000, 4000, 8000, 16000, 30000]
@@ -232,6 +282,9 @@ export class IOSAgent implements DeviceAgent {
 
   async connect(relayUrl: string): Promise<void> {
     this._stopping = false
+    // Paired with the `dispose()` in `disconnect()`. This method is public and reuses the network, so
+    // without it a reconnect leaves the liveness watcher off for good — see `SimulatorNetwork.resume`.
+    this.network.resume()
     if (this._reconnectTimer) { clearTimeout(this._reconnectTimer); this._reconnectTimer = null }
     this.relayUrl = relayUrl
     const allDevices = await this.simctl.listDevices()
@@ -361,6 +414,7 @@ export class IOSAgent implements DeviceAgent {
     })
   }
 
+
   disconnect(): void {
     this._stopping = true
     if (this._reconnectTimer) { clearTimeout(this._reconnectTimer); this._reconnectTimer = null }
@@ -371,6 +425,9 @@ export class IOSAgent implements DeviceAgent {
     }
     this.deviceStates.clear()
     this.uiTreeReader.stop()
+    // The liveness watcher outlives every device it was started for, so it is stopped here with the
+    // other things that tick. It is `unref`'d, which is why nobody noticed it had no caller.
+    this.network.dispose()
     this.sleepBlocker.release()
     this.ws?.close()
     this.ws = null
@@ -432,6 +489,13 @@ export class IOSAgent implements DeviceAgent {
   }
 
   private cleanupDeviceState(state: DeviceState): void {
+    // Drop this device out of the filter rule. The rule lives on the host and is keyed only by udid,
+    // so a simulator that goes away while offline would otherwise keep its udid named there for the
+    // rest of the Mac's uptime — and the next boot of that same device would come up offline with
+    // nothing on screen saying why.
+    void this.network.forget(state.deviceId).catch((e: unknown) => {
+      logger.warn('could not clear the network rule for a retired device:', (e as Error).message)
+    })
     void state.streamReader?.cancel()
     state.streamReader = null
     state.captureStreamer = null // reader.cancel() kills the helper proc; drop the ref so a stale requestKeyframe() no-ops
@@ -714,6 +778,13 @@ export class IOSAgent implements DeviceAgent {
       // twice a second against a device that is now deliberately off — for the rest of the deadline,
       // with nothing left that wants the answer.
       const bootedDevice = await this.simctl.waitUntilBooted(deviceId, { isStale: () => seq !== state.bootSeq })
+      // Arm the network injection while nothing is running on the device yet — dyld reads the
+      // environment at process start, so anything launched before this is unhooked for its whole life.
+      // Best-effort: the network toggle is opt-in and a device that cannot be armed says so through
+      // `network:state.available`, which is a better answer than a boot that fails for it.
+      await this.network.arm(deviceId).catch((e: unknown) => {
+        logger.warn('could not arm the network injection:', (e as Error).message)
+      })
       // Another await — a multi-second one — and `sendChromeData` below starts a helper process. A
       // shutdown or a newer boot arriving in this gap would otherwise get a helper installed for the
       // device it is taking down — and one that revives itself, so the stale reference outlives the
@@ -733,7 +804,16 @@ export class IOSAgent implements DeviceAgent {
       // — never blocks/affects the video path.
       if (this.audioEnabled()) this.startAudioCapture(state, streamWs, deviceId)
       state.booted = true
+      // **"Driving", not "transitioned from off to on".** A tester who picks a simulator that was
+      // already running is choosing the device tapflow should act on, and `simctl boot` is issued on
+      // every path precisely so that case reaches here. Requiring an off→on transition would leave
+      // that device unowned and put the resolvers back to refusing between two live simulators.
+      this.ownedDevices.add(deviceId)
       this.sendMsg({ type: 'device:ready', sessionId, requestId, payload: { deviceId } })
+      // The unsolicited report the protocol names on `device:ready`. It follows the ready rather than
+      // riding inside it: a tester whose device just came up can arm the toggle in the same breath, and
+      // a boot that armed nothing still has to say so rather than leaving the control blank.
+      void this.reportNetworkState(sessionId)
 
       // Sync AppleKeyboards after ready — fire-and-forget so streaming isn't delayed.
       // hw=Automatic lets the hardware layout follow the active input source on LANG1/CapsLock.
@@ -777,6 +857,16 @@ export class IOSAgent implements DeviceAgent {
     if (!state) return
 
     this.bumpBootSeq(state, 'shut-down')
+    // **Said here as well as in `cleanupDeviceState`, because this path does not go through it.**
+    // The teardown below is a copy of that method's, and the copy is older than the network rule —
+    // so a device shut down from the dashboard while offline kept its udid in the host filter for
+    // the rest of the Mac's uptime, and its next boot came up with traffic dead and nothing on
+    // screen saying why. The two bodies have already diverged in another respect (this one does not
+    // stop the audio tap), which is why this is a call rather than a merge: unifying them changes
+    // audio teardown on a path nobody asked about.
+    void this.network.forget(deviceId).catch((e: unknown) => {
+      logger.warn('could not clear the network rule for a shut-down device:', (e as Error).message)
+    })
     void state.streamReader?.cancel()
     state.streamReader = null
     state.captureStreamer = null // reader.cancel() kills the helper proc; drop the ref so a stale requestKeyframe() no-ops
@@ -792,6 +882,13 @@ export class IOSAgent implements DeviceAgent {
 
     try {
       await this.simctl.shutdown(deviceId)
+      // **After the shutdown lands, not with the teardown above.** Everything before this point is
+      // the session's state, which is correct to drop the moment a shutdown is asked for. Ownership
+      // is about the *device*, and a shutdown that throws leaves it running — forgetting it was ours
+      // there would hand an ambiguous choice back to the resolvers for a simulator tapflow is still
+      // driving. `cleanupDeviceState` deliberately does not clear it at all: that path is a relay
+      // disconnect, where the device outlives the session and ownership is the thing worth keeping.
+      this.ownedDevices.delete(deviceId)
       this.sendMsg({
         type: 'device:shutdown-done',
         sessionId,
@@ -980,8 +1077,18 @@ export class IOSAgent implements DeviceAgent {
           respond({ type: 'app:launch-error', message: 'No booted device' })
           break
         }
-        this.simctl.launchApp(launchState.deviceId, bundleId)
-          .then(() => {
+        // The target is named BEFORE the launch, and the order is the whole point: dyld reads the
+        // environment when the process starts, so naming it afterwards arms the next launch and leaves
+        // this one unhooked while `available` would still say true.
+        this.network.target(launchState.deviceId, bundleId)
+          .catch((e: unknown) => logger.warn('could not name the network target:', (e as Error).message))
+          .then(() => this.simctl.launchApp(launchState.deviceId, bundleId))
+          .then((pid) => {
+            // **After the launch, with the pid it returned.** The network control measures how long a
+            // started process has gone without reporting its hooks; opening that window before
+            // `simctl launch` had run put the launch itself inside the budget, and left it open when
+            // the launch failed. A null or unchanged pid means no new process, so nothing is owed.
+            this.network.markLaunched(launchState.deviceId, pid)
             // Track the foreground app so ui:tree:request can query it via XCUITest.
             this.lastBundleIds.set(launchState.deviceId, bundleId)
             // Audio: the whole-sim tap's poll picks up the launched app process within one interval;
@@ -1293,6 +1400,28 @@ export class IOSAgent implements DeviceAgent {
       // cannot know when the key actually lands (a visible software keyboard makes this path
       // await hideSoftwareKeyboard first), and reading too early returns the PREVIOUS
       // pasteboard — a stale value the user would never notice.
+      case 'network:set': {
+        const requestId = this.correlatorOf(msg)
+        if (requestId === null) break
+        // `?? {}` and a re-check of a field the relay's schema already requires: this case owes a
+        // reply, and a cast that dereferences a missing payload throws into a dispatch that swallows
+        // it — answering nothing at all, the one failure a requester cannot tell from a hung device.
+        const { offline } = (msg.payload ?? {}) as { offline?: boolean }
+        if (typeof offline !== 'boolean') {
+          this.sendMsg({
+            type: 'network:error', sessionId: msg.sessionId, requestId,
+            message: 'network:set payload must carry a boolean `offline`.',
+          })
+          break
+        }
+        void this.handleNetworkSet(msg.sessionId, offline, requestId)
+        break
+      }
+      // The relay asks on a viewer's re-join (#614). Uncorrelated both ways: the reply is a report and
+      // nothing is waiting on it, so a session with no booted device answers nothing at all.
+      case 'network:request-state':
+        void this.reportNetworkState(msg.sessionId)
+        break
       case 'clipboard:read': {
         // `requestId: string`, matching the screenshot and ui:tree casts a few cases below — clipboard was
         // the only one reading it as optional, for the same wire guarantee. `ClipboardRequest.requestId` is
@@ -1582,10 +1711,123 @@ export class IOSAgent implements DeviceAgent {
    *  (`AndroidAgent.ts:1429`); these do the same. Throwing beats falling back to simctl's `booted`
    *  alias, which would quietly act on whichever simulator happened to be up. */
   async installApp(appPath: string): Promise<void> {
-    await this.simctl.installApp(this.soleDeviceId(), appPath)
+    await this.simctl.installApp(await this.soleLiveDeviceId(), appPath)
   }
+  // ── network control (#607) ─────────────────────────────────────────────────
+  //
+  // iOS has no airplane mode to ask for, so "offline" is three mechanisms applied together — see
+  // `SimulatorNetwork`, which owns the ordering. What lives here is the wire: which device a request
+  // means, and what the session is told afterwards.
+
+  /** The device a session is driving, or undefined when nothing is booted. */
+  /**
+   * The session's device, **only while it is up**.
+   *
+   * `deviceStates` holds one entry per *registered* simulator, not per running one, so this used to
+   * answer for a device that was shut down — or never booted. The network path is where that costs
+   * something: a toggle after a shutdown writes the kernel rule for a dead udid, and `arm()` is the
+   * only thing that clears it, which now happens on the *next* boot of that device. Until then the
+   * host is dropping flows for nothing, and a simulator that reuses the udid comes up offline.
+   *
+   * **`booted` alone is not the check, and reading it as one is a regression this shipped once.**
+   * The flag is a cache, not the truth: `initDeviceStates` runs on `agent:registered`, which is every
+   * *reconnect* and not only the first connection, so it is `false` for a simulator that has been up
+   * the whole time. Gated on the flag alone, a relay restart left the toggle answering
+   * `No booted device` for a running device and left `network:request-state` — the message a viewer's
+   * re-join sends, which exists precisely for this moment — silently unanswered, so the control never
+   * left `waiting`.
+   *
+   * So it falls back to asking simctl and caches the answer, which is what `ackInput` already does
+   * with the same flag and for the same reason. That is also why this is async.
+   */
+  private async deviceFor(sessionId: string): Promise<string | undefined> {
+    const state = this.deviceStates.get(sessionId)
+    if (!state) return undefined
+    if (state.booted) return state.deviceId
+    if (!(await this.isBooted(state.deviceId))) return undefined
+    state.booted = true
+    return state.deviceId
+  }
+
+  /**
+   * Send the current state to a session.
+   *
+   * Uncorrelated on purpose: this answers `device:ready` and a viewer's re-join, neither of which is a
+   * request anyone is waiting on. Silent with no device, for the same reason `network:error` would be
+   * addressed to nobody.
+   */
+  private async reportNetworkState(sessionId: string): Promise<void> {
+    const deviceId = await this.deviceFor(sessionId)
+    if (!deviceId) return
+    this.sendMsg({ type: 'network:state', sessionId, payload: this.network.state(deviceId) })
+  }
+
+  /**
+   * A device that was offline stopped being enforced — tell whoever is watching it.
+   *
+   * **Uncorrelated, and it has to be**: nobody asked. `network:error` is the wrong carrier for the
+   * same reason — that type is *"a `network:set` that could not be dispatched"*, and this is not a
+   * request failing. `network:state` already supports an unsolicited frame; the viewer re-join path
+   * has been sending one since #614.
+   *
+   * **Every session holding the device, not one.** A device can sit behind two sessions, and the one
+   * that happened to make the last request is not necessarily the one whose tester is looking at it.
+   *
+   * Synchronous on purpose: `deviceFor` asks simctl before believing a device is up, and this runs
+   * from a timer while something has just gone wrong with that device. The state being reported is
+   * about the filter, not about whether the simulator is still booted.
+   */
+  private reportEnforcementLost(deviceId: string): void {
+    for (const [sessionId, state] of this.deviceStates) {
+      if (state.deviceId !== deviceId) continue
+      this.sendMsg({ type: 'network:state', sessionId, payload: this.network.state(deviceId) })
+    }
+  }
+
+  private async handleNetworkSet(sessionId: string, offline: boolean, requestId: string): Promise<void> {
+    const deviceId = await this.deviceFor(sessionId)
+    if (!deviceId) {
+      this.sendMsg({
+        type: 'network:error', sessionId, requestId,
+        message: 'No booted device — boot one before changing its network.',
+      })
+      return
+    }
+    try {
+      const payload = await this.network.setOffline(deviceId, offline)
+      this.sendMsg({ type: 'network:state', sessionId, requestId, payload })
+    } catch (e: unknown) {
+      this.sendMsg({
+        type: 'network:error', sessionId, requestId,
+        message: e instanceof Error ? e.message : String(e),
+      })
+    }
+  }
+
+  /**
+   * The two capability entry points, which resolve their device the way every other one on this class
+   * does — **`soleDeviceState`, not the first key in the map.**
+   *
+   * `deviceStates` holds one entry per *registered* simulator and this Mac reports dozens, so
+   * `keys().next()` is whichever simctl listed first, almost always a shut-down one. That was wrong
+   * before the liveness check and became a hard failure after it: `deviceFor` answers `undefined` for
+   * a shut-down device, so both of these threw `No booted device` while a booted device sat right
+   * there. `soleDeviceState` filters on `booted` and refuses to guess between two, which is the
+   * policy this class already settled and wrote down — these were simply not using it.
+   *
+   * `deviceFor` stays for the wire path, where the caller names a session and the only open question
+   * is whether that device is up.
+   */
+  async setNetworkOffline(offline: boolean): Promise<NetworkStatePayload> {
+    return this.network.setOffline(await this.soleLiveDeviceId(), offline)
+  }
+
+  async networkState(): Promise<NetworkStatePayload> {
+    return this.network.state(await this.soleLiveDeviceId())
+  }
+
   async launchApp(bundleId: string): Promise<void> {
-    await this.simctl.launchApp(this.soleDeviceId(), bundleId)
+    await this.simctl.launchApp(await this.soleLiveDeviceId(), bundleId)
   }
 
   /** The one booted session, or undefined when there is no unambiguous answer. Callers that can
@@ -1596,15 +1838,9 @@ export class IOSAgent implements DeviceAgent {
     return live.length === 1 ? live[0] : undefined
   }
 
-  private soleDeviceState(): DeviceState {
-    // `deviceStates` holds one entry per *registered* simulator, not per running one — the relay
-    // opens a session for every device in `agent:register` and this Mac reports dozens. Taking the
-    // first entry would pick whichever simulator simctl listed first, almost always a shut-down
-    // one, which is worse than the `booted` alias it replaced: the alias at least found the device
-    // that was actually up. `booted` is set by handleDeviceBoot, so filtering on it is the liveness
-    // check `AndroidAgent` gets for free from `getSerial` (its serial map is only populated on
-    // launch).
-    const live = [...this.deviceStates.values()].filter((s) => s.booted)
+  /** The one device out of `live`, or the refusal. Factored so the async resolver below answers
+   *  ambiguity with the same words rather than its own. */
+  private soleOf(live: DeviceState[]): DeviceState {
     if (live.length === 0) throw new ValidationError('no booted device — call connect() first')
     // Refusing beats guessing: this interface has no way to say which device is meant, and picking
     // one silently is the whole defect being fixed here.
@@ -1614,10 +1850,78 @@ export class IOSAgent implements DeviceAgent {
     return live[0]!
   }
 
-  private soleDeviceId(): string { return this.soleDeviceState().deviceId }
+  /**
+   * **The synchronous resolver, and `stream()` is the only caller left.**
+   *
+   * Everything else that resolves a device for a capability call awaits `soleLiveDeviceState`,
+   * which asks simctl rather than trusting `booted` — a flag `initDeviceStates` clears on every
+   * reconnect. `stream()` returns a `ReadableStream` and is part of `DeviceAgent`, so it cannot
+   * await without changing that interface across both agents.
+   *
+   * **It is deliberately left with the stale flag, and nothing was added to paper over that.** A
+   * refresh that marked every simulator simctl reports as booted was written and removed: it also
+   * marked the ones a developer had open in Simulator.app, which destroys the very thing `booted`
+   * disambiguates by — *the device this agent booted* — and made all the callers above refuse with
+   * "2 booted devices" on the common two-simulator desk. Fire-and-forget, it could also resurrect a
+   * flag a `device:shutdown` had just cleared, with no path back.
+   *
+   * That was a mechanism for a method **nothing in this repo calls**. A future caller needs the
+   * interface decision, not a guess: make `stream()` async across `DeviceAgent`, or give it an
+   * explicit device argument.
+   */
+  private soleDeviceState(): DeviceState {
+    // `deviceStates` holds one entry per *registered* simulator, not per running one — the relay
+    // opens a session for every device in `agent:register` and this Mac reports dozens. Taking the
+    // first entry would pick whichever simulator simctl listed first, almost always a shut-down
+    // one, which is worse than the `booted` alias it replaced: the alias at least found the device
+    // that was actually up. `booted` is set by handleDeviceBoot, so filtering on it is the liveness
+    // check `AndroidAgent` gets for free from `getSerial` (its serial map is only populated on
+    // launch).
+    return this.soleOf([...this.deviceStates.values()].filter((s) => s.booted))
+  }
+
+  /**
+   * `soleDeviceState`, but **it asks simctl before believing that nothing is booted**.
+   *
+   * `booted` is a cache and `initDeviceStates` clears it on `agent:registered` — every reconnect,
+   * not only the first connection. So after a relay restart every flag reads false while the
+   * simulators are still running, and a resolver that trusts the cache refuses a live device until
+   * something else happens to refresh it. On the wire path that is `deviceFor`; these two entry
+   * points have no session id to work from, so without this they stay broken.
+   *
+   * Only the empty case pays for the `listDevices` call: a cache that already names a booted device
+   * is not wrong, just possibly incomplete, and the ambiguity refusal is stricter for having fewer
+   * candidates rather than looser.
+   *
+   * **Every entry point that can await now comes through here** — the network pair, `installApp`,
+   * `launchApp`, `queryUITree`, `screenshot`, `openUrl`. `stream()` cannot, and `soleDeviceState`
+   * above says what that costs and why nothing was bolted on to hide it.
+   */
+  private async soleLiveDeviceState(): Promise<DeviceState> {
+    const cached = [...this.deviceStates.values()].filter((s) => s.booted)
+    if (cached.length > 0) return this.soleOf(cached)
+
+    const booted = new Set(
+      (await this.simctl.listDevices()).filter((d) => d.status === 'booted').map((d) => d.id),
+    )
+    const up = [...this.deviceStates.values()].filter((s) => booted.has(s.deviceId))
+    // **Ownership narrows liveness, and only when it can.** A developer with their own simulator open
+    // makes two devices live, and asking simctl alone would find both and refuse both — the reconnect
+    // case this whole path exists for. `ownedDevices` survives the reconnect and says which one is
+    // tapflow's. When it says nothing — a fresh agent process, or devices booted entirely outside
+    // tapflow — there is no ownership to apply and the refusal is the honest answer.
+    const mine = up.filter((s) => this.ownedDevices.has(s.deviceId))
+    const live = this.soleOf(mine.length > 0 ? mine : up)
+    live.booted = true   // same cache write `ackInput` makes, so the next call skips simctl
+    return live
+  }
+
+  private async soleLiveDeviceId(): Promise<string> {
+    return (await this.soleLiveDeviceState()).deviceId
+  }
 
   async queryUITree(): Promise<UIElement[]> {
-    const state = this.soleDeviceState()
+    const state = await this.soleLiveDeviceState()
     return this.readUITree(state)
   }
 
@@ -1706,7 +2010,7 @@ export class IOSAgent implements DeviceAgent {
   }
   // async, not a bare `return`: `soleDeviceId` throws, and a synchronous throw out of a method
   // typed `Promise<T>` skips every caller's `.catch`.
-  async screenshot(): Promise<Buffer> { return this.simctl.screenshot(this.soleDeviceId()) }
+  async screenshot(): Promise<Buffer> { return this.simctl.screenshot(await this.soleLiveDeviceId()) }
   stream(): ReadableStream<Buffer> {
     const first = this.soleDeviceState()
     // DeviceAgent.stream() is the platform-neutral Buffer contract; unwrap StreamFrame payloads.
@@ -1731,8 +2035,7 @@ export class IOSAgent implements DeviceAgent {
     return Promise.resolve()
   }
 
-  openUrl(url: string): Promise<void> {
-    const first = this.soleDeviceState()
-    return this.simctl.openUrl(first.deviceId, url)
+  async openUrl(url: string): Promise<void> {
+    return this.simctl.openUrl(await this.soleLiveDeviceId(), url)
   }
 }

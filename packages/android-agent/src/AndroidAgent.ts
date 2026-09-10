@@ -1,7 +1,10 @@
 import os from 'os'
 import { randomUUID } from 'crypto'
 import { WebSocket } from 'ws'
-import type { AndroidButton, BootAbandonReason, ClipboardErrorPayload, Device, DeviceAgent, UIElement } from '@tapflowio/agent-core'
+import type {
+  AndroidButton, BootAbandonReason, ClipboardErrorPayload, Device, DeviceAgent,
+  NetworkControlCapability, NetworkStatePayload, UIElement,
+} from '@tapflowio/agent-core'
 import type {
   AgentControlOutbound, ClipboardReplyBody, OpenUrlReplyBody,
   AppInstallReplyBody, AppLaunchReplyBody, AppClearStateReplyBody,
@@ -36,7 +39,7 @@ import {
 } from '@tapflowio/agent-core/utils'
 import { execFileSync } from 'child_process'
 import { AdbWrapper } from './AdbWrapper.js'
-import { EmulatorLauncher, findEmulatorPid } from './EmulatorLauncher.js'
+import { EmulatorLauncher, findEmulatorPid, probeEmulator, stopEmulatorProcess } from './EmulatorLauncher.js'
 import { ensureHelperApp, launchMuteOnlyTap, isAudioSupported } from '@tapflowio/audiotap-helper'
 import { AndroidTouchHelper } from './AndroidTouchHelper.js'
 import { parseUiAutomatorDump } from './uiTree.js'
@@ -48,8 +51,14 @@ import { EmulatorVideo } from './emulator/EmulatorVideo.js'
 
 const logger = createLogger('android-agent')
 
-// Typed so a typo cannot ship silently — the viewer gates the whole clipboard bridge on this.
-const AGENT_CAPABILITIES: AgentCapability[] = ['clipboard']
+// Typed so a typo cannot ship silently — the viewer gates the whole clipboard bridge on this, and
+// since #447 the Full reset toggle too. `full-reset` is honoured in `handleDeviceBoot`, which stops
+// an already-running emulator and relaunches it with `-wipe-data`.
+// `network-control` claims what the other two claim: this agent has the code. Whether airplane mode
+// actually works on a given image is per device, and `network:state.available` carries that — the
+// split the protocol documents. Added last, after the handler and the boot-time reset, because the
+// string on its own is what puts a control on screen.
+const AGENT_CAPABILITIES: AgentCapability[] = ['clipboard', 'full-reset', 'network-control']
 
 // Parse H.264 SPS NAL unit to extract frame dimensions.
 // scrcpy sends a new SPS (inside an IDR keyframe) whenever the capture size changes —
@@ -155,6 +164,22 @@ interface DeviceState {
   touchHelper: AndroidTouchHelper | null
   // Device-booted flag for truthful input acks — set on device:ready, cleared on shutdown; false after a reconnect until the ack path re-verifies once via adb.
   booted: boolean
+  /** The last airplane-mode value actually read off this device, and **only** the fallback for a read
+   *  that fails — never the answer. `readNetworkState` still asks the device every time, because a
+   *  remembered value cannot see one changed outside tapflow.
+   *
+   *  It exists because `NetworkNotSteerable.offline` is declared "still the device's real state", and
+   *  the re-join report (#614) is the first producer with nothing to pass: the boot path hands over
+   *  what it just read and `network:set` hands over what it measured, but a viewer coming back has no
+   *  such moment behind it.
+   *
+   *  **`undefined` until something is observed, rather than `false`.** The two are not the same claim:
+   *  `false` says "on the network" and the absent value says "not known", and a boolean spells the
+   *  second as the first. Reachable — a boot whose own read failed writes nothing here, and a tester
+   *  who then flips airplane mode in the emulator's own UI leaves a device that is offline, unreadable
+   *  and never observed. Answering `offline: false` for it is the one direction that hides the
+   *  problem this feature exists to show, so `reportNetworkState` stays silent there instead. */
+  lastNetworkOffline?: boolean
   streamWs: WebSocket | null
   scrcpySession: ScrcpySession | null
   emulatorVideo: EmulatorVideo | null
@@ -231,7 +256,12 @@ function bounded<T>(work: Promise<T>, ms: number, what: string): Promise<T> {
 }
 const ADB_KEYEVENT_TIMEOUT_MS = 5_000
 
-export class AndroidAgent implements DeviceAgent {
+// `implements NetworkControlCapability` as well as `DeviceAgent`, and the clause is the whole
+// point: without it the two methods are just methods, and a change to the interface reaches this
+// class through nothing at all. `AgentRegistry.test.ts` once declared `implements DeviceAgent`
+// while missing two members — the clause only works when something checks it, and here that is the
+// compiler.
+export class AndroidAgent implements DeviceAgent, NetworkControlCapability {
   private readonly adb: AdbWrapper
   private readonly launcher: EmulatorLauncher
   private ws: WebSocket | null = null
@@ -291,6 +321,18 @@ export class AndroidAgent implements DeviceAgent {
     this.sleepBlocker = options.sleepBlocker ?? (process.env.VITEST ? { acquire() {}, release() {} } : createSleepBlocker())
   }
 
+  /**
+   * **The one entry point that still takes the first registered session, and that is a decision.**
+   *
+   * Every other session-less member goes through `soleLiveOrNone` and refuses when the choice is
+   * ambiguous (#617). This one does not, for the reason #617 gives itself: reading and writing are
+   * not the same risk. The worst case here is answering about the wrong device; there it is taking
+   * someone else's device off the network while they are using it.
+   *
+   * It also answers *before* any device is chosen — it is what an agent reports about itself — so a
+   * refusal would turn "which session am I on" into an error on a healthy multi-device Mac.
+   * `IOSAgent.sessionId` is identical, deliberately.
+   */
   get sessionId(): string | null {
     const first = this.deviceStates.values().next().value
     return first?.sessionId ?? null
@@ -926,7 +968,7 @@ export class AndroidAgent implements DeviceAgent {
   // `requestId` is a parameter, never a field on `state`: `bootSeq` exists because two boots overlap,
   // and a correlator hoisted onto shared state would answer the first request with the second's id.
   // Optional because the relay's idle timer boots nothing — but every *browser* boot carries one.
-  private async handleDeviceBoot(sessionId: string, avdId: string, tier?: { secureContext: boolean; external: boolean }, requestId?: string): Promise<void> {
+  private async handleDeviceBoot(sessionId: string, avdId: string, fullErase = false, tier?: { secureContext: boolean; external: boolean }, requestId?: string): Promise<void> {
     const state = this.deviceStates.get(sessionId)
     // Split, because the two halves are not the same kind of nothing. No open control channel means the
     // answer itself has nowhere to go, so this is the one abandonment that stays silent — and the caller
@@ -959,17 +1001,71 @@ export class AndroidAgent implements DeviceAgent {
       const target = devices.find((d) => d.id === avdId)
       if (!target) throw new PlatformError(`Device not found: ${avdId}`)
 
-      if (target.status !== 'booted') {
+      // `-wipe-data` is a **launch** argument, so an emulator that is already up cannot honour it
+      // where it stands — the mirror of `simctl erase` refusing a booted device (#439). A device
+      // survives agent restarts and sessions that ended without a clean shutdown, so "this
+      // session's first boot, device already running" is reachable; iOS answers it by restarting
+      // and so does this, or the toggle would refuse exactly the device a tester just armed it for.
+      //
+      // **Asked of the process, not of `target.status`.** That status is `Boolean(serial)` — it
+      // says adb can *see* the emulator, which an emulator that is still coming up, or one whose
+      // adb server restarted, is not. Skipping the stop there would put a second emulator on the
+      // same AVD and race its lock file. iOS widened the same condition for the same reason and
+      // says so at `IOSAgent.ts` (`!== 'shutdown'`, not `=== 'booted'`); this is that widening,
+      // expressed against the only thing Android's two-valued status cannot tell us.
+      // `probeEmulator`, not `findEmulatorPid`: the latter reports "could not look" as "not
+      // running", and here that difference is a wiped device versus a lie about one. An
+      // unconfirmable probe fails the boot before anything destructive happens.
+      const emulator = fullErase ? probeEmulator(avdName) : { state: 'gone' as const }
+      if (emulator.state === 'unknown') {
+        throw new PlatformError(
+          `Could not tell whether emulator "${avdName}" was already running (process lookup ` +
+          'unavailable), so Full reset was not attempted.',
+        )
+      }
+      if (emulator.state === 'running') {
+        const serial = this.adb.getSerial(avdId)
+        if (serial) {
+          await this.adb.shutdown(serial).catch((e: unknown) => {
+            // Best effort, as on the shutdown path: the emulator may already be going down. The
+            // wait below is what decides whether we may launch, not this call's success.
+            logger.warn('emu kill before wipe failed (already gone?):', (e as Error).message)
+          })
+          this.adb.clearSerial(avdId)
+      this.ownedDevices.delete(avdId)
+        } else {
+          // Live process, no console to ask. Safe here and only here — the data a hard stop could
+          // damage is about to be wiped.
+          stopEmulatorProcess(avdName)
+        }
+        // Throws if it is still up at the deadline, which the outer catch turns into
+        // `device:boot-error`. Launching anyway would report a Full reset that never happened.
+        await this.launcher.waitForExit(avdName)
+        // The stop and the wait are both awaits, so a newer boot may have overtaken us. Without
+        // this the superseded boot goes on to wipe a device the tester has since re-picked with the
+        // toggle off — the erase-with-no-click #439 exists to prevent, on the platform where it
+        // would be silent.
+        if (seq !== state.bootSeq) { this.abandonBoot(state, seq, sessionId, requestId); return }
+      }
+
+      // `|| fullErase`: the branch above left the device down on purpose, and the reading in
+      // `target` predates it.
+      if (target.status !== 'booted' || fullErase) {
         // One unique gRPC port per emulator (undefined when forced to scrcpy → no `-grpc`).
         const grpcPort = this.forceScrcpy() ? undefined : await this.pickFreeGrpcPort()
         state.grpcPort = grpcPort ?? null
+        // The port probe is an await, and the launch below is destructive now that it can carry
+        // `-wipe-data`. A `device:shutdown` landing in that gap used to reach a harmless relaunch;
+        // it would now bring the device back *erased* seconds after the tester asked for it to stop.
+        if (seq !== state.bootSeq) { this.abandonBoot(state, seq, sessionId, requestId); return }
         try {
-          this.launcher.launch(avdName, grpcPort, { audio: this.audioEnabled() })
+          this.launcher.launch(avdName, grpcPort, { audio: this.audioEnabled(), wipeData: fullErase })
           const serial = await this.launcher.findSerial(avdName)
           if (seq !== state.bootSeq) { this.abandonBoot(state, seq, sessionId, requestId); return }
           await this.launcher.waitForBoot(serial)
           if (seq !== state.bootSeq) { this.abandonBoot(state, seq, sessionId, requestId); return }
           this.adb.setSerial(avdId, serial)
+          this.ownedDevices.add(avdId)
         } finally {
           // The emulator now holds the port (or boot failed) — drop the reservation either way.
           if (grpcPort !== undefined) this.pendingGrpcPorts.delete(grpcPort)
@@ -1004,6 +1100,16 @@ export class AndroidAgent implements DeviceAgent {
       })
       state.booted = true
       this.sendMsg({ type: 'device:ready', sessionId, requestId, payload: { deviceId: avdId } })
+      // Clear a network condition the last session left behind, then report (#607).
+      //
+      // **At boot rather than at teardown**, because airplane mode lives in the AVD's userdata and
+      // outlives `emu kill` — and a session that ended in a crash, a closed terminal or `dev:down`
+      // never reaches a teardown path at all. Clearing on the way up survives however the last one
+      // died; clearing on the way out only works when someone was there to run it.
+      //
+      // The report that follows is the first of the three unsolicited producers the protocol names.
+      // Without it a viewer opening a session has no idea whether this device is on the network.
+      void this.resetNetworkForSession(sessionId, state, seq)
     } catch (e) {
       if (seq !== state.bootSeq) { this.abandonBoot(state, seq, sessionId, requestId); return }
       const message = e instanceof Error ? e.message : String(e)
@@ -1015,6 +1121,251 @@ export class AndroidAgent implements DeviceAgent {
       // checkpoint but before it returns.
       state.bootAbandon.delete(seq)
     }
+  }
+
+  // ── network on/off (#607) ──────────────────────────────────────────────────────────────────
+  //
+  // Airplane mode, so the **OS** goes offline rather than the app being lied to. That is what makes
+  // the app's own `ConnectivityManager` callbacks fire and the status bar follow, with nothing
+  // faked — measured on API 34: `dumpsys connectivity` reports "Active default network: none" and
+  // a ping from the guest fails. iOS has to hook three layers to reach the same place.
+
+  /** The serial for a session's device, or undefined when nothing is booted. */
+  /**
+   * The AVDs **this agent launched**, which is not the same as the ones `adb` can see.
+   *
+   * `AdbWrapper.serialMap` is synced from `adb devices` on every `listDevices()`, so it holds a
+   * developer's own emulator as readily as tapflow's. Written here at the two places tapflow starts
+   * one and cleared at the three where it stops one — the same shape and the same purpose as
+   * `IOSAgent.ownedDevices`, which exists because that platform hit this first: its
+   * `soleDeviceState` comment records a version that counted every booted simulator and "made all
+   * the callers above refuse with '2 booted devices' on the common two-simulator desk".
+   */
+  private readonly ownedDevices = new Set<string>()
+
+  private serialFor(sessionId: string): string | undefined {
+    const state = this.deviceStates.get(sessionId)
+    return state ? this.adb.getSerial(state.deviceId) : undefined
+  }
+
+  /**
+   * Turn a `setAirplaneMode` result into what the viewer is told.
+   *
+   * **Both unconfirmed shapes are `{ confirmed: false, offline: boolean }` and only the value tells
+   * them apart** — the discriminator that used to live nowhere (#618). `AdbWrapper` returns the
+   * value it *read* when the read-back succeeded, and the value that was *requested* when the
+   * read-back failed, so:
+   *
+   * - `offline !== requested` — the read-back succeeded and the device had not moved. The write was
+   *   accepted and did nothing: `unsupported-device`. **Not "an image that does not support this"** —
+   *   that image throws from the write and lands in the branch below, which `AdbWrapper` now records
+   *   at the return it describes. What reaches this branch is unmeasured, so the member names the
+   *   observation and a consumer keeps offering the retry.
+   * - `offline === requested` — nothing was observed. `state-unconfirmed`, which a retry may fix.
+   *
+   * Shared by the WS path and the capability path on purpose: they answer the same question, and the
+   * doc on `setNetworkOffline` records that they had already disagreed once.
+   */
+  private classifyWrite(result: { confirmed: boolean; offline: boolean }, requested: boolean): NetworkStatePayload {
+    if (result.confirmed) return { offline: result.offline, available: true }
+    return {
+      offline: result.offline,
+      available: false,
+      reason: result.offline === requested ? 'state-unconfirmed' : 'unsupported-device',
+    }
+  }
+
+  /**
+   * Read the device's current network state.
+   *
+   * **Reads the device, never a flag this agent kept.** A remembered value cannot see a device left
+   * offline by a previous session, one changed outside tapflow, or one that survived an agent
+   * restart — and every one of those ends with the viewer showing the opposite of what is true.
+   *
+   * `lastKnownOffline` is the fallback for a read that fails, **not** `false`: a device that is
+   * offline and can no longer be read is still offline, and reporting it as online renders the
+   * control in the position that hides the problem.
+   */
+  private async readNetworkState(serial: string, lastKnownOffline = false): Promise<NetworkStatePayload> {
+    try {
+      return { offline: await this.adb.airplaneMode(serial), available: true }
+    } catch (e) {
+      logger.warn('airplane mode read failed:', (e as Error).message)
+      return { offline: lastKnownOffline, available: false, reason: 'state-unconfirmed' }
+    }
+  }
+
+  /**
+   * Put a device back on the network if the last session left it off, then report where it is.
+   *
+   * **Guarded by `bootSeq` like every other await in the boot path**, and for the reason the wipe
+   * block states two hundred lines up: this **writes to the device**, and a boot that has been
+   * superseded must not. The window is a real one rather than a race — the read below is an adb
+   * round trip, and a tester whose device just went ready can arm the network toggle inside it.
+   * Without the check, this wakes up and puts them back online with nobody having asked.
+   */
+  private async resetNetworkForSession(sessionId: string, state: DeviceState, seq: number): Promise<void> {
+    const serial = this.serialFor(sessionId)
+    if (!serial) return
+    let known = false
+    try {
+      // Conditional: an already-online device is left alone, so an ordinary boot issues no command
+      // at all. Unconditional would work too and is worse — it makes every boot a write to a
+      // setting nobody asked about, on a path where a failure is not the tester's problem to solve.
+      known = await this.adb.airplaneMode(serial)
+      if (seq !== state.bootSeq) return
+      if (known) {
+        const r = await this.adb.setAirplaneMode(serial, false)
+        known = r.offline
+      }
+    } catch (e) {
+      // An image that cannot do this has nothing to clear. The report below says so.
+      logger.warn('could not clear airplane mode on boot:', (e as Error).message)
+    }
+    if (seq !== state.bootSeq) return
+    await this.reportNetworkState(sessionId, known)
+  }
+
+  /**
+   * Send the current state with no correlator — this is a report, not an answer.
+   *
+   * `lastKnownOffline` defaults to what this device was last *observed* doing rather than to `false`,
+   * because the re-join report (#614) has no freshly measured value to pass: the boot path and
+   * `network:set` both hand over something they just read, and a viewer coming back has nothing
+   * behind it. `false` there would answer "online" for a device that is offline and momentarily
+   * unreadable, which `NetworkNotSteerable.offline` forbids.
+   *
+   * Silent with no device, deliberately: nobody asked, so there is no requester to answer and
+   * `network:error` would be addressed to no one.
+   */
+  private async reportNetworkState(sessionId: string, lastKnownOffline?: boolean): Promise<void> {
+    const serial = this.serialFor(sessionId)
+    if (!serial) return
+    const state = this.deviceStates.get(sessionId)
+    const known = lastKnownOffline ?? state?.lastNetworkOffline
+    const payload = await this.readNetworkState(serial, known ?? false)
+    // Nothing observed and nothing readable: every value of `offline` here would be a claim, and
+    // `false` is the one that reads as "on the network". Silence is already this method's answer when
+    // there is no device — nobody asked, so nothing is owed — and it is the honest one here too. The
+    // boot path always passes a value, so the report the protocol names on `device:ready` still goes.
+    if (!payload.available && known === undefined) return
+    // Only an observed value enters the memory — a failed read has nothing to record, since what it
+    // returns *is* the memory (or a value the caller just read off the device).
+    //
+    // **No test distinguishes this from storing unconditionally, and that is stated rather than
+    // implied:** for every caller today the two are the same write. It guards a future caller that
+    // passes a `lastKnownOffline` it did not measure, which would otherwise become the remembered
+    // truth for every later read failure.
+    if (state && payload.available) state.lastNetworkOffline = payload.offline
+    this.sendMsg({ type: 'network:state', sessionId, payload })
+  }
+
+  private async handleNetworkSet(sessionId: string, offline: boolean, requestId: string): Promise<void> {
+    const serial = this.serialFor(sessionId)
+    if (!serial) {
+      this.sendMsg({
+        type: 'network:error', sessionId, requestId,
+        message: 'No booted device — boot one before changing its network.',
+      })
+      return
+    }
+
+    // What the device says now. Only used when the **write** fails, where the device is unchanged
+    // and this is still true — every other path reports what the wrapper observed after writing.
+    //
+    // **The last confirmed value is the fallback, not `false`.** Two failures in a row — this read and
+    // then the write — used to answer `offline: false` for a device the agent had already confirmed
+    // offline, which draws an online control over a device whose app can reach nothing. The report
+    // path has always passed this; the two write paths did not, so the one moment a device is least
+    // readable was the one where the memory was dropped.
+    const beforeState = this.deviceStates.get(sessionId)
+    const before = await this.readNetworkState(serial, beforeState?.lastNetworkOffline)
+    // A read that succeeded is an observation, and it was being thrown away. Someone flipping airplane
+    // mode in the emulator's own UI between the boot read and this toggle is seen here and nowhere
+    // else, so without this a later unreadable device falls back past it to the older value.
+    if (beforeState && before.available) beforeState.lastNetworkOffline = before.offline
+
+    let result: { confirmed: boolean; offline: boolean }
+    try {
+      result = await this.adb.setAirplaneMode(serial, offline)
+    } catch (e) {
+      // The write itself failed: nothing reached the device. An image whose `cmd connectivity`
+      // predates the subcommand lands here — **and so does a device mid-reboot and a dropped adb
+      // connection**, which is why this is `state-unconfirmed` rather than a verdict about the
+      // device. Nothing in the failure separates them, and calling it permanent tells a tester to
+      // give up on a device that is twenty seconds from working. `unsupported-device` is reserved for
+      // the one shape that does say so on its own — see `classifyWrite`.
+      //
+      // **An answer, not a failure.** The viewer needs to say this and stay usable; `network:error`
+      // is for a request that could not be dispatched at all, which is the no-device case above and a
+      // different fix for the tester.
+      logger.warn('airplane mode write failed:', (e as Error).message)
+      this.sendMsg({
+        type: 'network:state', sessionId, requestId,
+        payload: { offline: before.offline, available: false, reason: 'state-unconfirmed' },
+      })
+      return
+    }
+
+    // `result.offline` is what the wrapper saw where it could see anything, and the requested value
+    // where the read-back failed — never the value this agent held before the write. The write
+    // happens before the confirmation, so a state it could not confirm is still more likely to be the
+    // requested one than the old one. Reporting the old value here is how an offline device gets
+    // rendered as online, which is the failure this whole feature exists to avoid. **Which of those
+    // two an unconfirmed result is, is the whole discriminator** — see `classifyWrite`.
+    // Remember it for the same reason the boot path hands its read to the report: a later re-join
+    // whose own read fails falls back to this, and the write path is the freshest truth there is.
+    // Only a **confirmed** result counts — an unconfirmed one is already a guess, and standing one
+    // guess on another is how a stale value outlives the thing it described.
+    const state = this.deviceStates.get(sessionId)
+    if (state && result.confirmed) state.lastNetworkOffline = result.offline
+
+    this.sendMsg({
+      type: 'network:state', sessionId, requestId,
+      payload: this.classifyWrite(result, offline),
+    })
+  }
+
+  /**
+   * **Answers rather than throwing when the device cannot do it**, which is what
+   * `NetworkControlCapability` declares — the return type can express `available: false`, and a
+   * device that does not support this is not a caller error. The WS path answers the same way; the
+   * two must not disagree about the same question, and this one drifted first.
+   *
+   * A device that is not booted still throws: there is no state to describe.
+   */
+  async setNetworkOffline(offline: boolean): Promise<NetworkStatePayload> {
+    // **The write #617 was filed about.** This took the first-registered session, so on an agent
+    // holding several it took *someone else's* device off the network while they were testing on it.
+    const { state, serial } = this.soleLive()
+    // Same fallback as the WS path, for the reason recorded there.
+    const before = await this.readNetworkState(serial, state.lastNetworkOffline)
+    if (before.available) state.lastNetworkOffline = before.offline
+    try {
+      const result = await this.adb.setAirplaneMode(serial, offline)
+      // **And it remembers, which this path did not.** The WS path has always stored the confirmed
+      // value, so a caller that toggled through MCP and then lost the device read `false` from a
+      // memory nothing had written — the fallback above had nothing to fall back to. Only a confirmed
+      // result counts, for the reason the WS path gives: an unconfirmed one is already a guess.
+      if (result.confirmed) state.lastNetworkOffline = result.offline
+      return this.classifyWrite(result, offline)
+    } catch {
+      return { offline: before.offline, available: false, reason: 'state-unconfirmed' }
+    }
+  }
+
+  async networkState(): Promise<NetworkStatePayload> {
+    const live = this.soleLive()
+    const known = live.state.lastNetworkOffline
+    const state = await this.readNetworkState(live.serial, known)
+    // **`false` is not "unknown", it is "on the network".** A device nobody has ever observed, whose
+    // read has now failed, has no position to report — and answering `offline: false` there claims the
+    // one direction that hides the problem, which is what the WS report path stays silent about
+    // rather than say. A function has to answer, so it answers with the failure.
+    if (!state.available && known === undefined) {
+      throw new PlatformError('Cannot read the network state, and this device has never been observed')
+    }
+    return state
   }
 
   private async handleDeviceShutdown(sessionId: string, avdId: string, requestId?: string): Promise<void> {
@@ -1031,6 +1382,7 @@ export class AndroidAgent implements DeviceAgent {
         logger.warn('emu kill failed (already gone?):', (e as Error).message)
       })
       this.adb.clearSerial(avdId)
+      this.ownedDevices.delete(avdId)
     }
     this.sendMsg({
       type: 'device:shutdown-done',
@@ -1119,8 +1471,8 @@ export class AndroidAgent implements DeviceAgent {
   private handleRelayMessage(msg: { type: string; sessionId: string; requestId?: string; payload?: unknown }): void {
     switch (msg.type) {
       case 'device:boot': {
-        const { deviceId, secureContext, external } = msg.payload as { deviceId: string; secureContext?: boolean; external?: boolean }
-        this.handleDeviceBoot(msg.sessionId, deviceId, { secureContext: !!secureContext, external: !!external }, msg.requestId)
+        const { deviceId, resetMode, secureContext, external } = msg.payload as { deviceId: string; resetMode?: 'app-only' | 'full-erase'; secureContext?: boolean; external?: boolean }
+        this.handleDeviceBoot(msg.sessionId, deviceId, resetMode === 'full-erase', { secureContext: !!secureContext, external: !!external }, msg.requestId)
           .catch((e) => logger.error('handleDeviceBoot failed:', e))
         break
       }
@@ -1453,6 +1805,31 @@ export class AndroidAgent implements DeviceAgent {
           })
         break
       }
+      case 'network:set': {
+        const requestId = this.correlatorOf(msg)
+        if (requestId === null) break
+        // `?? {}` and a re-check of a field the relay's schema already requires: this case owes a
+        // reply, and the ws dispatch swallows a synchronous throw (see `input:button`), so a cast
+        // that dereferences a missing payload answers nothing at all — the one failure the
+        // requester cannot tell from a hung device. A malformed frame gets a `network:error`
+        // because it could not be dispatched, which is the same reason the no-device case does.
+        const { offline } = (msg.payload ?? {}) as { offline?: boolean }
+        if (typeof offline !== 'boolean') {
+          this.sendMsg({
+            type: 'network:error', sessionId: msg.sessionId, requestId,
+            message: 'network:set payload must carry a boolean `offline`.',
+          })
+          break
+        }
+        void this.handleNetworkSet(msg.sessionId, offline, requestId)
+        break
+      }
+      // The relay asks on a viewer's re-join (#614). Uncorrelated both ways: the reply is a report,
+      // and nothing here is waiting on it — a session with no booted device answers nothing at all,
+      // because `network:error` would be addressed to a requester that does not exist.
+      case 'network:request-state':
+        void this.reportNetworkState(msg.sessionId)
+        break
       // Clipboard bridge. Emulator-only: it rides the gRPC EmulatorController, since the
       // AVD images have no `adb shell cmd clipboard`. The chord is pressed HERE, not by the
       // viewer — the browser cannot know when the key lands, and reading too early returns
@@ -1712,6 +2089,7 @@ export class AndroidAgent implements DeviceAgent {
     const serial = await this.launcher.findSerial(avdName)
     await this.launcher.waitForBoot(serial)
     this.adb.setSerial(avdId, serial)
+    this.ownedDevices.add(avdId)
   }
 
   async shutdown(avdId: string): Promise<void> {
@@ -1719,39 +2097,96 @@ export class AndroidAgent implements DeviceAgent {
     if (serial) {
       await this.adb.shutdown(serial)
       this.adb.clearSerial(avdId)
+      this.ownedDevices.delete(avdId)
     }
   }
 
+  /**
+   * The one live device, or a refusal — **the resolver every session-less entry point shares.**
+   *
+   * `IOSAgent.soleOf` has done this since #607 and says why: *"Refusing beats guessing: this interface
+   * has no way to say which device is meant, and picking one silently is the whole defect being fixed
+   * here."* Same defect, same interface, and this class never got it — eleven entry points each took
+   * `deviceStates.values().next().value`, the entry the relay happened to register first. For a read
+   * that answers about the wrong device; for `setNetworkOffline` it takes a device off the network
+   * while somebody else is testing on it (#617).
+   *
+   * **Liveness is `adb` reporting the emulator attached — not tapflow having launched it.**
+   * `IOSAgent.soleDeviceState`'s comment says this map is "only populated on launch" and that is
+   * **wrong**: `AdbWrapper.listDevices` syncs it from `adb devices` on every call, taking every
+   * `emulator-*` in state `device` whoever started it, and dropping the ones that went away. The
+   * claim was inherited from that comment and checked afterwards; it is recorded here so the next
+   * reader does not inherit it again.
+   *
+   * So a developer with their own emulator open, plus one a tester booted, is two live devices — and
+   * refusing there would be the feature removed by its own fix. `ownedDevices` is what separates
+   * them, and it is why that set exists rather than the serial map being enough on its own. **iOS
+   * narrows the same way for the same desk** (`soleLiveDeviceState`), after a version that did not.
+   *
+   * **What ownership does not cover**: an emulator tapflow launched and someone else killed keeps
+   * its serial *and* its ownership until the next `listDevices()` syncs the map (`AdbWrapper` calls
+   * that removal "stale serials"). A ghost can still make a live device ambiguous for that window.
+   * Refusing is the safe direction there, and the window closes on the next device listing.
+   *
+   * **Absence is not an error here**, because the touch entry points have always no-opped without a
+   * device and making them throw would change more than the ambiguity this fixes. `soleLive` is the
+   * variant that demands one.
+   *
+   * **Ambiguity is an error even for input, and there this class diverges from iOS on purpose.**
+   * `IOSAgent.liveDeviceState` returns `undefined` when it cannot choose, so a tap on a
+   * two-simulator desk silently does nothing. Silence is the failure mode this repo keeps removing:
+   * a tester taps, nothing moves, and no channel says why. `touchStart` returns `void` so a throw is
+   * the only signal available to it, and `touchMove`/`touchEnd` reject.
+   */
+  private soleLiveOrNone(): { state: DeviceState; serial: string } | undefined {
+    const live: Array<{ state: DeviceState; serial: string }> = []
+    for (const state of this.deviceStates.values()) {
+      const serial = this.adb.getSerial(state.deviceId)
+      if (serial) live.push({ state, serial })
+    }
+    if (live.length === 0) return undefined
+    // **Ownership narrows liveness, and only when it can** — `IOSAgent.soleLiveDeviceState`'s line
+    // for the same desk. A developer's own emulator plus tapflow's is two live devices and one
+    // obvious answer; when ownership says nothing (nothing launched through tapflow yet, or an agent
+    // that reconnected before it booted anything) there is no narrowing to apply and refusing is the
+    // honest reply.
+    const mine = live.filter((l) => this.ownedDevices.has(l.state.deviceId))
+    const pool = mine.length > 0 ? mine : live
+    if (pool.length > 1) {
+      throw new ValidationError(`${pool.length} booted devices — this entry point cannot choose between them`)
+    }
+    return pool[0]
+  }
+
+  /** `soleLiveOrNone`, for the callers that have nothing to do without a device. */
+  private soleLive(): { state: DeviceState; serial: string } {
+    const live = this.soleLiveOrNone()
+    if (!live) throw new ValidationError('no booted device — call connect() first')
+    return live
+  }
+
   async installApp(apkPath: string): Promise<void> {
-    const first = this.deviceStates.values().next().value
-    const serial = first ? this.adb.getSerial(first.deviceId) : undefined
-    if (!serial) throw new ValidationError('no booted device — call connect() first')
-    await this.adb.installApp(serial, apkPath)
+    await this.adb.installApp(this.soleLive().serial, apkPath)
   }
 
   async launchApp(packageName: string): Promise<void> {
-    const first = this.deviceStates.values().next().value
-    const serial = first ? this.adb.getSerial(first.deviceId) : undefined
-    if (!serial) throw new ValidationError('no booted device — call connect() first')
-    await this.adb.launchApp(serial, packageName)
+    await this.adb.launchApp(this.soleLive().serial, packageName)
   }
 
   async screenshot(): Promise<Buffer> {
-    const first = this.deviceStates.values().next().value
-    const serial = first ? this.adb.getSerial(first.deviceId) : undefined
-    if (!serial) throw new ValidationError('no booted device — call connect() first')
-    return this.adb.screenshot(serial)
+    return this.adb.screenshot(this.soleLive().serial)
   }
 
   async queryUITree(): Promise<UIElement[]> {
-    const first = this.deviceStates.values().next().value
-    const serial = first ? this.adb.getSerial(first.deviceId) : undefined
-    if (!serial) throw new ValidationError('no booted device — call connect() first')
-    return parseUiAutomatorDump(await this.adb.dumpUiHierarchy(serial))
+    return parseUiAutomatorDump(await this.adb.dumpUiHierarchy(this.soleLive().serial))
   }
 
   stream(): ReadableStream<Buffer> {
-    const state = this.deviceStates.values().next().value
+    // **Resolved by `soleLiveOrNone`, then checked for frames separately.** Liveness here is a video
+    // source rather than a serial, and the two are not the same: a device can be launched and have no
+    // stream yet. Routing the *choice* through the shared resolver fixes the ambiguity without
+    // swallowing this method's own message.
+    const state = this.soleLiveOrNone()?.state
     // Works on either video backend (scrcpy for real devices, gRPC host-encode for emulators).
     const frames = state?.scrcpySession?.video.start() ?? state?.emulatorVideo?.frames()
     if (!frames) throw new ValidationError('no active video stream — call connect() first')
@@ -1762,28 +2197,24 @@ export class AndroidAgent implements DeviceAgent {
   }
 
   touchStart(x: number, y: number): void {
-    const first = this.deviceStates.values().next().value
-    first?.touchHelper?.touchStart(x, y)
+    this.soleLiveOrNone()?.state.touchHelper?.touchStart(x, y)
   }
 
-  touchMove(x: number, y: number): Promise<void> {
-    const first = this.deviceStates.values().next().value
-    first?.touchHelper?.touchMove(x, y)
-    return Promise.resolve()
+  // `async`, so the refusal arrives as a rejection rather than escaping at the call site. It declared
+  // `Promise<void>` and could not throw before this change; a caller that wrote `.catch()` on the
+  // strength of that signature would have been broken by exactly the path this change added.
+  async touchMove(x: number, y: number): Promise<void> {
+    this.soleLiveOrNone()?.state.touchHelper?.touchMove(x, y)
   }
 
   // The platform-neutral DeviceAgent contract has no ack channel, so the outcome is dropped on
   // purpose — but it must be consumed rather than left floating: the helper now returns a promise,
   // and an adb failure escaping here would be an unhandled rejection.
   async touchEnd(): Promise<void> {
-    const first = this.deviceStates.values().next().value
-    await first?.touchHelper?.touchEnd()
+    await this.soleLiveOrNone()?.state.touchHelper?.touchEnd()
   }
 
   async openUrl(url: string): Promise<void> {
-    const first = this.deviceStates.values().next().value
-    const serial = first ? this.adb.getSerial(first.deviceId) : undefined
-    if (!serial) throw new ValidationError('no booted device — call connect() first')
-    await this.adb.openUrl(serial, url)
+    await this.adb.openUrl(this.soleLive().serial, url)
   }
 }

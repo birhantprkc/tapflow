@@ -39,6 +39,10 @@ jobs:
         with:
           fetch-depth: 0
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+
       - name: Warn when Docker Hub credentials are missing
         if: github.event_name != 'pull_request' && env.HAS_DOCKERHUB != 'true'
         run: echo "::warning::DOCKERHUB_USERNAME/DOCKERHUB_TOKEN are not set — building the image for validation but skipping push."
@@ -162,6 +166,9 @@ jobs:
           docker volume create "$volume" >/dev/null
           start_container
           wait_for_ready "first boot"
+
+          node scripts/docker-publish-websocket-smoke.mjs
+
           first_jwt_secret="$(jwt_secret_fingerprint)"
 
           docker rm -f "$container" >/dev/null

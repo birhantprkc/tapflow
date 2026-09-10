@@ -36,7 +36,18 @@ export interface Device {
 // on a merely-slow agent, and a lost keystroke on an old one).
 // The dashboard cannot import from here (it has no agent-core dependency), so this stays a
 // plain string list on the wire rather than a helper nobody on the reading side can call.
-export type AgentCapability = 'clipboard'
+// `full-reset`: the agent honours `device:boot`'s `resetMode: 'full-erase'` by wiping the device
+// before booting it. Both platforms do as of #447 — iOS with `simctl erase`, Android with
+// `-wipe-data` — and an agent that does not says so by not listing it rather than by being named in
+// a platform check on the viewer.
+//
+// `network-control`: the agent implements `network:set` (#607). **This one claims less than the
+// other two do.** They are settled facts about the agent's own code; whether the network mechanism
+// actually takes is per device and per app — an injection that did not land, an emulator image too
+// old for the command — and this string is sent once at `agent:register`, before any device is
+// booted. So it means "this agent has the code", and `network:state.available` carries the rest.
+// Reading it as a promise that the toggle will work is the mistake this comment exists to prevent.
+export type AgentCapability = 'clipboard' | 'full-reset' | 'network-control'
 
 
 // ── Clipboard bridge shared contract ────────────────────────────────────────
@@ -139,3 +150,27 @@ export function bootAbandonMessage(reason: BootAbandonReason): string {
  *  two sessions. */
 export const BOOT_NO_SESSION_STATE =
   'No device state for this session on the agent — re-join the session before booting.'
+
+
+// ── Audio frames ────────────────────────────────────────────────────────────
+//
+// **Data types, and they live here rather than behind a capability interface.** They arrived with
+// `AudioStreamCapability`, which declared `audioFormat()` / `audioStream()` for consumers to
+// feature-detect — and nothing ever implemented it, detected it, or gave audio an `AgentCapability`
+// string, because audio is not gated: the dashboard plays whatever frames arrive. The interface and
+// its guard are gone; these are not, because `ios-agent`'s `AudioCaptureStreamer` speaks them and
+// two packages needing the same shape is exactly what this file is for.
+
+export type AudioSampleFormat = 's16' | 'u8'
+export type AudioChannels = 'mono' | 'stereo'
+
+export interface AudioFormat {
+  sampleRate: number          // e.g. 44100
+  channels: AudioChannels
+  sampleFormat: AudioSampleFormat
+}
+
+export interface AudioFrame {
+  payload: Buffer             // raw PCM samples in the stream's AudioFormat (no codec)
+  timestamp: number           // capture timestamp, epoch microseconds — for loose A/V sync
+}

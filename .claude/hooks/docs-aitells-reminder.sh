@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
-# PostToolUse(Edit|Write|MultiEdit): docs/*.md 산문을 편집하면 ai-tells detect 리마인더를 주입한다.
-# 강제가 아니라 유도. 실제 게이트는 Stop 단계(docs-aitells-gate.sh)가 담당한다.
+# PostToolUse(Edit|Write|MultiEdit): editing prose under `docs/` at any depth injects a reminder to run the
+# ai-tells detect pass. A nudge, not a gate — the gate is at Stop (docs-aitells-gate.sh).
+#
+# **English, because a contributor's agent reads it.** `.claude/` is committed, so these hooks fire
+# for anyone working in the repo with Claude Code — measured: #698 arrived from a first-time
+# contributor carrying a `.work/reviews/` record, which exists only because a hook demanded one.
+# A Korean-language block is unreadable to exactly the people AGENTS.md says to write English for.
 set -euo pipefail
 
 input=$(cat)
@@ -11,7 +16,7 @@ case "$fp" in
     jq -n '{
       hookSpecificOutput: {
         hookEventName: "PostToolUse",
-        additionalContext: "docs 산문을 변경했습니다. 마무리 전 /ai-tells detect로 점검하세요 (KO 번역투·em dash 삽입구 — … —·어순 주의). 이번 세션에 ai-tells를 실행하지 않으면 Stop 단계에서 마무리가 차단됩니다."
+        additionalContext: "You changed prose under docs/. Run /ai-tells detect before finishing (watch for translationese in KO, em-dash asides, and word order). Finishing without running ai-tells at least once this session is blocked at the Stop step."
       }
     }'
     ;;

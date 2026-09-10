@@ -11,6 +11,7 @@ import type {
   AppClearState, AppClearStateDone, AppClearStateError, AppInstallDone, AppInstallError, AppInstallToAgent,
   AppInstallToRelay, AppLaunchDone, AppLaunchError, AppLaunchToAgent, AppLaunchToRelay, BrowserInbound,
   BrowserToRelay, ClipboardData, ClipboardError, ClipboardRead, ClipboardWrite, ClipboardWriteDone,
+  NetworkError, NetworkSet, NetworkState, NetworkStatePayload,
   DeviceBoot, DeviceBootError, DeviceBooting, DeviceReady, DeviceShutdown, DeviceShutdownDone,
   DeviceShutdownError, GenericError,
   InputButton, InputDone, InputError, InputKey, InputKeyboardToggle, InputPinchEnd, InputPinchMove,
@@ -20,6 +21,7 @@ import type {
   SessionJoined, SessionLeave, SessionRebound, SessionStart, SessionTerminated, StreamRegister,
   AgentControlOutbound, StreamToRelay,
   StreamRegistered, StreamRequestIdr, UiTreeError, UiTreeRequest, UiTreeResponse,
+  NetworkRequestState,
 } from './index.js'
 
 // ── must NOT compile ─────────────────────────────────────────────────────────
@@ -136,6 +138,19 @@ export const _AppLaunchToAgent: AppLaunchToAgent['type'] = 'app:launch'
 export const _AppLaunchToRelay: AppLaunchToRelay['type'] = 'app:launch'
 export const _ClipboardData: ClipboardData['type'] = 'clipboard:data'
 export const _ClipboardError: ClipboardError['type'] = 'clipboard:error'
+export const _NetworkSet: NetworkSet['type'] = 'network:set'
+export const _NetworkState: NetworkState['type'] = 'network:state'
+export const _NetworkError: NetworkError['type'] = 'network:error'
+
+// `available` and `reason` travel together or not at all, and these two are what say so — the rule
+// began as prose on a single interface, which admitted both of the frames below. An unavailable
+// state with nothing to show a tester is a control that says it does not work and cannot say why.
+// @ts-expect-error - an unavailable state must name a reason
+export const _networkUnavailableNeedsReason: NetworkStatePayload = { offline: true, available: false }
+// One line, deliberately: `@ts-expect-error` covers the line after it, and a declaration wrapped
+// onto a continuation puts the error out of its reach — which reads as the assertion passing.
+// @ts-expect-error - a steerable state must not carry one
+export const _networkAvailableRefusesReason: NetworkStatePayload = { offline: true, available: true, reason: 'not-armed' }
 export const _ClipboardRead: ClipboardRead['type'] = 'clipboard:read'
 export const _ClipboardWrite: ClipboardWrite['type'] = 'clipboard:write'
 export const _ClipboardWriteDone: ClipboardWriteDone['type'] = 'clipboard:write-done'
@@ -178,6 +193,7 @@ export const _SessionStart: SessionStart['type'] = 'session:start'
 export const _SessionTerminated: SessionTerminated['type'] = 'session:terminated'
 export const _StreamRegistered: StreamRegistered['type'] = 'stream:registered'
 export const _StreamRequestIdr: StreamRequestIdr['type'] = 'stream:request-idr'
+export const _NetworkRequestState: NetworkRequestState['type'] = 'network:request-state'
 export const _UiTreeRequest: UiTreeRequest['type'] = 'ui:tree:request'
 export const _AgentRegister: AgentRegister['type'] = 'agent:register'
 export const _AgentResourceReport: AgentResourceReport['type'] = 'agent:resources'

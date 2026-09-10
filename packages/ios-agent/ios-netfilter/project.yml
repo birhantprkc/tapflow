@@ -1,0 +1,72 @@
+name: TapflowNetFilter
+options:
+  bundleIdPrefix: dev.tapflow
+  deploymentTarget:
+    macOS: "15.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    ENABLE_HARDENED_RUNTIME: YES
+    SWIFT_VERSION: "5"
+    DEVELOPMENT_TEAM: "6FBS3QP893"
+    CODE_SIGN_STYLE: Manual
+    CODE_SIGN_IDENTITY: "Developer ID Application"
+    MARKETING_VERSION: "1.0"
+    # CFBundleVersion MUST increase every build. OSSystemExtension activation compares versions and
+    # SILENTLY skips the replace when they match — returning result 0 while keeping the OLD bundle and
+    # its running provider process. That masked a provider-type switch (app-proxy → filter-data) for
+    # an entire debugging cycle. build.sh overrides this with $(date +%s) so every build is unique.
+    CURRENT_PROJECT_VERSION: "1"
+    # Signing is Developer ID + notarize via build.sh (a paid team). ad-hoc/self-signed do NOT load —
+    # measured OSSystemExtension code=4 (see .work/2026-08-22-nefilter-content-filter-research.md).
+targets:
+  # Container app: ios-agent launches it; it installs the sysext and starts the proxy. Headless.
+  TapflowNetFilter:
+    type: application
+    platform: macOS
+    sources: [Host, Shared]
+    info:
+      path: Host/Info.plist
+      properties:
+        NSSystemExtensionUsageDescription: "tapflow uses a network filter to turn a simulator's network on and off."
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.tapflow.netfilter
+        CODE_SIGN_ENTITLEMENTS: Host/Host.entitlements
+        PROVISIONING_PROFILE_SPECIFIER: "Tapflow Net Filter Host DevID"
+    dependencies:
+      - target: TapflowNetFilterExt
+        embed: true
+        codeSign: true    # CodeSignOnCopy — without it the sysext seals as a resource, not nested
+                          # code, and OSSystemExtension returns code=4 (Extension not found). Measured.
+  # The content-filter system extension (layer 1).
+  TapflowNetFilterExt:
+    type: system-extension
+    platform: macOS
+    sources: [Extension, Shared]
+    info:
+      path: Extension/Info.plist
+      properties:
+        # CFBundlePackageType must be set here (properties overwrite the file) — a missing SYSX is
+        # exactly what made the PoC's sysext invisible to sysextd. Measured.
+        CFBundlePackageType: SYSX
+        # Required ON THE EXTENSION (not the host) for the network_extension category — Tailscale's
+        # sysext has it here too; on the host it's ignored and OSSystemExtension returns code=9.
+        NSSystemExtensionUsageDescription: "tapflow uses a network filter to turn a simulator's network on and off."
+        NetworkExtension:
+          # NEMachServiceName is kept for the later XPC control wiring (per-UDID offline). The
+          # content-filter probe doesn't vend the mach service (see Extension/main.swift), but the
+          # key is harmless when no listener runs and it stays wired for when control is added.
+          NEMachServiceName: 6FBS3QP893.dev.tapflow.netfilter.ext
+          NEProviderClasses:
+            # @objc(Provider) exposes it under this bare ObjC name, so no module prefix is needed —
+            # which also survives PRODUCT_NAME carrying dots (module name would be mangled otherwise).
+            com.apple.networkextension.filter-data: $(PRODUCT_MODULE_NAME).Provider
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.tapflow.netfilter.ext
+        # Bundle/executable name must equal the bundle id (Tailscale's sysext does this); otherwise
+        # OSSystemExtension cannot match the extension and returns code=4.
+        PRODUCT_NAME: dev.tapflow.netfilter.ext
+        CODE_SIGN_ENTITLEMENTS: Extension/Extension.entitlements
+        PROVISIONING_PROFILE_SPECIFIER: "Tapflow Net Filter Ext DevID"

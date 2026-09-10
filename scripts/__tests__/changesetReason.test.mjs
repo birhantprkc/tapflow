@@ -52,4 +52,31 @@ describe('extractReason — refuses anything that is not one', () => {
     ].join('\n')
     expect(extractReason(body)).toBe('')
   })
+
+  it.each([
+    ['a shorter fence nested inside a longer one', '````md\n```md\n<!-- no-changeset: reason -->\n```\n````\n<!-- no-changeset: real -->\n'],
+    ['a closing fence with an info string', '```md\n``` not-a-close\n<!-- no-changeset: reason -->\n```\n<!-- no-changeset: real -->\n'],
+  ])('ignores a marker inside %s and resumes after it', (_name, body) => {
+    expect(extractReason(body)).toBe('real')
+  })
+
+  it('does not open a backtick fence when its info string contains a backtick', () => {
+    const body = '```js`\n```\n<!-- no-changeset: reason -->\n```\n'
+    expect(extractReason(body)).toBe('')
+  })
+
+  it('opens a tilde fence even when its info string contains a backtick', () => {
+    // The other half of the clause above: CommonMark forbids a backtick in a backtick fence's
+    // info string and permits one in a tilde fence's. Refusing to open here would leave the
+    // marker below unquoted, which is #560's leak arriving from the other side.
+    const body = '~~~js`\n<!-- no-changeset: reason -->\n~~~\n'
+    expect(extractReason(body)).toBe('')
+  })
+})
+
+describe('extractReason — follows CommonMark indentation', () => {
+  it('reads an unindented marker between four-space-indented fence-like lines', () => {
+    const body = '    ```md\n<!-- no-changeset: reason -->\n    ```\n'
+    expect(extractReason(body)).toBe('reason')
+  })
 })

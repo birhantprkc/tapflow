@@ -335,6 +335,28 @@ describe('SimctlWrapper', () => {
     })
   })
 
+  describe('setStatusBarOffline', () => {
+    it('overrides all three network indicators, not just one', async () => {
+      const runner = mockRunner()
+      const wrapper = new SimctlWrapper(runner)
+      await wrapper.setStatusBarOffline('device-1', true)
+      // Hiding the data network alone leaves the wifi glyph up, which reads as connected.
+      expect(runner.exec).toHaveBeenCalledWith(
+        'status_bar', 'device-1', 'override',
+        '--dataNetwork', 'hide',
+        '--wifiMode', 'failed',
+        '--cellularMode', 'notSupported',
+      )
+    })
+
+    it('clears the override when the device comes back', async () => {
+      const runner = mockRunner()
+      const wrapper = new SimctlWrapper(runner)
+      await wrapper.setStatusBarOffline('device-1', false)
+      expect(runner.exec).toHaveBeenCalledWith('status_bar', 'device-1', 'clear')
+    })
+  })
+
   describe('rotate', () => {
     it('calls rotation-helper with landscapeRight', async () => {
       const { execFile } = await import('child_process')

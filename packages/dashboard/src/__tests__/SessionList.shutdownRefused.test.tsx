@@ -29,6 +29,7 @@ const { SessionList } = await import('@/components/SessionList')
 
 const SESSIONS: SessionInfo[] = [{
   agentName: 'mac-1',
+  capabilities: [],
   devices: [{
     id: 'dev-1', name: 'iPhone 15', platform: 'ios', status: 'booted',
     sessionId: 's1', busy: false,
@@ -37,6 +38,7 @@ const SESSIONS: SessionInfo[] = [{
 
 const TWO_DEVICES: SessionInfo[] = [{
   agentName: 'mac-1',
+  capabilities: [],
   devices: [
     { id: 'dev-1', name: 'iPhone 15', platform: 'ios', status: 'booted', sessionId: 's1', busy: false },
     { id: 'dev-2', name: 'iPhone 14', platform: 'ios', status: 'booted', sessionId: 's2', busy: false },

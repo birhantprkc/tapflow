@@ -115,6 +115,70 @@ export class AdbWrapper {
     }
   }
 
+  /**
+   * Whether the device is in airplane mode — tapflow's network on/off (#607).
+   *
+   * `cmd connectivity airplane-mode` with **no argument** is the read; there is no `get`
+   * subcommand, and asking for one prints the service's help text. Measured on API 34.
+   *
+   * `settings get global airplane_mode_on` answers the same thing as 1/0, and is deliberately not
+   * used: keeping the read and the write in one command family means an image that lacks one lacks
+   * the other, so the two cannot disagree about whether this device is supported.
+   */
+  async airplaneMode(serial: string): Promise<boolean> {
+    const out = (await this.runner.exec(
+      '-s', serial, 'shell', 'cmd', 'connectivity', 'airplane-mode',
+    )).trim()
+    if (out === 'enabled') return true
+    if (out === 'disabled') return false
+    // Anything else is the help text or a future wording — **not** "off". Reporting an unreadable
+    // answer as online is the false negative this whole path is written to avoid.
+    throw new PlatformError(`Cannot read airplane mode state from: ${out || '(empty)'}`)
+  }
+
+  /**
+   * Put the device in airplane mode, or take it out, and report what it observed.
+   *
+   * **Returns rather than throwing when the state cannot be confirmed, and that is the whole
+   * contract.** The write happens first and the read second, so a failure after the write is a
+   * device that has probably already changed — and a caller that cannot tell "the command failed"
+   * from "the command landed and I could not confirm it" has no choice but to guess. Guessing here
+   * means reporting an offline device as online, which is the one outcome this feature must never
+   * produce: a tester signs off offline behaviour they never saw, and the bug goes to the app.
+   *
+   * A write that fails **does** throw: the device is unchanged and the caller's own before-state is
+   * still true, so there is nothing here it needs to be told.
+   *
+   * - `{ confirmed: true, offline }` — wrote and read it back.
+   * - `{ confirmed: false, offline }` — the read disagreed. `offline` is what the **device** said;
+   *   the command was accepted and had no effect.
+   *
+   *   This line used to add "which is what an image that does not really support this looks like",
+   *   and the test below contradicts it in the same file: an image that does not know the subcommand
+   *   **answers non-zero and throws from the write**, so it never reaches this branch. What does
+   *   reach it has not been measured, so the branch is named by what was observed and not by a cause.
+   * - `{ confirmed: false, offline: <requested> }` — the read failed outright. The write was
+   *   accepted, so the requested value is the best evidence there is; it is not a default.
+   *
+   * **The last two are the same shape, and the value is what tells them apart** — a caller comparing
+   * `offline` against what it asked for learns which of the two it got, and that is the only place
+   * that distinction exists. It is load-bearing: `AndroidAgent.classifyWrite` reads it to decide
+   * between `unsupported-device` (the device answered and had not moved) and `state-unconfirmed`
+   * (nothing was observed). Returning the requested value in the disagreement branch would collapse
+   * them. Neither is a claim about permanence — see the members' own docs for why.
+   */
+  async setAirplaneMode(serial: string, on: boolean): Promise<{ confirmed: boolean; offline: boolean }> {
+    await this.runner.exec(
+      '-s', serial, 'shell', 'cmd', 'connectivity', 'airplane-mode', on ? 'enable' : 'disable',
+    )
+    try {
+      const actual = await this.airplaneMode(serial)
+      return { confirmed: actual === on, offline: actual }
+    } catch {
+      return { confirmed: false, offline: on }
+    }
+  }
+
   async installApp(serial: string, apkPath: string): Promise<void> {
     try {
       await this.runner.exec('-s', serial, 'install', '-r', apkPath)

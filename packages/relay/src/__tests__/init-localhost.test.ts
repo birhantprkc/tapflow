@@ -59,6 +59,29 @@ describe('POST /api/v1/auth/init — localhost-only gate', () => {
       expect(r.body.ok).toBe(true)
     })
 
+    // **이 셋은 리팩터가 모듈 경계를 넘겨 옮긴 응답인데 저장소 어디에서도 검증되지 않았다.**
+    // `Already initialized` / `email and password required` / `Password must be at least 8
+    // characters` 를 검색하면 릴레이 테스트 0건이고, 나머지 히트는 CLI·대시보드의 mock이다.
+    // 대시보드 `Setup.tsx`가 `body.error`를 그대로 화면에 렌더링하므로 사용자에게 보이는 문자열이다.
+    it('이미 초기화된 설치 → 403 Already initialized', async () => {
+      await httpPost(port, '/api/v1/auth/init', { email: 'admin@example.com', password: 'password123' })
+      const r = await httpPost(port, '/api/v1/auth/init', { email: 'second@example.com', password: 'password123' })
+      expect(r.status).toBe(403)
+      expect(r.body.error).toBe('Already initialized')
+    })
+
+    it('email/password 누락 → 400', async () => {
+      const r = await httpPost(port, '/api/v1/auth/init', { email: 'admin@example.com' })
+      expect(r.status).toBe(400)
+      expect(r.body.error).toBe('email and password required')
+    })
+
+    it('비밀번호 8자 미만 → 400', async () => {
+      const r = await httpPost(port, '/api/v1/auth/init', { email: 'admin@example.com', password: 'short12' })
+      expect(r.status).toBe(400)
+      expect(r.body.error).toBe('Password must be at least 8 characters')
+    })
+
     it('스푸핑된 XFF는 신뢰 목록 밖이라 무시 → 여전히 localhost로 통과(201)', async () => {
       const r = await httpPost(port, '/api/v1/auth/init', { email: 'admin@example.com', password: 'password123' }, { 'X-Forwarded-For': '203.0.113.5' })
       expect(r.status).toBe(201)
