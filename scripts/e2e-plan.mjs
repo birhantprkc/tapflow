@@ -60,6 +60,16 @@ if (core.length < CORE_FLOOR) {
   )
 }
 
+// `prep` needs a floor of its own. `CORE_FLOOR` guards only §1, so renaming §0 produced a plan with a
+// heading and nothing under it — and exited 0, which is the shape this file claims not to have.
+if (prep.length === 0) {
+  die(
+    'The preparation section came back empty.\n\n' +
+      'Either §0 of the checklist was renamed or its items stopped looking like `- [ ] `.\n' +
+      'It holds the `tapflow doctor` step whose absence produced the defect the one real run found.',
+  )
+}
+
 const entries = changelogEntries(readFileSync(CHANGELOG, 'utf8'), version)
 if (entries === null) {
   die(
@@ -67,6 +77,17 @@ if (entries === null) {
       'Run this after `changeset version` and after promoting `[Unreleased]` to `[X.Y.Z] - DATE`.\n' +
       'Before that the release-specific half would be empty, which is the half that makes this plan\n' +
       'about this release.',
+  )
+}
+// **A heading with nothing under it is not a release that changed nothing.** The renderer has a branch
+// for it, which was the mistake: that state is reachable without any mutation — a promoted heading
+// whose body has no `###` subsections, or subsections with no bullets — and it wrote a plan claiming
+// this version is user-visibly empty, at exit 0.
+if (entries.length === 0) {
+  die(
+    `CHANGELOG.md has a ${version} heading but nothing under it.\n\n` +
+      'The release half of the plan would be empty. Check that the promoted section kept its\n' +
+      '`### Added` / `### Fixed` / `### Security` subsections and their bullets.',
   )
 }
 

@@ -2,7 +2,9 @@
 // defect — an item silently truncated, a section leaking into the next, a version whose changelog
 // section does not exist yet answered with an empty plan instead of a refusal. Each case below names
 // the mutation that kills it.
-import { execFileSync } from 'node:child_process'
+import { spawnSync } from 'node:child_process'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
@@ -170,23 +172,92 @@ describe('renderPlan', () => {
   })
 })
 
+// **A throwaway root, not this one.** The first version spawned the script in the repo and expected
+// the changelog refusal — but the checklist check runs first and `.internal/` is gitignored, so in CI
+// (and in any fresh clone) the script stopped at "No checklist", the assertion failed, and because
+// `pnpm test` runs the scripts suite before the packages, *every* PR would have gone red with nothing
+// else having run. Same shape as `commentCardGate.test.mjs`, which solved this for the same directory.
+//
+// Building the root also makes the other three refusals reachable, and they had no coverage at all —
+// so the file's claim that every failure is loud was, in CI, checked zero times.
 describe('the script refuses loudly', () => {
+  const CHANGELOG = `# Changelog\n\n## [0.21.0] - 2026-09-11\n\n### Fixed\n\n- Something real.\n`
+
+  /** Runs the generator in a disposable repo. Returns `{ status, stderr, planExists }`. */
+  const inRoot = ({ checklist = CHECKLIST, changelog = CHANGELOG, args = [] } = {}) => {
+    const dir = mkdtempSync(join(tmpdir(), 'e2e-plan-'))
+    try {
+      mkdirSync(join(dir, 'scripts/lib'), { recursive: true })
+      mkdirSync(join(dir, 'packages/cli'), { recursive: true })
+      for (const f of ['e2e-plan.mjs', 'lib/e2e-plan.mjs']) {
+        writeFileSync(join(dir, 'scripts', f), readFileSync(join(ROOT, 'scripts', f), 'utf8'))
+      }
+      writeFileSync(join(dir, 'packages/cli/package.json'), JSON.stringify({ name: 'tapflow', version: '0.21.0' }))
+      writeFileSync(join(dir, 'CHANGELOG.md'), changelog)
+      if (checklist !== null) {
+        mkdirSync(join(dir, '.internal'), { recursive: true })
+        writeFileSync(join(dir, '.internal/MANUAL-E2E-CHECKLIST.md'), checklist)
+      }
+      const r = spawnSync('node', [join(dir, 'scripts/e2e-plan.mjs'), ...args], { encoding: 'utf8' })
+      return { status: r.status, stderr: r.stderr ?? '', planExists: existsSync(join(dir, '.work/e2e/v0.21.0.md')) }
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+
+  it('writes the plan when everything is there', () => {
+    const r = inRoot()
+    expect(r.status).toBe(0)
+    expect(r.planExists).toBe(true)
+  })
+
+  // Mutation: fall through to reading the file. `.internal/` is gitignored, so this is the state of
+  // every fresh clone — the one that must not produce a half-written plan.
+  it('refuses when the checklist is not there, and writes nothing', () => {
+    const r = inRoot({ checklist: null })
+    expect(r.status).toBe(1)
+    expect(r.stderr).toContain('No checklist at')
+    expect(r.planExists).toBe(false)
+  })
+
   // Mutation: exit 0 after printing. A generator that half-works and says nothing reproduces the
   // failure it exists to end — a pass that was never run, looking exactly like one that was.
-  it('will not write a plan for a version the changelog has no section for', () => {
-    let failed = false
-    let stderr = ''
-    try {
-      execFileSync('node', [join(ROOT, 'scripts/e2e-plan.mjs'), '9.9.9'], {
-        cwd: ROOT,
-        encoding: 'utf8',
-        stdio: ['ignore', 'pipe', 'pipe'],
-      })
-    } catch (err) {
-      failed = true
-      stderr = err.stderr ?? ''
-    }
-    expect(failed).toBe(true)
-    expect(stderr).toContain('CHANGELOG.md has no section for 9.9.9')
+  it('refuses a version the changelog has no section for', () => {
+    const r = inRoot({ args: ['9.9.9'] })
+    expect(r.status).toBe(1)
+    expect(r.stderr).toContain('CHANGELOG.md has no section for 9.9.9')
+  })
+
+  // Mutation: drop the `CORE_FLOOR` check. §1 renamed yields a plan with a core heading and nothing
+  // under it, at exit 0.
+  it('refuses a checklist whose core section it cannot find', () => {
+    const r = inRoot({ checklist: CHECKLIST.replace('## 1. 코어 패스', '## 1b. 코어 패스') })
+    expect(r.status).toBe(1)
+    expect(r.stderr).toContain('below the floor')
+  })
+
+  // Mutation: guard only `core`. `prep` had no floor at all, and it holds the `doctor` step whose
+  // absence produced the defect the one real run of this checklist found.
+  it('refuses a checklist whose preparation section it cannot find', () => {
+    const r = inRoot({ checklist: CHECKLIST.replace('## 0. 준비', '## 0b. 준비') })
+    expect(r.status).toBe(1)
+    expect(r.stderr).toContain('preparation section came back empty')
+  })
+
+  // Mutation: keep the renderer's "this version changed nothing" branch. That sentence is never true
+  // and this state needs no mutation to reach — a promoted heading whose subsections are gone.
+  it('refuses a version heading with nothing under it', () => {
+    const r = inRoot({ changelog: '# Changelog\n\n## [0.21.0] - 2026-09-11\n\n## [0.20.1] - 2026-09-04\n\n### Fixed\n\n- Old.\n' })
+    expect(r.status).toBe(1)
+    expect(r.stderr).toContain('nothing under it')
+  })
+
+  // Mutation: escape only the dots. `0.20.1(` reached `new RegExp` and came out as an uncaught
+  // SyntaxError with a stack trace where a refusal belongs.
+  it('refuses a version containing regular-expression syntax', () => {
+    const r = inRoot({ args: ['0.21.0('] })
+    expect(r.status).toBe(1)
+    expect(r.stderr).not.toContain('SyntaxError')
+    expect(r.stderr).toContain('has no section')
   })
 })

@@ -54,8 +54,15 @@ export function sectionItems(markdown, n) {
  */
 export function changelogEntries(markdown, version) {
   const lines = markdown.split('\n')
-  const esc = version.replace(/\./g, '\\.')
-  const start = lines.findIndex((l) => new RegExp(`^## \\[?${esc}\\]?`).test(l))
+  // **Every metacharacter, not just the dots.** A version is an argument, so `0.20.1(` used to reach
+  // `new RegExp` and come out as an uncaught SyntaxError with a stack trace instead of a refusal.
+  const esc = version.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  // **The closing bracket cannot be optional.** With `\]?` the heading `## [0.20.10]` matches version
+  // `0.20.1` — measured — and since the changelog runs newest-first, `findIndex` takes it: a plan
+  // titled v0.20.1 carrying 0.20.10's contents, exit 0. `## [0.21.0-rc.1]` matched `0.21.0` the same
+  // way. The lookahead rejects a heading that continues with another version character while still
+  // allowing the ` - 2026-09-11` that follows a real one.
+  const start = lines.findIndex((l) => new RegExp(`^## \\[?${esc}\\]?(?![\\w.\\-])`).test(l))
   if (start === -1) return null
   const rest = lines.slice(start + 1)
   const end = rest.findIndex((l) => /^## /.test(l))
@@ -148,9 +155,9 @@ export function renderPlan({ version, date, prep, core, entries }) {
     '',
   ]
 
-  if (!entries.length) {
-    lines.push('(이 버전의 CHANGELOG 절에 사용자가 겪는 변경이 없다.)', '')
-  }
+  // No branch for an empty `entries`. It used to render "this version changed nothing", which is a
+  // sentence that is never true and was reachable without any mutation — the CLI refuses that state
+  // now, and a dead branch here would tell the next reader it is supported.
   for (const { section, items } of entries) {
     lines.push(`### ${section}`, '')
     if (/security/i.test(section)) {
