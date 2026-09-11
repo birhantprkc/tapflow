@@ -206,6 +206,9 @@ jobs:
     runs-on: ubuntu-latest
     env:
       HAS_DOCKERHUB: ${{ secrets.DOCKERHUB_TOKEN != '' && secrets.DOCKERHUB_USERNAME != '' }}
+      # A second flag rather than a longer `if`, because the `secrets` context is not available in a
+      # step-level `if` — which is why `HAS_DOCKERHUB` above exists at all rather than being inlined.
+      HAS_DESCRIPTION_TOKEN: ${{ secrets.DOCKERHUB_DESCRIPTION_TOKEN != '' }}
     steps:
       - name: Note validation-only build
         if: env.HAS_DOCKERHUB != 'true'
@@ -253,3 +256,41 @@ jobs:
       - name: Inspect image
         if: env.HAS_DOCKERHUB == 'true'
         run: docker buildx imagetools inspect ${{ env.IMAGE }}:${{ steps.meta.outputs.version }}
+
+      # **The page a first-time visitor lands on, which was blank while the image was pulled 7,768
+      # times.** Nothing here pushed a description, so it was set by hand or not at all — and a file
+      # in the repo without this step is a file nobody reads, which is why one arriving alone was
+      # dropped from #713. The file and the step go together or neither does.
+      #
+      # **Gated on its own secret, and that is not tidiness.** The action needs a PAT with
+      # `read/write/delete`; `DOCKERHUB_TOKEN` is documented as Read & Write, so it may not carry the
+      # scope to edit repository metadata. Hanging this off `HAS_DOCKERHUB` would then redden every
+      # push to `main` for a reason that has nothing to do with the image — and this workflow is not
+      # a required check, so a permanently red run is how nobody notices the day the *push* breaks.
+      # Set `DOCKERHUB_DESCRIPTION_TOKEN` to turn it on; until then the step is skipped and the page
+      # stays as it is.
+      # **This job has no checkout of its own**, because merging digests into a manifest needs the
+      # registry and nothing from the repository. The step below is the first thing here that reads a
+      # file, so it has to bring one — without this it would fail on a missing path the moment the
+      # secret was set, which is the failure the gate above exists to avoid, arriving by another door.
+      #
+      # Sparse, so what the job depends on is one line rather than the whole tree, and anyone tidying
+      # a checkout that looks unused can see what it is for.
+      - name: Check out the overview
+        if: env.HAS_DOCKERHUB == 'true' && env.HAS_DESCRIPTION_TOKEN == 'true'
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          sparse-checkout: docker/hub-overview.md
+          sparse-checkout-cone-mode: false
+
+      - name: Push the Docker Hub overview
+        if: env.HAS_DOCKERHUB == 'true' && env.HAS_DESCRIPTION_TOKEN == 'true'
+        uses: peter-evans/dockerhub-description@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_DESCRIPTION_TOKEN }}
+          repository: ${{ env.IMAGE }}
+          readme-filepath: ./docker/hub-overview.md
+          short-description: >-
+            Relay server for tapflow — self-hosted iOS & Android simulator streaming for your whole team
