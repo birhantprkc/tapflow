@@ -34,15 +34,15 @@ function get(port: number, urlPath: string, headers: Record<string, string> = {}
 describe('BuildTicketStore', () => {
   it('mints a 64-character hex ticket', () => {
     const store = new BuildTicketStore()
-    expect(store.mint(1, '/x', 10)).toMatch(/^[0-9a-f]{64}$/)
+    expect(store.mint(1, '/x')).toMatch(/^[0-9a-f]{64}$/)
   })
 
   // Mutation: leave the entry in the map after reading it. A ticket that survives its use is a
   // credential with a 180-second life instead of a single-shot one.
   it('redeems a ticket once', () => {
     const store = new BuildTicketStore()
-    const t = store.mint(7, '/x', 10)
-    expect(store.redeem(t)).toMatchObject({ buildId: 7, bytes: 10 })
+    const t = store.mint(7, '/x')
+    expect(store.redeem(t)).toMatchObject({ buildId: 7, filePath: '/x' })
     expect(store.redeem(t)).toBe('unknown')
   })
 
@@ -51,24 +51,28 @@ describe('BuildTicketStore', () => {
   it('tells an expired ticket apart from one that never existed', () => {
     const store = new BuildTicketStore()
     const now = 1_000_000
-    const t = store.mint(1, '/x', 10, now)
+    const t = store.mint(1, '/x', now)
     expect(store.redeem(t, now + TICKET_TTL_MS + 1)).toBe('expired')
     expect(store.redeem('deadbeef', now)).toBe('unknown')
   })
 
-  // **The anti-vacuity assertion is the first line.** Without it this passes when minting is broken
-  // and the map was empty all along — `size === 0` is true for a store that never filled.
+  // **Swept through `mint`, which is the only thing that calls it in production.** A first version
+  // called `sweep()` directly and so proved nothing: deleting the call inside `mint` left all
+  // thirteen cases green, while the docstring claimed the map would otherwise grow for the life of
+  // the process.
   //
-  // Mutation: delete the sweep. Tickets nobody redeems accumulate for the life of the process, and
-  // a session owner pressing install repeatedly is all it takes.
-  it('sweeps tickets nobody redeemed', () => {
+  // The count before is the anti-vacuity half — `size === 1` afterwards is also true of a store
+  // where minting never worked at all.
+  //
+  // Mutation: drop `this.sweep(now)` from `mint`. Four tickets survive instead of one.
+  it('sweeps expired tickets when the next one is minted', () => {
     const store = new BuildTicketStore()
     const now = 1_000_000
-    store.mint(1, '/a', 1, now); store.mint(2, '/b', 1, now); store.mint(3, '/c', 1, now)
+    store.mint(1, '/a', now); store.mint(2, '/b', now); store.mint(3, '/c', now)
     expect(store.size).toBe(3)
 
-    store.sweep(now + TICKET_TTL_MS + 1)
-    expect(store.size).toBe(0)
+    store.mint(4, '/d', now + TICKET_TTL_MS + 1)
+    expect(store.size).toBe(1)
   })
 })
 
@@ -102,10 +106,7 @@ describe('GET /api/v1/build-download', () => {
   /** Reaches into the running server's store, which is what `app:install` would have minted from. */
   function mint(filePath = buildFile): string {
     const store = (server as unknown as { buildTickets: BuildTicketStore }).buildTickets
-    // Size from the file when there is one. A ticket for a path that no longer exists is the input
-    // to the missing-file case, so this must not stat unconditionally.
-    const bytes = fs.existsSync(filePath) ? fs.statSync(filePath).size : 0
-    return store.mint(1, filePath, bytes)
+    return store.mint(1, filePath)
   }
 
   // **This is the routing test.** Asserting the body rather than the status is the point: register
@@ -125,8 +126,9 @@ describe('GET /api/v1/build-download', () => {
     expect(res.body.toString()).toContain('X-Tapflow-Build-Ticket')
   })
 
-  // Mutation: accept a PAT here as well. `agent` scope would then reach every build row one id at a
-  // time, which is the objection that ruled the earlier design out.
+  // Mutation: answer the second request from the file anyway — serve without redeeming. A ticket
+  // that survives its use is a 180-second credential rather than a single-shot one, and this is the
+  // case that says so over real HTTP; the store-level test says it about the map.
   it('refuses a ticket that was already used', async () => {
     const ticket = mint()
     expect((await get(port, '/api/v1/build-download', { 'X-Tapflow-Build-Ticket': ticket })).body).toEqual(BODY)
@@ -151,6 +153,41 @@ describe('GET /api/v1/build-download', () => {
   it('does not answer the dashboard for a mistyped download path', async () => {
     const res = await get(port, '/api/v1/build-downloadx', { 'X-Tapflow-Build-Ticket': mint() })
     expect(res.body).not.toEqual(BODY)
+  })
+
+  // **An aborted download is the ordinary failure here, not an edge case** — the agent's own idle
+  // timeout destroys the request, and so does an agent that exits or a link that drops. `pipe` only
+  // *unpipes* its source when the destination goes, so without the explicit destroy the read stream
+  // and its descriptor stay open for the life of the process. Enough of them and the relay stops
+  // accepting connections at all.
+  //
+  // Counted through the process's own open descriptors rather than by reaching into the stream: the
+  // number is what runs out, and a test that watched a private field would pass on a stream that was
+  // marked destroyed while its fd stayed open.
+  //
+  // Mutation: drop `res.on('close', () => rs.destroy())`. The count keeps climbing.
+  it('closes the file when the agent abandons the download', async () => {
+    const big = path.join(tmpDir, 'big.app.zip')
+    fs.writeFileSync(big, Buffer.alloc(8 * 1024 * 1024))   // large enough not to finish in one tick
+    const openFiles = () => fs.readdirSync(`/dev/fd`).length
+
+    const before = openFiles()
+    for (let i = 0; i < 8; i++) {
+      await new Promise<void>((resolve) => {
+        const req = http.request(
+          { hostname: '127.0.0.1', port, path: '/api/v1/build-download', headers: { 'X-Tapflow-Build-Ticket': mint(big) } },
+          (res) => { res.once('data', () => { req.destroy(); resolve() }) },
+        )
+        req.on('error', () => resolve())
+        req.end()
+      })
+    }
+    await new Promise((r) => setTimeout(r, 200))
+
+    // Measured both ways: **+7 with the leak, -1 with the fix** — the sockets closing is why the
+    // fixed case goes slightly negative. A first threshold of `< 8` was one short of catching it,
+    // which is the whole hazard of a bound picked from reasoning rather than from a broken run.
+    expect(openFiles() - before).toBeLessThan(4)
   })
 })
 

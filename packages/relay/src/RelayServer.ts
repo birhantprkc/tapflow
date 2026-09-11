@@ -2010,7 +2010,7 @@ export class RelayServer {
         // Still sent, and sent first: an agent that predates `build-download` reads only this.
         filePath: build.file_path,
         bundleId: build.bundle_id,
-        buildTicket: this.buildTickets.mint(msg.buildId, build.file_path, bytes),
+        buildTicket: this.buildTickets.mint(msg.buildId, build.file_path),
         buildName: path.basename(build.file_path),
         buildBytes: bytes,
       },
@@ -2315,9 +2315,16 @@ export class RelayServer {
     // Set even though the agent compares against `buildBytes` instead: a correct header costs
     // nothing and helps anything else that looks. It is not the check — a proxy may drop it.
     res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': size })
-    fs.createReadStream(found.filePath)
-      .on('error', () => { res.destroy() })
-      .pipe(res)
+    // **`pipe` does not destroy its source when the destination goes away** — it only unpipes — so an
+    // aborted download leaves the read stream and its file descriptor open for the life of the
+    // process. Measured: after a client abort, `rs.destroyed` is still false and the fd still stats.
+    // On this route an abort is the *ordinary* failure, not an edge case: the agent's own idle
+    // timeout destroys the request, and so does an agent that exits or a link that drops. Enough of
+    // them and the relay hits its descriptor limit and stops accepting connections at all.
+    const rs = fs.createReadStream(found.filePath)
+    res.on('close', () => { rs.destroy() })
+    rs.on('error', () => { res.destroy() })
+    rs.pipe(res)
   }
 
   private serveUpload(req: http.IncomingMessage, res: http.ServerResponse): void {
@@ -2332,9 +2339,11 @@ export class RelayServer {
     }
     const contentType = MIME_TYPES[path.extname(filePath)] ?? 'application/octet-stream'
     res.writeHead(200, { 'Content-Type': contentType })
-    fs.createReadStream(filePath)
-      .on('error', () => { res.destroy() })
-      .pipe(res)
+    // Same leak as `handleBuildDownload` above, and the same one line closes it.
+    const rs = fs.createReadStream(filePath)
+    res.on('close', () => { rs.destroy() })
+    rs.on('error', () => { res.destroy() })
+    rs.pipe(res)
   }
 
   private serveStatic(req: http.IncomingMessage, res: http.ServerResponse): void {
@@ -2419,8 +2428,10 @@ export class RelayServer {
     }
 
     res.writeHead(200, headers)
-    fs.createReadStream(servePath)
-      .on('error', () => { res.destroy() })
-      .pipe(res)
+    // Same leak as `handleBuildDownload` above, and the same one line closes it.
+    const rs = fs.createReadStream(servePath)
+    res.on('close', () => { rs.destroy() })
+    rs.on('error', () => { res.destroy() })
+    rs.pipe(res)
   }
 }

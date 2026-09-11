@@ -22,10 +22,13 @@ import crypto from 'crypto'
 export interface BuildTicket {
   buildId: number
   filePath: string
-  /** From `statSync` at mint time. The agent compares against this, not `Content-Length`. */
-  bytes: number
   expiresAt: number
 }
+
+// **No `bytes` here.** A first version carried one described as what the agent compares against —
+// and nothing read it: the route stats the file for its own `Content-Length`, and the agent compares
+// against `buildBytes` from the WebSocket payload. The paragraph above says a field that looks like a
+// check but is not is worse than its absence; this was one, twenty lines below that sentence.
 
 /**
  * Longer than every caller's deadline, so a ticket never expires under a request that is still
@@ -41,10 +44,10 @@ export class BuildTicketStore {
   /** Test-only view. Asserting a sweep emptied the map means nothing without asserting it filled. */
   get size(): number { return this.tickets.size }
 
-  mint(buildId: number, filePath: string, bytes: number, now = Date.now()): string {
+  mint(buildId: number, filePath: string, now = Date.now()): string {
     this.sweep(now)
     const ticket = crypto.randomBytes(32).toString('hex')
-    this.tickets.set(ticket, { buildId, filePath, bytes, expiresAt: now + TICKET_TTL_MS })
+    this.tickets.set(ticket, { buildId, filePath, expiresAt: now + TICKET_TTL_MS })
     return ticket
   }
 

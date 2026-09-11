@@ -202,9 +202,15 @@ const BOOT_DEADLINE_MS = 180_000
  * inside this budget where before it was a local extract. 29MB measured over a slow tunnel is most
  * of a minute on its own.
  *
- * Named rather than inline for the same reason `BOOT_DEADLINE_MS` is: the relay's ticket has to
- * outlive whichever caller is waiting, and a guard can only hold that relationship against constants
- * it can find. This is below the 180s ticket TTL on purpose.
+ * Below the relay's 180s ticket TTL on purpose, so a ticket never expires under a request still
+ * being awaited.
+ *
+ * **Nothing enforces that ordering.** `bootDeadlineOutlivesAgent.test.mjs` is the shape that would —
+ * it reads named constants out of two packages and compares them — and naming this one is the first
+ * of the three things such a guard would need. The other two are missing: `flow-runner`'s matching
+ * deadline is still an inline `120_000` (`RelayClient.ts`), and no check reads `TICKET_TTL_MS` at
+ * all. Said plainly rather than implied, because a comment that sounds like it describes a guard is
+ * how a guard stops being written.
  */
 const INSTALL_DEADLINE_MS = 120_000
 
