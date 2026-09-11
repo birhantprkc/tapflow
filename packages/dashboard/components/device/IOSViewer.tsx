@@ -2,6 +2,7 @@
 
 import type { BrowserToRelay } from '@tapflowio/protocol'
 import { newRequestId } from '@/lib/requestId';
+import { pickButton } from '@/lib/buttonHit';
 import { useCallback, useEffect, useId, useRef, useState, Fragment } from 'react';
 import { useClientRecording } from '@/hooks/useClientRecording';
 import { Home, Keyboard, Loader2, Play } from 'lucide-react';
@@ -27,7 +28,19 @@ const CURSOR_RING_R = 13;
 const CURSOR_DOT_R = 8;
 const MOVE_THROTTLE_MS = 16;
 const DRAG_THRESHOLD = 0.02;
-const BUTTON_HIT_RADIUS = 100;
+/**
+ * How far outside a button's own rectangle a press still counts, in 2× composite px.
+ *
+ * This was a radius measured from the button's *centre*, and the nearest match was not taken — the
+ * first button in `chrome.buttons` within the radius won. On an iPhone 15 Pro the Action button sits
+ * close enough above Volume Up that its circle covered Volume Up's upper half, so pressing there
+ * pressed Action: the tooltip said so, and the press followed the tooltip. Measured on 2026-09-11
+ * against a real simulator.
+ *
+ * The value is unchanged so targets stay as generous as they were. What changed is what it is a
+ * margin *around* — see `buttonHitRect`.
+ */
+const BUTTON_HIT_MARGIN = 100;
 
 interface IOSViewerProps {
   sessionId: string;
@@ -410,11 +423,7 @@ export function IOSViewer({
     // edge — e.g. iPhone SE — otherwise hijack screen taps).
     const sr = chrome.screenRect
     if (cx >= sr.x && cx <= sr.x + sr.width && cy >= sr.y && cy <= sr.y + sr.height) return null
-    for (const btn of chrome.buttons) {
-      const dx = cx - btn.normalOffset.x; const dy = cy - btn.normalOffset.y
-      if (dx * dx + dy * dy < BUTTON_HIT_RADIUS ** 2) return btn.name
-    }
-    return null
+    return pickButton(cx, cy, chrome.buttons, BUTTON_HIT_MARGIN)
   }, [chrome, isLandscape])
 
   const normToRecordCanvas = useCallback((norm: { x: number; y: number }) => {
