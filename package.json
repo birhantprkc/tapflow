@@ -33,6 +33,7 @@
     "changeset": "changeset",
     "changeset:check": "node scripts/check-changeset.mjs",
     "changeset:audit": "node scripts/check-changeset.mjs --audit",
+    "e2e:plan": "node scripts/e2e-plan.mjs",
     "overrides:audit": "node scripts/audit-overrides.mjs",
     "version": "changeset version",
     "release": "pnpm build && changeset publish"
