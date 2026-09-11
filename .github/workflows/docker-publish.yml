@@ -209,6 +209,15 @@ jobs:
       # A second flag rather than a longer `if`, because the `secrets` context is not available in a
       # step-level `if` — which is why `HAS_DOCKERHUB` above exists at all rather than being inlined.
       HAS_DESCRIPTION_TOKEN: ${{ secrets.DOCKERHUB_DESCRIPTION_TOKEN != '' }}
+      # Lowercased because a registry path must be, and `github.repository` carries the owner's
+      # capitalisation. `jo-duchan/tapflow` happens to be lowercase already; a fork whose owner is not
+      # would push to a path the registry rejects, and the failure names the tag rather than the case.
+      GHCR_IMAGE: ghcr.io/${{ github.repository }}
+    permissions:
+      contents: read
+      # `ghcr.io` takes `GITHUB_TOKEN`, so the second registry needs no secret and nothing that
+      # expires. The repository default is `read`, so without this line the push is a 403.
+      packages: write
     steps:
       - name: Note validation-only build
         if: env.HAS_DOCKERHUB != 'true'
@@ -256,6 +265,53 @@ jobs:
       - name: Inspect image
         if: env.HAS_DOCKERHUB == 'true'
         run: docker buildx imagetools inspect ${{ env.IMAGE }}:${{ steps.meta.outputs.version }}
+
+      # ── A second registry, copied rather than built twice ──────────────────────────────────────
+      #
+      # **Why a copy and not a second push from the build job.** `buildx` does take repeated image
+      # outputs, so the build could push by digest to both registries and neither would depend on the
+      # other. That is the better shape and it is not the one to land first: it rewrites the
+      # `outputs:` expression that drives the Docker Hub push, and **nothing here can be rehearsed**
+      # — the push path is skipped on pull requests, so its first run is on `main`. A mistake there
+      # stops releases. Everything below runs after Docker Hub already has the manifest, so the worst
+      # it can do is fail by itself.
+      #
+      # The cost is honest: if Docker Hub is down, GHCR gets nothing that day. That matters less than
+      # it sounds, because a failed Hub push is loud — this is the registry that answers when someone
+      # hits Docker Hub's anonymous pull limit, not a hot standby.
+      - name: Log in to GHCR
+        if: env.HAS_DOCKERHUB == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # `imagetools create` with a source copies the manifest list and any blobs the destination is
+      # missing, so the architectures and the attestations arrive without a rebuild. The tags are the
+      # ones `metadata-action` already worked out, with the registry swapped.
+      - name: Copy the manifest to GHCR
+        if: env.HAS_DOCKERHUB == 'true'
+        env:
+          TAGS_JSON: ${{ steps.meta.outputs.json }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          # An array rather than the word-split the sibling step disables SC2046 for: a tag can carry
+          # no whitespace today, and building the flags as elements means that stays true by shape.
+          #
+          # `sub(".*:"; "")` is greedy on purpose — it keeps what follows the *last* colon. Anchoring
+          # on the first one reads the port of a `registry:5000/foo:1.2.3` as the tag.
+          args=()
+          while IFS= read -r tag; do
+            echo "copying to: $tag"
+            args+=(-t "$tag")
+          done < <(jq -r --arg img "$GHCR_IMAGE" '.tags[] | sub(".*:"; "") | $img + ":" + .' <<< "$TAGS_JSON")
+          docker buildx imagetools create "${args[@]}" "${IMAGE}:${VERSION}"
+
+      - name: Inspect the GHCR image
+        if: env.HAS_DOCKERHUB == 'true'
+        run: docker buildx imagetools inspect ${{ env.GHCR_IMAGE }}:${{ steps.meta.outputs.version }}
 
       # **The page a first-time visitor lands on, which was blank while the image was pulled 7,768
       # times.** Nothing here pushed a description, so it was set by hand or not at all — and a file
