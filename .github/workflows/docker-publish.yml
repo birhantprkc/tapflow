@@ -269,6 +269,21 @@ jobs:
       # a required check, so a permanently red run is how nobody notices the day the *push* breaks.
       # Set `DOCKERHUB_DESCRIPTION_TOKEN` to turn it on; until then the step is skipped and the page
       # stays as it is.
+      # **This job has no checkout of its own**, because merging digests into a manifest needs the
+      # registry and nothing from the repository. The step below is the first thing here that reads a
+      # file, so it has to bring one — without this it would fail on a missing path the moment the
+      # secret was set, which is the failure the gate above exists to avoid, arriving by another door.
+      #
+      # Sparse, so what the job depends on is one line rather than the whole tree, and anyone tidying
+      # a checkout that looks unused can see what it is for.
+      - name: Check out the overview
+        if: env.HAS_DOCKERHUB == 'true' && env.HAS_DESCRIPTION_TOKEN == 'true'
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          sparse-checkout: docker/hub-overview.md
+          sparse-checkout-cone-mode: false
+
       - name: Push the Docker Hub overview
         if: env.HAS_DOCKERHUB == 'true' && env.HAS_DESCRIPTION_TOKEN == 'true'
         uses: peter-evans/dockerhub-description@v4
