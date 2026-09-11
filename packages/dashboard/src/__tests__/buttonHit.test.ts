@@ -17,14 +17,23 @@ import { buttonHitRect, distanceToRect, pickButton } from '../../lib/buttonHit'
 
 const MARGIN = 100
 
-/** 2× composite px, shaped like an iPhone 15 Pro's left edge: Action above a much taller Volume Up. */
+/**
+ * 2× composite px, shaped like an iPhone 15 Pro's left edge: Action above a much taller Volume Up.
+ *
+ * **The two offsets differ on purpose.** A first version set `rolloverOffset` equal to
+ * `normalOffset` — the ternary even had two identical branches — and that made the two places
+ * `buttonHitRect` deliberately reads the rollover pair invisible: pointing both of them at
+ * `normalOffset` left all ten cases green. `DeviceChromeLoader` fills them from different plist
+ * offsets, and the gap between them *is* the hover slide the renderer animates, so a fixture where
+ * they agree is a fixture that cannot see the axis this change moved.
+ */
 const button = (name: string, centreY: number, h: number, anchor = 'left'): ChromeButton => ({
   name,
   accessibilityTitle: name,
   anchor,
   onTop: false,
   normalOffset: { x: 40, y: centreY },
-  rolloverOffset: { x: 40, y: anchor === 'top' ? centreY : centreY },
+  rolloverOffset: { x: 32, y: anchor === 'top' ? centreY - 30 : centreY },
   buttonW: 24,
   buttonH: h,
   usagePage: 0,
@@ -37,15 +46,21 @@ const VOLUME_UP = button('volume_up', 850, 280) // 710 … 990
 const BUTTONS = [ACTION, VOLUME_UP] as const    // Action first — the order that used to decide
 
 describe('buttonHitRect', () => {
-  it('places a side button around its normal centre', () => {
-    expect(buttonHitRect(ACTION)).toEqual({ left: 28, top: 565, right: 52, bottom: 675 })
+  // **Horizontally from the rollover pair, vertically from the normal one** — which is what the
+  // renderer draws at rest, and the asymmetry is the whole reason this function exists rather than
+  // the caller doing the arithmetic.
+  //
+  // Mutation: `left = normalOffset.x - halfW`. Gives 28 instead of 20, so the target sits a slide's
+  // width away from the pixels the user is aiming at.
+  it('places a side button around its rollover x and its normal y', () => {
+    expect(buttonHitRect(ACTION)).toEqual({ left: 20, top: 565, right: 44, bottom: 675 })
   })
 
-  // Mutation: measure every anchor from `normalOffset.y`. The home button's rect moves by half its
-  // height and the target stops matching the pixels it is drawn on.
+  // Mutation: measure every anchor from `normalOffset.y`. The home button's rect moves to 1355 and
+  // the target stops matching the pixels it is drawn on.
   it('measures a top-anchored button from its rollover offset', () => {
     const home = button('home', 1400, 90, 'top')
-    expect(buttonHitRect(home).top).toBe(1400)
+    expect(buttonHitRect(home).top).toBe(1370)
   })
 })
 
@@ -82,9 +97,14 @@ describe('pickButton — the defect found on the simulator', () => {
     expect(pickButton(40, 705, BUTTONS, MARGIN)).toBe('volume_up')
   })
 
+  // The margin is inclusive, and exactly 100 is the only input that says so.
+  //
+  // Mutation: `best < margin`. Survives every other case here, because they only ever use 99 and
+  // 101 — a boundary nobody names is a boundary nothing holds.
   it('still presses a button from just outside it, so targets stay generous', () => {
     expect(pickButton(40, 565 - 99, BUTTONS, MARGIN)).toBe('action')
-    expect(pickButton(40, 990 + 99, BUTTONS, MARGIN)).toBe('volume_up')
+    expect(pickButton(40, 565 - 100, BUTTONS, MARGIN)).toBe('action')
+    expect(pickButton(40, 990 + 100, BUTTONS, MARGIN)).toBe('volume_up')
   })
 
   // Mutation: drop the `best <= margin` test and return `hit`. Every press anywhere on the page
