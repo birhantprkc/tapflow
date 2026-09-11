@@ -6,7 +6,7 @@ import { randomUUID } from 'crypto'
 import { spawnSync } from 'child_process'
 import { WebSocket } from 'ws'
 import type { BootAbandonReason, ClipboardErrorPayload, Device, DeviceAgent, NetworkControlCapability, NetworkStatePayload, UIElement } from '@tapflowio/agent-core'
-import { createLogger, PlatformError, ValidationError, bootAbandonMessage, BOOT_NO_SESSION_STATE } from '@tapflowio/agent-core'
+import { createLogger, PlatformError, ValidationError, bootAbandonMessage, BOOT_NO_SESSION_STATE, downloadBuild } from '@tapflowio/agent-core'
 import type {
   AgentControlOutbound, InputErrorReason, ClipboardReplyBody, OpenUrlReplyBody,
   AppInstallReplyBody, AppLaunchReplyBody, AppClearStateReplyBody,
@@ -21,7 +21,7 @@ const logger = createLogger('ios-agent')
 // actually took is per device and per app, and `network:state.available` carries that — the split the
 // protocol documents. Added last, after the handler and the boot-time arming, because the string on
 // its own is what puts a control on screen.
-const AGENT_CAPABILITIES: AgentCapability[] = ['clipboard', 'full-reset', 'network-control']
+const AGENT_CAPABILITIES: AgentCapability[] = ['clipboard', 'full-reset', 'network-control', 'build-download']
 
 // Human prose for each reason. Not in `@tapflowio/protocol`: that package's main entry must stay
 // runtime-free so it erases under `import type` and never reaches the dashboard bundle — a lookup
@@ -1038,7 +1038,10 @@ export class IOSAgent implements DeviceAgent, NetworkControlCapability {
         break
       }
       case 'app:install': {
-        const { filePath, bundleId } = msg.payload as { filePath: string; bundleId?: string }
+        const { filePath, bundleId, buildTicket, buildName, buildBytes } = msg.payload as {
+          filePath: string; bundleId?: string
+          buildTicket?: string; buildName?: string; buildBytes?: number
+        }
         const sessionId = msg.sessionId
         const { requestId } = msg
         if (typeof requestId !== 'string' || requestId === '') {
@@ -1053,7 +1056,7 @@ export class IOSAgent implements DeviceAgent, NetworkControlCapability {
           respond({ type: 'app:install-error', message: 'No booted device' })
           break
         }
-        this.installBuild(installState.deviceId, filePath, bundleId)
+        this.installBuild(installState.deviceId, filePath, bundleId, { buildTicket, buildName, buildBytes })
           .then(() => respond({ type: 'app:install-done' }))
           .catch((e: unknown) => {
             const message = e instanceof Error ? e.message : String(e)
@@ -1656,11 +1659,45 @@ export class IOSAgent implements DeviceAgent, NetworkControlCapability {
    * 직접 설치. tar 추출은 실행 비트·심볼릭 링크를 보존하고(재압축이 아니라 네이티브 보관),
    * macOS tar(libarchive)가 path traversal·symlink 탈출을 기본 차단한다. 완료 후 임시 정리.
    */
-  private async installBuild(udid: string, filePath: string, bundleId?: string): Promise<void> {
+  private async installBuild(
+    udid: string,
+    filePath: string,
+    bundleId?: string,
+    remote?: { buildTicket?: string; buildName?: string; buildBytes?: number },
+  ): Promise<void> {
     if (bundleId) {
       await this.simctl.uninstallApp(udid, bundleId).catch(() => { /* 미설치 상태면 무시 */ })
     }
 
+    const tmpDir = path.join(tmpdir(), `tapflow-install-${randomUUID()}`)
+    fs.mkdirSync(tmpDir, { recursive: true })
+    try {
+      // **The relay's `filePath` is only usable when we share its filesystem**, which is false for a
+      // relay in a container or on another host — and that is exactly what it looks like when it
+      // fails: `unzip` answers `cannot find or open`, which this used to report as a bad archive.
+      // A ticket means the relay can hand us the bytes instead, so take that whenever it is offered
+      // and fall back only for a relay that predates it.
+      //
+      // The download keeps the upload's filename, because **the extension decides the branch
+      // below** — a random temp name would send a zip straight to `simctl` unopened.
+      let source = filePath
+      if (remote?.buildTicket && this.relayUrl) {
+        source = path.join(tmpDir, path.basename(remote.buildName ?? path.basename(filePath)))
+        await downloadBuild({
+          relayUrl: this.relayUrl,
+          ticket: remote.buildTicket,
+          destPath: source,
+          expectedBytes: remote.buildBytes ?? 0,
+        })
+      }
+      return await this.installFrom(udid, source, tmpDir)
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true })
+    }
+  }
+
+  /** Extraction + `simctl install`, given a file this machine can actually open. */
+  private async installFrom(udid: string, filePath: string, tmpDir: string): Promise<void> {
     const lower = filePath.toLowerCase()
     const isTar = lower.endsWith('.tar.gz') || lower.endsWith('.tgz')
     const isZip = lower.endsWith('.zip')
@@ -1668,37 +1705,41 @@ export class IOSAgent implements DeviceAgent, NetworkControlCapability {
       return this.simctl.installApp(udid, filePath)
     }
 
-    const tmpDir = path.join(tmpdir(), `tapflow-install-${randomUUID()}`)
-    fs.mkdirSync(tmpDir, { recursive: true })
-    try {
-      // tar 는 기본 무음, unzip 은 -q 로 무음화해 큰 .app 에서 verbose stdout 이 기본
-      // maxBuffer(1MB)를 넘겨 추출이 죽는 것을 막는다.
-      const result = isTar
-        ? spawnSync('tar', ['-xzf', filePath, '-C', tmpDir], { maxBuffer: EXTRACT_MAXBUFFER })
-        : spawnSync('unzip', ['-q', '-o', filePath, '-d', tmpDir], { maxBuffer: EXTRACT_MAXBUFFER })
-      // 실행 자체 실패(tar/unzip 부재=ENOENT 등)는 아카이브 무효와 구분한다.
-      if (result.error) {
-        const code = (result.error as NodeJS.ErrnoException).code ?? result.error.message
-        throw new Error(`아카이브 추출 실행 실패 (${isTar ? 'tar' : 'unzip'}: ${code})`)
-      }
-      if (result.status !== 0) {
-        throw new ValidationError(
-          isTar
-            ? 'tar.gz 압축 해제 실패 — 시뮬레이터용 .tar.gz(경로 탈출/심볼릭 링크 없는)인지 확인하세요.'
-            : 'zip 압축 해제 실패 — 시뮬레이터용 .app.zip 파일인지 확인하세요.',
-        )
-      }
-
-      const entries = fs.readdirSync(tmpDir)
-      const appDir = entries.find(e => e.endsWith('.app') && fs.statSync(path.join(tmpDir, e)).isDirectory())
-      if (!appDir) {
-        throw new ValidationError('.app 디렉토리를 찾을 수 없습니다. iphonesimulator 로 빌드한 .app 을 .app.zip 또는 .tar.gz 로 업로드하세요.')
-      }
-
-      await this.simctl.installApp(udid, path.join(tmpDir, appDir))
-    } finally {
-      fs.rmSync(tmpDir, { recursive: true, force: true })
+    // A subdirectory of the caller's, which owns the cleanup: a downloaded archive already sits in
+    // `tmpDir`, and extracting beside it would put the two in one listing.
+    const outDir = path.join(tmpDir, 'x')
+    fs.mkdirSync(outDir, { recursive: true })
+    // tar 는 기본 무음, unzip 은 -q 로 무음화해 큰 .app 에서 verbose stdout 이 기본
+    // maxBuffer(1MB)를 넘겨 추출이 죽는 것을 막는다.
+    const result = isTar
+      ? spawnSync('tar', ['-xzf', filePath, '-C', outDir], { maxBuffer: EXTRACT_MAXBUFFER })
+      : spawnSync('unzip', ['-q', '-o', filePath, '-d', outDir], { maxBuffer: EXTRACT_MAXBUFFER })
+    // 실행 자체 실패(tar/unzip 부재=ENOENT 등)는 아카이브 무효와 구분한다.
+    if (result.error) {
+      const code = (result.error as NodeJS.ErrnoException).code ?? result.error.message
+      throw new Error(`아카이브 추출 실행 실패 (${isTar ? 'tar' : 'unzip'}: ${code})`)
     }
+    if (result.status !== 0) {
+      // **The tool's own words go in the message.** This used to name a likely cause and throw the
+      // evidence away, so a build that was fine read as corrupt — `unzip` had said
+      // `cannot find or open`, which names a missing file rather than a bad archive, and nobody
+      // could see it. Trimmed because the whole thing reaches a browser toast.
+      const detail = (result.stderr?.toString() ?? '').trim().split('\n')[0]?.slice(0, 300)
+      throw new ValidationError(
+        (isTar
+          ? 'tar.gz 압축 해제 실패 — 시뮬레이터용 .tar.gz(경로 탈출/심볼릭 링크 없는)인지 확인하세요.'
+          : 'zip 압축 해제 실패 — 시뮬레이터용 .app.zip 파일인지 확인하세요.')
+        + (detail ? ` (${isTar ? 'tar' : 'unzip'}: ${detail})` : ''),
+      )
+    }
+
+    const entries = fs.readdirSync(outDir)
+    const appDir = entries.find(e => e.endsWith('.app') && fs.statSync(path.join(outDir, e)).isDirectory())
+    if (!appDir) {
+      throw new ValidationError('.app 디렉토리를 찾을 수 없습니다. iphonesimulator 로 빌드한 .app 을 .app.zip 또는 .tar.gz 로 업로드하세요.')
+    }
+
+    await this.simctl.installApp(udid, path.join(outDir, appDir))
   }
 
   // DeviceAgent interface — delegate to SimctlWrapper

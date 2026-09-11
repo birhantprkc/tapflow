@@ -194,6 +194,20 @@ interface SessionLifecycle {
  */
 const BOOT_DEADLINE_MS = 180_000
 
+/**
+ * How long to wait for an install to answer.
+ *
+ * **Raised from an inline 60_000 because installing now includes a download.** A relay on another
+ * host hands the agent a ticket and the agent fetches the build over HTTP, so bytes on the wire sit
+ * inside this budget where before it was a local extract. 29MB measured over a slow tunnel is most
+ * of a minute on its own.
+ *
+ * Named rather than inline for the same reason `BOOT_DEADLINE_MS` is: the relay's ticket has to
+ * outlive whichever caller is waiting, and a guard can only hold that relationship against constants
+ * it can find. This is below the 180s ticket TTL on purpose.
+ */
+const INSTALL_DEADLINE_MS = 120_000
+
 const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
 
 /**
@@ -936,7 +950,7 @@ export class TapflowClient {
       (m) =>
         (m['type'] === 'app:install-done' || m['type'] === 'app:install-error') &&
         m['requestId'] === requestId,
-      60_000,
+      INSTALL_DEADLINE_MS,
       sessionId,
     )
     if (msg['type'] === 'app:install-error') {

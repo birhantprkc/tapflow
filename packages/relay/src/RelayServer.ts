@@ -15,6 +15,7 @@ import { Router, json } from './router.js'
 import { requireViewAuth, requireAuth, getAuth, verifyPat } from './middleware/auth.js'
 import { classifyConnection } from './lib/connectionAuth.js'
 import { resolveClientAddress } from './lib/clientAddress.js'
+import { BuildTicketStore } from './lib/buildTickets.js'
 import { resolveCorsHeaders } from './lib/cors.js'
 import { isCsrfBlocked } from './lib/csrf.js'
 import { pickLanAddress } from './lib/lanAddress.js'
@@ -263,6 +264,9 @@ export class RelayServer {
   private readonly corsAllowed: Set<string>
   // One-shot warning when XFF arrives on a loopback socket but TAPFLOW_TRUSTED_PROXIES is unset.
   private warnedProxyMisconfig = false
+  /** Agent identities already warned about a missing `build-download`. See `warnLegacyInstaller`. */
+  private readonly warnedLegacyInstaller = new Set<string>()
+  private readonly buildTickets = new BuildTicketStore()
   private pendingScreenshots = new Map<string, {
     sessionId: string
     resolve: (buf: Buffer, format: 'png' | 'jpeg') => void
@@ -350,6 +354,12 @@ export class RelayServer {
     this.router.post('/api/v1/builds/:id/schedule-deletion', handleScheduleBuildDeletion)
     this.router.delete('/api/v1/builds/:id/schedule-deletion', handleCancelBuildDeletion)
     this.router.post('/api/v1/builds', (req, res) => handleUploadBuild(req, res, u))
+    // **Deliberately not under `/api/v1/builds/`.** `:id` compiles to `([^/]+)` and the router
+    // returns on the first registered match, so `/api/v1/builds/download` is captured by
+    // `/api/v1/builds/:id` as `id="download"` — `requireBuildAuth` then answers 401 to a ticketed
+    // agent carrying no PAT. Registration order could avoid it, which is exactly the objection:
+    // that makes the order load-bearing with nothing to say so.
+    this.router.get('/api/v1/build-download', (req, res) => this.handleBuildDownload(req, res))
 
     // webhooks (outbound build-status notifications)
     this.router.get('/api/v1/webhooks', handleListWebhooks)
@@ -1438,6 +1448,7 @@ export class RelayServer {
     // its socket before creating the new ones. Identity is agentId (unique per Mac) when present,
     // else agentName. (Heartbeat backstop for never-reconnecting agents: #313.)
     const identity = msg.agentId ?? msg.agentName
+    this.warnLegacyInstaller(identity, msg.capabilities ?? [])
     // Deduplicate first. Everything below is keyed by device id, so a payload naming one device
     // twice would collapse to a single entry in `registeredSessions` while `create()` had already
     // made two sessions — leaving one the agent is never told about. That is the same orphan the
@@ -1975,12 +1986,57 @@ export class RelayServer {
     // agent's reply is forwarded back generically without the relay looking at it. So if the id does not
     // reach the agent, nothing downstream can attribute the reply. Nothing type-checks that the value is
     // the *request's*: a brand cannot express provenance, so a test carries it.
+    // **`statSync`, and this handler stays synchronous.** Its caller does not await it
+    // (`case 'app:install'` above), and the message loop's `catch` is synchronous — so making this
+    // `async` would turn the `getDb()` throw named in the comment at the top of this function
+    // (SQLITE_BUSY, a closed db, I/O) from "logged, one request hangs" into an unhandled rejection,
+    // and the CLI exits the process on those. The relay would die with every session on it.
+    //
+    // A missing file is answered rather than thrown for the same reason the lookup above is: the
+    // build row outlives its file whenever a bind mount goes away or a purge half-ran, and an
+    // unanswered install is a spinner that never stops and a caller that times out with no cause.
+    let bytes: number
+    try {
+      bytes = fs.statSync(build.file_path).size
+    } catch {
+      return fail('The relay cannot read this build file. It may have been deleted — re-upload the build.')
+    }
+
     this.sendTo(session.agentSocket, {
       type: 'app:install',
       sessionId,
       requestId,
-      payload: { filePath: build.file_path, bundleId: build.bundle_id },
+      payload: {
+        // Still sent, and sent first: an agent that predates `build-download` reads only this.
+        filePath: build.file_path,
+        bundleId: build.bundle_id,
+        buildTicket: this.buildTickets.mint(msg.buildId, build.file_path, bytes),
+        buildName: path.basename(build.file_path),
+        buildBytes: bytes,
+      },
     })
+  }
+
+  /**
+   * Says once, per agent, that this agent cannot fetch builds over HTTP.
+   *
+   * **The wording is conditional on purpose.** Such an agent installs perfectly well when it shares
+   * the relay's filesystem, which is every `tapflow start`, so "installs will fail" would be false
+   * for most of the people who see it. What it cannot do is install from a relay that is somewhere
+   * else — and the relay cannot tell which case this is: the dashboard hands agents a **LAN**
+   * address even for the same machine (`pickLanAddress`), so the socket's own address answers a
+   * different question than the one that matters.
+   *
+   * Once per identity, because `agent:register` runs again on every reconnect — a Wi-Fi blip or a
+   * laptop waking up would otherwise repeat this indefinitely. Same shape as `warnedProxyMisconfig`.
+   */
+  private warnLegacyInstaller(identity: string, capabilities: string[]): void {
+    if (capabilities.includes('build-download') || this.warnedLegacyInstaller.has(identity)) return
+    this.warnedLegacyInstaller.add(identity)
+    logger.warn(
+      `[relay] agent ${identity} predates build downloading. If it is not on the same machine as ` +
+      'this relay, installing a build will fail — update the agent to match the relay.',
+    )
   }
 
   /** Relay looks up bundle_id from DB. Same correlation rules as `handleBrowserAppInstall`. */
@@ -2221,6 +2277,47 @@ export class RelayServer {
 
     // SPA static fallback
     this.serveStatic(req, res)
+  }
+
+  /**
+   * Serves one build to the agent that was just told to install it.
+   *
+   * **The ticket is the whole credential, and it travels in a header.** No PAT is asked for —
+   * requiring one would break `tapflow start`, whose agent connects on loopback with no token at
+   * all. In a URL the ticket would reach the request log the first time this handler threw
+   * (`router.ts` logs `${method} ${url}`, and its redaction only knows PAT and JWT shapes) and every
+   * reverse proxy's access log besides.
+   *
+   * The three failures are answered separately because a user does something different about each:
+   * a ticket nobody minted, a ticket that sat too long, and a file that went away between the mint
+   * and the fetch. Collapsing them is the defect this change exists to stop repeating.
+   */
+  private handleBuildDownload(req: http.IncomingMessage, res: http.ServerResponse): void {
+    const ticket = req.headers['x-tapflow-build-ticket']
+    if (typeof ticket !== 'string' || ticket === '') {
+      return json(res, 401, { error: 'Missing X-Tapflow-Build-Ticket' })
+    }
+    const found = this.buildTickets.redeem(ticket)
+    if (found === 'unknown') {
+      return json(res, 404, { error: 'This build ticket is not valid. It may already have been used.' })
+    }
+    if (found === 'expired') {
+      return json(res, 410, { error: 'This build ticket expired before it was used.' })
+    }
+
+    let size: number
+    try {
+      size = fs.statSync(found.filePath).size
+    } catch {
+      return json(res, 404, { error: 'The build file is no longer on the relay.' })
+    }
+
+    // Set even though the agent compares against `buildBytes` instead: a correct header costs
+    // nothing and helps anything else that looks. It is not the check — a proxy may drop it.
+    res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': size })
+    fs.createReadStream(found.filePath)
+      .on('error', () => { res.destroy() })
+      .pipe(res)
   }
 
   private serveUpload(req: http.IncomingMessage, res: http.ServerResponse): void {
