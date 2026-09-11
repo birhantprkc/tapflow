@@ -45,19 +45,27 @@ The relay never infers its address from the `Host` header — deliberately, beca
 send a phishing link out as a normal invitation. With nothing configured it falls back to
 `http://localhost:4000`, so an invitation mailed to a teammate opens *their* machine and fails.
 
-Put the address people will actually type into `<dataDir>/tapflow.config.json` inside the volume:
+Set `TAPFLOW_RELAY_URL` to the address people will actually type, in the same `environment:` block
+as the variables below:
 
-```json
-{ "tunnel": { "publicUrl": "http://<docker-box-ip>:4000" } }
+```yaml
+    environment:
+      - TAPFLOW_RELAY_URL=http://<docker-box-ip>:4000
 ```
+
+An environment variable rather than the config file, because the relay reads `tapflow.config.json`
+from its working directory — `/app` in the image — and the Compose volume mounts
+`/app/.tapflow/data`, so a file placed there is never opened. The same value also goes into the
+CORS and CSRF allowlist, which a proxied deployment needs.
 :::
 
 ::: warning Create the first account before you open the browser
 The browser onboarding at `/setup` answers only requests from loopback, and a container reaches the
 relay through the bridge gateway — so it refuses, and the error tells you to run `tapflow admin init`
 on the host, which the relay-only image does not contain. Set `TAPFLOW_ADMIN_EMAIL` and
-`TAPFLOW_ADMIN_PASSWORD` and the relay creates the account as it starts. Both variables together,
-password at least 8 characters, and it does nothing on an install that already has an owner. The
+`TAPFLOW_ADMIN_PASSWORD` and the relay creates the account as it starts. Both must be set — with only
+one the relay refuses to start — and the password must be at least 8 characters. On an install that
+already has an owner it does nothing. The
 details, including which `.env` file is read, are in
 [Configuration](/reference/configuration#create-the-first-admin-account-in-a-docker-container-tapflow-admin-email).
 :::

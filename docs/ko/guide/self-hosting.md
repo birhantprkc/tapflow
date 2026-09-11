@@ -45,11 +45,18 @@ docker compose up -d
 내보낼 수 있어서 일부러 그렇게 두었습니다. 설정이 없으면 `http://localhost:4000`으로 떨어집니다. 팀원에게 보낸 초대는
 그 사람의 컴퓨터를 열고 실패합니다.
 
-팀이 실제로 입력할 주소를 볼륨 안의 `<dataDir>/tapflow.config.json`에 적습니다:
+팀이 실제로 입력할 주소를 `TAPFLOW_RELAY_URL`에 설정합니다. 아래 변수들과 같은 `environment:`
+블록입니다.
 
-```json
-{ "tunnel": { "publicUrl": "http://<docker-box-ip>:4000" } }
+```yaml
+    environment:
+      - TAPFLOW_RELAY_URL=http://<docker-box-ip>:4000
 ```
+
+설정 파일이 아니라 환경변수인 이유가 있습니다. 릴레이는 `tapflow.config.json`을 작업 디렉터리에서
+읽는데 이미지에서는 `/app`이고, Compose 볼륨은 `/app/.tapflow/data`를 마운트합니다. 그래서 거기 둔
+파일은 열리지 않습니다. 이 값은 CORS·CSRF 허용 목록에도 함께 들어가며, 프록시 뒤에 두는 배포에는
+그쪽이 필요합니다.
 :::
 
 ::: warning 브라우저를 열기 전에 첫 계정을 만드세요
