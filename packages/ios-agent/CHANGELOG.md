@@ -1,5 +1,90 @@
 # @tapflowio/ios-agent
 
+## 0.21.0
+
+### Patch Changes
+
+- 400f887: <!-- changelog: internal — no behaviour change; three decisions that had no test now have one. -->
+
+  Closes three coverage gaps that earlier reviews found and left written down: the symlink refusal and
+  the file-mode half of the state-file guard, and the descriptor-scan bound in the injected library.
+
+  The first two only change the answer for a root-owned target, so they run as root on CI rather than
+  being skipped everywhere. The third extracts `tf_fd_scan_bound`, whose `capped` flag is what makes a
+  truncated scan audible instead of looking like a process with nothing left to cut.
+
+- 801d360: Taking an iOS simulator off the network now fails its requests in about half a second instead of hanging for twenty-five. The filter blocked name resolution along with everything else, and a blocked UDP query returns nothing to its sender — so a resolver waited out its own timeout, and a page that needed a fresh name sat blank for over half a minute. Name resolution passes now; the connection that follows is still dropped, in about six milliseconds.
+
+  Only outbound UDP to port 53 is allowed. TCP on that same port stays blocked — it already failed immediately, so opening it would buy nothing and would let a device you took offline hold a connection to anything listening there.
+
+  **Your app is affected, though less than everything else was.** tapflow refuses name resolution inside the app under test only where that app uses POSIX resolution; `URLSession` resolves through a path tapflow does not reach, so it now resolves the name and fails when it connects, where a device with no signal would have failed the lookup. An app that treats "the name resolved" as "I am online" will say online while reaching nothing. What is unambiguously better is everything tapflow cannot reach at all — a web view, another app — which used to hang for half a minute.
+
+  Encrypted DNS is not covered. DNS-over-TLS could be, and DNS-over-HTTPS cannot be told apart from ordinary traffic; neither is included because nothing has measured whether a simulator uses them when the Mac is configured that way.
+
+- 676641f: An iOS app that reads `SCNetworkReachability` is now told when its simulator is taken off the network. Taking a device offline already stopped its traffic, and an app built on `NWPathMonitor` drew its offline state correctly — but Alamofire's `NetworkReachabilityManager` and the older `Reachability.swift` read a different API, and that one kept answering "reachable" while every request failed. The offline screen a tester came to check never appeared.
+
+  The fix answers that API too, and **re-fires the callback the library is actually listening on** rather than only changing what a poll would return: a consumer caches what its callback last told it and never polls, so faking the getter alone moves a number nobody reads. Both ways of scheduling that callback are covered — a dispatch queue and a run loop.
+
+- 253e94c: <!-- changelog: internal — no behaviour change; the walk decides the same things, from a seam a test can reach. -->
+
+  The last part of #690. `attribute(pid)` — the climb that decides whether a flow belongs to a
+  simulator, to the Mac, or to nothing anyone can name — moves to `attributeWalk`, with its three
+  live-kernel reads behind a `ProcessReader` a test can stand in for.
+
+  Twelve cases and twelve mutations cover what the climb decides: where it stops and what the stop means,
+  that an unreadable executable path still reaches the arguments, that a cache hit skips the argument
+  read entirely, that a failed read is counted apart from a host flow, and the depth bound from both
+  sides.
+
+- 26f79c3: <!-- changelog: internal — no behaviour change; one log line regained a field it briefly lost. -->
+
+  The rest of #690. `Heartbeat`'s counters, the state file it renders, its two rate limits and the
+  candidate directory list move into `Extension/FlowIdentity.swift` where a test bundle can compile
+  them, and `handleNewFlow`'s decision moves with them as `decideFlow` — rule, attribution and endpoint
+  in, verdict and counter bucket out.
+
+  The file the agent parses now has its five field names pinned by a test, and a node check compares
+  the three copies of the state path list that live in Swift and in two TypeScript packages. 68 tests,
+  70 mutations.
+
+- cc8de63: <!-- changelog: internal — no behaviour changes; the extension binary is rebuilt but does the same thing. -->
+
+  Tests for the network filter's Swift (#690). The pure decisions in `Provider.swift` and
+  `Host/main.swift` move into files a test bundle can compile — the audit-token readers, the process
+  identity and its cache, the drop-count prune, the pulse rate, and the host binary's argument handling
+  and rule arithmetic — and each is held by a mutation that must make a test fail.
+
+  Nothing about what the filter does changes. What changes is that four decisions which previously had
+  no test now cannot be broken silently: reading the pid from the wrong word of the audit token, keying
+  the attribution cache on a pid the kernel reuses, publishing a drop count from a previous episode, and
+  letting an argument the host binary does not understand empty the offline rule.
+
+- 913a675: The iOS agent no longer believes a network-filter state file that anyone on the Mac could have written. The filter publishes what it is enforcing to a file, falling back to `/tmp` when its protected directory refuses it, and the agent read whichever was there. `/tmp` is world-writable, so any local process could put a file there naming a device and the agent would take a simulator offline on that word alone. A state file in a world-writable directory is now believed only when root owns it and nobody else can change it; the protected path and the liveness check are covered by the same rule.
+- 9bcb989: <!-- changelog: internal — no behaviour change; the injected library decides the same things, from a header a test can compile. -->
+
+  The decidable half of `src/network-hook.m` moves into `src/hook-decisions.h`: whether a peer is
+  loopback and therefore must survive a cut, whether a call is refused, whether this process is the one
+  to hook, and where the offline flag lives. Plain C with no Foundation, so a test compiles it with a
+  bare `cc` and no simulator SDK — the tests run in the ordinary suite rather than on a macOS runner.
+
+  36 cases and 21 mutations. The condition-file path now has a guard comparing the C literal against
+  the TypeScript that writes it; nothing compiled both before.
+
+- 7d8eb4e: **Installing a build works when the relay is not on the same machine as the agent.** It never did. The relay sent the agent its own filesystem path and the agent opened it, which is only true when the two share a disk — so on the topology the guide recommends, a relay on a LAN box with agents on Macs, every install failed. A relay in a container failed the same way for the same reason.
+
+  **And it failed by blaming the build.** `unzip` said `cannot find or open`, the agent threw that away, and what reached the browser was "check this is a simulator .app.zip". The archive was fine every time. The tool's own words are in the message now, and a download that fails is reported as a download failing — the three causes a person acts on differently (a bad archive, a relay that cannot be reached, a transfer cut short) had been collapsed into the one sentence that was wrong for all of them.
+
+  The relay now mints a single-use credential where it has already checked who owns the session, and serves that one build against it. Nothing is added to any token's permissions: an agent still cannot ask for a build it was not told to install, and `tapflow start` — whose agent runs with no token at all — keeps working, which a permissions-based approach would have broken. The agent builds the address from the relay URL it is already connected to rather than from anything the relay claims about itself, because that is the one address known to be reachable.
+
+  A truncated transfer is caught against a size that travels with the instruction rather than against `Content-Length`, which a proxy is free to drop — a check that reads an absent header passes while looking at nothing, and hands on a half a file to be reported as a damaged one. Downloads have a stall timeout, so a half-open socket fails instead of hanging forever and leaving a temp copy of the build behind; the Android install path gained the cleanup it never had. An agent too old to fetch builds is unaffected and installs exactly as before, and the relay says so once in its log rather than guessing whether that agent is somewhere else — it cannot tell, and a check that is wrong in both directions is worse than none.
+
+  `@tapflowio/agent-core` gains `downloadBuild`, and `@tapflowio/protocol`'s `app:install` gains `buildTicket`, `buildName` and `buildBytes` — additive, so an agent that predates them keeps working on the field it already reads. Both are named here rather than left to ride the version bump because a third-party platform built on `AgentRegistry.register()` reads those changelogs, and this is the API it would use to support installs from a relay it does not share a disk with.
+
+- Updated dependencies [7d8eb4e]
+  - @tapflowio/agent-core@0.21.0
+  - @tapflowio/protocol@0.21.0
+  - @tapflowio/audiotap-helper@0.3.3
+
 ## 0.20.1
 
 ### Patch Changes

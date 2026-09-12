@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-09-12
+
+### Added
+
+- **Docker is a documented way to run the relay.** The image has been on Docker Hub since 0.20.0 and nothing in the guide said so, so the only way to find it was to guess the name. [Self-Hosting the Relay](https://www.tapflow.dev/guide/self-hosting) now carries a Compose file and the three settings a container needs that a local install does not — each of which fails in a way that does not name its cause.
+
+  **The image is the relay, not tapflow.** It serves the dashboard and brokers traffic; the agents that drive simulators and emulators are macOS-native and stay on your Macs, connecting outbound to the container with an `agent`-scope token. A container on its own streams nothing.
+
+  **Run it on the same Mac or a box on your own network — not on a cloud VM.** Every video and audio frame between an agent and a browser passes through the relay, so a relay outside your network sends app screen data out with it, and the detour costs more latency than a 30fps budget can absorb.
+
+  The three settings: the data volume is required rather than a convenience, because the relay writes a per-install sign-in secret to `<dataDir>/jwt-secret` and anything that *recreates* the container destroys an unmounted one — logging out every user and dropping every agent at once. `TAPFLOW_RELAY_URL` decides what invite links say, and unset they point at `localhost:4000`, which is the recipient's own machine; the relay never reads its address from the `Host` header, because a forged one would turn an invite into a phishing link. `TAPFLOW_ADMIN_EMAIL` and `TAPFLOW_ADMIN_PASSWORD` create the first account, since the interactive setup a local install offers has no terminal to run in.
+
+  The image also gained the toolchain its own fallback assumed: `better-sqlite3` is fetched as a prebuilt binary and compiles from source when that fetch fails, except the builder had no compiler, so the fallback could never run and a failed *download* surfaced as a missing Python. Every published image is now booted in CI on both architectures before its manifest is pushed — the dashboard is fetched, the auth endpoint is asked for its state, a WebSocket is opened, and the container is destroyed and recreated to prove the sign-in secret survived on the volume.
+
+  **And installing a build into it works now**, which it did not when that documentation was written — see the first entry under Fixed. A documented deployment that could stream a device but never install anything onto it would have been worse than no documentation.
+
 ### Fixed
 
 - **Installing a build works when the relay is not on the same machine as the agent** — it never did. The relay sent the agent its own filesystem path and the agent opened it, which holds only when the two share a disk. So on the topology the guide recommends — a relay on a LAN box, agents on Macs — every install failed, and a relay in a container failed the same way. **It also failed by blaming the build**: `unzip` said `cannot find or open`, the agent discarded that, and the browser was told to check whether the file was a real simulator archive. It was, every time.
@@ -638,7 +654,8 @@ found out by waiting.
 
 - Automatic `tapflow.config.json` creation as a side effect of `tapflow start` / `tapflow relay start`.
 
-[Unreleased]: https://github.com/jo-duchan/tapflow/compare/v0.20.1...HEAD
+[Unreleased]: https://github.com/jo-duchan/tapflow/compare/v0.21.0...HEAD
+[0.21.0]: https://github.com/jo-duchan/tapflow/compare/v0.20.1...v0.21.0
 [0.20.1]: https://github.com/jo-duchan/tapflow/compare/v0.20.0...v0.20.1
 [0.20.0]: https://github.com/jo-duchan/tapflow/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/jo-duchan/tapflow/compare/v0.18.0...v0.19.0
