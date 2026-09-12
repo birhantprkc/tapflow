@@ -82,6 +82,8 @@ The `.github/workflows/docker-publish.yml` workflow detects these secrets and pu
 
 **GHCR needs neither.** The same workflow copies each published manifest to `ghcr.io/<owner>/<repo>`, authenticating with the `GITHUB_TOKEN` Actions already provides — so there is no secret to create and none to rotate, and the name is derived from your fork rather than hardcoded. It is gated on the Docker Hub secrets only because it copies what the Docker Hub push produced; a fork that never sets them publishes to neither.
 
+**One click, once, and nothing automates it.** GHCR creates a package *private* on its first push, so a fork's mirror answers no anonymous pull until somebody sets its visibility to Public at `https://github.com/<owner>/<repo>/pkgs/container/<repo>`. A workflow run cannot change that setting, so the last GHCR step logs out and retries the pull unauthenticated: it warns on every publish until the package is public, and reddening the release for it would be the wrong signal. tapflow's own package is already public — this is a fork-only step.
+
 ### Versioning (Semver)
 
 Versions follow `MAJOR.MINOR.PATCH`. Determine the bump from the commits since the last release:
