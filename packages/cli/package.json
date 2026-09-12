@@ -1,6 +1,6 @@
 {
   "name": "tapflow",
-  "version": "0.20.1",
+  "version": "0.21.0",
   "description": "Self-hosted iOS/Android simulator streaming for the whole team",
   "keywords": [
     "ios",

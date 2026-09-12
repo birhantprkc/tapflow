@@ -1,5 +1,33 @@
 # tapflow
 
+## 0.21.0
+
+### Patch Changes
+
+- 676641f: An iOS app that reads `SCNetworkReachability` is now told when its simulator is taken off the network. Taking a device offline already stopped its traffic, and an app built on `NWPathMonitor` drew its offline state correctly — but Alamofire's `NetworkReachabilityManager` and the older `Reachability.swift` read a different API, and that one kept answering "reachable" while every request failed. The offline screen a tester came to check never appeared.
+
+  The fix answers that API too, and **re-fires the callback the library is actually listening on** rather than only changing what a poll would return: a consumer caches what its callback last told it and never polls, so faking the getter alone moves a number nobody reads. Both ways of scheduling that callback are covered — a dispatch queue and a run loop.
+
+- Updated dependencies [400f887]
+- Updated dependencies [7f8ba98]
+- Updated dependencies [da074d3]
+- Updated dependencies [801d360]
+- Updated dependencies [676641f]
+- Updated dependencies [15e98fc]
+- Updated dependencies [253e94c]
+- Updated dependencies [26f79c3]
+- Updated dependencies [cc8de63]
+- Updated dependencies [913a675]
+- Updated dependencies [9bcb989]
+- Updated dependencies
+- Updated dependencies [bd7a9f5]
+- Updated dependencies [7d8eb4e]
+  - @tapflowio/ios-agent@0.21.0
+  - @tapflowio/android-agent@0.21.0
+  - @tapflowio/relay@0.21.0
+  - @tapflowio/agent-core@0.21.0
+  - @tapflowio/flow-runner@0.21.0
+
 ## 0.20.1
 
 ### Patch Changes
