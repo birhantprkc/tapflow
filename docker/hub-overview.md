@@ -36,6 +36,16 @@ services:
 docker compose up -d
 ```
 
+**Also on GHCR**, from the same build and with the same digests:
+
+```
+ghcr.io/jo-duchan/tapflow:latest
+```
+
+Anonymous pulls here are limited to 100 per six hours per IP address, and a multi-architecture image
+spends one per architecture — about 50 in practice, shared by everyone behind that address. GHCR has
+no such limit for public images. Either registry serves the same thing.
+
 Three of those lines are not optional, and each one fails in a way that is hard to read backwards.
 
 **The volume.** The relay writes a per-install secret to `<dataDir>/jwt-secret` and reuses it.
@@ -57,7 +67,7 @@ neither; at least 8 characters; and nothing happens on an install that already h
 
 - `latest` — the most recent release. Use this.
 - `edge` — whatever is on `main` right now.
-- `0.20`, `0.20.1` — pinned releases.
+- `0.21`, `0.21.0` — pinned releases; every published version has both.
 - `sha-<commit>` — a specific build.
 
 Every tag carries `linux/amd64` and `linux/arm64`.
