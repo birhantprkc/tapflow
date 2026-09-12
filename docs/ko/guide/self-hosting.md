@@ -21,6 +21,18 @@
 docker pull tapflow/tapflow:latest
 ```
 
+::: tip Docker Hub 받기 제한에 걸렸다면 GHCR을 쓰세요
+Docker Hub는 로그인하지 않은 받기를 IP당 6시간에 100회로 제한합니다. 멀티 아키텍처 이미지는 아키텍처마다 한 번씩 세므로 실제로는 50회쯤이고, 같은 주소를 쓰는 모두가 그 횟수를 나눠 씁니다. CI 러너나 사무실 네트워크라면 특별한 일을 하지 않아도 닿습니다.
+
+같은 이미지를 GitHub Container Registry에도 올립니다. 공개 이미지에는 이런 제한이 없습니다.
+
+```sh
+docker pull ghcr.io/jo-duchan/tapflow:latest
+```
+
+두 저장소는 같은 빌드가 만든 같은 digest를 받습니다. 그래서 `latest`든 버전 태그든 어느 쪽에서 받아도 같은 것입니다. 아래 Compose 파일의 `image:` 줄만 바꾸면 됩니다.
+:::
+
 `docker-compose.yml`을 만듭니다:
 
 ```yaml

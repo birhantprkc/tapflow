@@ -21,6 +21,18 @@ You can run the relay via Docker on an always-on LAN box. This provides a clean 
 docker pull tapflow/tapflow:latest
 ```
 
+::: tip Hitting Docker Hub's pull limit? The same image is on GHCR
+Docker Hub limits anonymous pulls to 100 per six hours per IP address, and a multi-architecture image spends one of those per architecture — so roughly 50 in practice, shared by everyone behind the same address. A CI runner or an office network can reach that without anyone doing anything unusual.
+
+The identical image is published to the GitHub Container Registry, which has no such limit for public images:
+
+```sh
+docker pull ghcr.io/jo-duchan/tapflow:latest
+```
+
+Both registries receive the same digests from the same build, so `latest` and a version tag mean the same thing on either. Swap the `image:` line in the Compose file below if you prefer it.
+:::
+
 Create a `docker-compose.yml`:
 
 ```yaml

@@ -80,6 +80,8 @@ The `.github/workflows/docker-publish.yml` workflow detects these secrets and pu
 
 **The secrets alone are not enough.** That workflow hardcodes `IMAGE: tapflow/tapflow`, so a fork that sets only the two secrets pushes at *this* project's namespace and fails on permissions. Change `IMAGE` to your own namespace in the workflow as well.
 
+**GHCR needs neither.** The same workflow copies each published manifest to `ghcr.io/<owner>/<repo>`, authenticating with the `GITHUB_TOKEN` Actions already provides — so there is no secret to create and none to rotate, and the name is derived from your fork rather than hardcoded. It is gated on the Docker Hub secrets only because it copies what the Docker Hub push produced; a fork that never sets them publishes to neither.
+
 ### Versioning (Semver)
 
 Versions follow `MAJOR.MINOR.PATCH`. Determine the bump from the commits since the last release:
