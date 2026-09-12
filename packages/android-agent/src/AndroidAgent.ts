@@ -9,7 +9,10 @@ import type {
   AgentControlOutbound, ClipboardReplyBody, OpenUrlReplyBody,
   AppInstallReplyBody, AppLaunchReplyBody, AppClearStateReplyBody,
 } from '@tapflowio/protocol'
-import { createLogger, PlatformError, ValidationError, bootAbandonMessage, BOOT_NO_SESSION_STATE } from '@tapflowio/agent-core'
+import fs from 'fs'
+import path from 'path'
+import { tmpdir } from 'os'
+import { createLogger, PlatformError, ValidationError, bootAbandonMessage, BOOT_NO_SESSION_STATE, downloadBuild } from '@tapflowio/agent-core'
 import { outcomeMessage, wireReason, type InputOutcome } from './inputOutcome.js'
 import {
   MAX_CLIPBOARD_BYTES, clipboardByteLength,
@@ -58,7 +61,7 @@ const logger = createLogger('android-agent')
 // actually works on a given image is per device, and `network:state.available` carries that — the
 // split the protocol documents. Added last, after the handler and the boot-time reset, because the
 // string on its own is what puts a control on screen.
-const AGENT_CAPABILITIES: AgentCapability[] = ['clipboard', 'full-reset', 'network-control']
+const AGENT_CAPABILITIES: AgentCapability[] = ['clipboard', 'full-reset', 'network-control', 'build-download']
 
 // Parse H.264 SPS NAL unit to extract frame dimensions.
 // scrcpy sends a new SPS (inside an IDR keyframe) whenever the capture size changes —
@@ -1483,7 +1486,10 @@ export class AndroidAgent implements DeviceAgent, NetworkControlCapability {
         break
       }
       case 'app:install': {
-        const { filePath, bundleId } = msg.payload as { filePath: string; bundleId?: string }
+        const { filePath, bundleId, buildTicket, buildName, buildBytes } = msg.payload as {
+          filePath: string; bundleId?: string
+          buildTicket?: string; buildName?: string; buildBytes?: number
+        }
         const sessionId = msg.sessionId
         const { requestId } = msg
         if (typeof requestId !== 'string' || requestId === '') {
@@ -1498,7 +1504,12 @@ export class AndroidAgent implements DeviceAgent, NetworkControlCapability {
           respond({ type: 'app:install-error', message: 'No booted device' })
           break
         }
-        if (filePath.endsWith('.app.zip') || filePath.endsWith('.app')) {
+        // **Judged on the name the relay reports, not on a path we may be about to invent.** A
+        // downloaded build lands under a temp directory, so checking the local path would stop this
+        // guard firing and send an iOS archive to `adb install`, which fails in the parser instead
+        // of saying the one useful sentence.
+        const declaredName = buildName ?? filePath
+        if (declaredName.endsWith('.app.zip') || declaredName.endsWith('.app')) {
           respond({
             type: 'app:install-error',
             message: '.app.zip is an iOS simulator build — upload a .apk file for Android.',
@@ -1506,8 +1517,30 @@ export class AndroidAgent implements DeviceAgent, NetworkControlCapability {
           break
         }
         const doInstall = async () => {
-          if (bundleId) await this.adb.clearAppData(serial, bundleId).catch(() => {})
-          await this.adb.installApp(serial, filePath)
+          // The relay's own path only opens where the relay's disk is. A ticket means it can hand
+          // us the bytes instead; without one, this is a relay that predates downloading and the
+          // old behaviour is all there is.
+          if (!buildTicket || !this.relayUrl) {
+            if (bundleId) await this.adb.clearAppData(serial, bundleId).catch(() => {})
+            await this.adb.installApp(serial, filePath)
+            return
+          }
+          // **This `finally` is new.** Android had no temp directory and so no cleanup; iOS has had
+          // one all along. Without it every remote install would leave a copy of the build behind.
+          const tmpDir = fs.mkdtempSync(path.join(tmpdir(), 'tapflow-install-'))
+          try {
+            const dest = path.join(tmpDir, path.basename(declaredName))
+            await downloadBuild({
+              relayUrl: this.relayUrl,
+              ticket: buildTicket,
+              destPath: dest,
+              expectedBytes: buildBytes ?? 0,
+            })
+            if (bundleId) await this.adb.clearAppData(serial, bundleId).catch(() => {})
+            await this.adb.installApp(serial, dest)
+          } finally {
+            fs.rmSync(tmpDir, { recursive: true, force: true })
+          }
         }
         doInstall()
           .then(() => respond({ type: 'app:install-done' }))

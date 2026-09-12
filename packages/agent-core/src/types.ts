@@ -47,7 +47,7 @@ export interface Device {
 // old for the command — and this string is sent once at `agent:register`, before any device is
 // booted. So it means "this agent has the code", and `network:state.available` carries the rest.
 // Reading it as a promise that the toggle will work is the mistake this comment exists to prevent.
-export type AgentCapability = 'clipboard' | 'full-reset' | 'network-control'
+export type AgentCapability = 'clipboard' | 'full-reset' | 'network-control' | 'build-download'
 
 
 // ── Clipboard bridge shared contract ────────────────────────────────────────

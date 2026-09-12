@@ -1507,6 +1507,73 @@ describe('AndroidAgent', () => {
       browser.close()
       agentWs.close()
     })
+
+    // **The iOS-build guard has to read the name the relay reports, not the local path.** With a
+    // ticket the file lands under a temp directory, so judging the local path would stop this guard
+    // firing and send an iOS archive to `adb install` — which fails in the parser instead of saying
+    // the one useful sentence.
+    //
+    // Mutation: judge `filePath`. The temp path ends in nothing recognisable and the guard goes quiet.
+    it('refuses an iOS build by the name the relay reports, not the path it would download to', async () => {
+      const adb = mockAdb(true)
+      const agent = new AndroidAgent({}, adb)
+      await agent.connect(`ws://localhost:${port}`)
+
+      const browser = new WebSocket(`ws://localhost:${port}`)
+      await waitForOpen(browser)
+      browser.send(JSON.stringify({ type: 'session:start', sessionId: agent.sessionId }))
+      await waitForType(browser, 'session:joined')
+      browser.send(JSON.stringify({
+        type: 'device:boot', requestId: 'rq-name-guard', sessionId: agent.sessionId,
+        payload: { deviceId: 'avd:Pixel_8_API_34' },
+      }))
+      await waitForType(browser, 'device:ready')
+
+      agent['handleRelayMessage']({
+        type: 'app:install',
+        sessionId: agent.sessionId!,
+        requestId: 'rq-name',
+        // A path with no telling extension, which is what a downloaded file would be judged on.
+        payload: { filePath: '/app/.tapflow/data/uploads/builds/1789-abc', buildTicket: 't', buildName: 'App.app.zip', buildBytes: 1 },
+      })
+      const refused = await waitForType(browser, 'app:install-error')
+      expect((refused['message'] as string).toLowerCase()).toContain('ios')
+
+      agent.disconnect(); browser.close()
+    })
+
+    // Mutation: download whenever a ticket is present. There is no origin to build a URL from before
+    // the agent has connected, so this crashes where the old path simply worked.
+    it('installs from the path when it has no relay url to fetch from', async () => {
+      const adb = mockAdb(true)
+      const agent = new AndroidAgent({}, adb)
+      await agent.connect(`ws://localhost:${port}`)
+
+      const browser = new WebSocket(`ws://localhost:${port}`)
+      await waitForOpen(browser)
+      browser.send(JSON.stringify({ type: 'session:start', sessionId: agent.sessionId }))
+      await waitForType(browser, 'session:joined')
+      browser.send(JSON.stringify({
+        type: 'device:boot', requestId: 'rq-nourl', sessionId: agent.sessionId,
+        payload: { deviceId: 'avd:Pixel_8_API_34' },
+      }))
+      await waitForType(browser, 'device:ready')
+
+      ;(agent as unknown as { relayUrl: string | null }).relayUrl = null
+      agent['handleRelayMessage']({
+        type: 'app:install',
+        sessionId: agent.sessionId!,
+        requestId: 'rq-nourl2',
+        payload: { filePath: '/tmp/App.apk', buildTicket: 't', buildName: 'App.apk', buildBytes: 1 },
+      })
+      // The reply is the assertion: with no relay url and a ticket present, the only way to reach
+      // `app:install-done` is the path branch. Downloading unconditionally throws on the URL
+      // constructor instead, which arrives as `app:install-error`.
+      const done = await waitForType(browser, 'app:install-done')
+      expect(done['requestId']).toBe('rq-nourl2')
+
+      agent.disconnect(); browser.close()
+    })
   })
 
   describe('busy session', () => {

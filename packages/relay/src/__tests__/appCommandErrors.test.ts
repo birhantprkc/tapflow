@@ -17,9 +17,15 @@ describe('app command failures reach the caller (#445)', () => {
   let server: RelayServer
   let port: number
   let tmpDir: string
+  // The relay stats the build before it mints a download ticket, so a row pointing at nothing is
+  // now answered rather than forwarded — which is the point, and which this fixture has to satisfy
+  // to keep exercising the success path.
+  let buildFile: string
 
   beforeAll(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tapflow-app-errors-test-'))
+    buildFile = path.join(tmpDir, 'demo.app.zip')
+    fs.writeFileSync(buildFile, 'not a real archive, but a real file')
     initDb(path.join(tmpDir, 'test.db'))
   })
 
@@ -80,8 +86,8 @@ describe('app command failures reach the caller (#445)', () => {
     const app = db.prepare('SELECT id FROM apps WHERE bundle_id_key = ?').get(key) as { id: number }
     const r = db.prepare(`
       INSERT INTO builds (app_id, version_name, build_number, bundle_id, file_path)
-      VALUES (?, '1.0.0', '1', ?, '/tmp/demo.app')
-    `).run(app.id, bundleId)
+      VALUES (?, '1.0.0', '1', ?, ?)
+    `).run(app.id, bundleId, buildFile)
     return Number(r.lastInsertRowid)
   }
 
@@ -304,7 +310,18 @@ describe('app command failures reach the caller (#445)', () => {
     const forwarded = await waitForType(agent, 'app:install')
 
     expect(forwarded.sessionId).toBe(sessionId)
-    expect((forwarded.payload as { filePath: string }).filePath).toBe('/tmp/demo.app')
+    const payload = forwarded.payload as {
+      filePath: string; buildTicket?: string; buildName?: string; buildBytes?: number
+    }
+    // Still sent, and still first: an agent that predates downloading reads only this field, so
+    // dropping it would break every install against a co-located relay at once.
+    expect(payload.filePath).toBe(buildFile)
+    // The three that make a remote install possible. `buildName` carries the extension both agents
+    // branch on, and `buildBytes` is what a truncated transfer is caught against — `Content-Length`
+    // cannot be, because a proxy is free to drop it.
+    expect(payload.buildTicket).toMatch(/^[0-9a-f]{64}$/)
+    expect(payload.buildName).toBe('demo.app.zip')
+    expect(payload.buildBytes).toBe(fs.statSync(buildFile).size)
     // This is the whole guard for the rebuild. The relay does not forward this message — it builds a
     // different one from a DB row — and the agent's reply comes back through a generic forward the relay
     // never inspects, so an id that does not survive the rebuild makes the reply unattributable. The

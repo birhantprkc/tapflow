@@ -270,7 +270,40 @@ export interface AppInstallToAgent {
   type: 'app:install'
   sessionId: string
   requestId: string
-  payload: { filePath: string; bundleId: string | null }
+  payload: {
+    /**
+     * The relay's **own** path to the build. Only usable by an agent that shares the relay's
+     * filesystem, which is why the three fields below exist — a relay in a container or on another
+     * host sends a path that means nothing where the agent runs, and `unzip` answers
+     * `cannot find or open`, which the agent used to report as a bad archive.
+     *
+     * Kept for agents that predate `build-download`: they read this and nothing else, so removing
+     * it would break every local install at once.
+     */
+    filePath: string
+    bundleId: string | null
+    /**
+     * Single-use, short-lived credential for `GET /api/v1/build-download`. Absent from a relay that
+     * predates this, which is the only reason an up-to-date agent falls back to `filePath`.
+     *
+     * **Not bound to an agent**, and deliberately not described as if it were: the relay cannot tell
+     * which agent is making an HTTP request — it does not keep the agent socket's address. What is
+     * enforced is all of what is claimed: 32 bytes of entropy, one use, one build, one TTL.
+     */
+    buildTicket?: string
+    /**
+     * The upload's stored filename. **The extension decides how both agents install** — `.tar.gz`
+     * takes tar, `.zip` takes unzip, and Android refuses an `.app.zip` by name — so a download
+     * written to a random temp name would silently take the wrong branch.
+     */
+    buildName?: string
+    /**
+     * Size in bytes, from `statSync` on the relay. The agent compares what it received against
+     * **this**, not against `Content-Length`: that header is hop-by-hop, so a proxy re-chunking the
+     * response drops it, and a check that reads an absent header passes without looking at anything.
+     */
+    buildBytes?: number
+  }
 }
 
 export interface AppLaunchToAgent {
