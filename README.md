@@ -17,9 +17,11 @@
   </p>
 
   <p>
-    <img src="https://img.shields.io/badge/platform-macOS%20agent-lightgrey" alt="macOS Agent" />
+    <a href="https://github.com/jo-duchan/tapflow/stargazers"><img src="https://img.shields.io/github/stars/jo-duchan/tapflow" alt="GitHub stars" /></a>
+    <a href="https://hub.docker.com/r/tapflow/tapflow"><img src="https://img.shields.io/docker/pulls/tapflow/tapflow" alt="Docker pulls" /></a>
     <a href="https://github.com/jo-duchan/tapflow/releases"><img src="https://img.shields.io/github/v/release/jo-duchan/tapflow?include_prereleases&sort=semver" alt="Latest release" /></a>
     <a href="https://github.com/jo-duchan/tapflow/commits/main"><img src="https://img.shields.io/github/last-commit/jo-duchan/tapflow" alt="Last commit" /></a>
+    <img src="https://img.shields.io/badge/platform-macOS%20agent-lightgrey" alt="macOS Agent" />
   </p>
 
   <p>
