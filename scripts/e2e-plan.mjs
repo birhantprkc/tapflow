@@ -40,6 +40,19 @@ const version =
   wanted?.replace(/^v/, '') ??
   JSON.parse(readFileSync(join(ROOT, 'packages/cli/package.json'), 'utf8')).version
 
+// **`Unreleased` is a heading this parser can find, and that is the problem.** `changelogEntries`
+// matches it like any other, so `pnpm e2e:plan Unreleased` wrote `vUnreleased.md` from whatever was
+// pending — the exact thing the promotion requirement exists to stop, reachable by typing the word.
+// Refused here rather than in the parser, because reading that section is legitimate; *planning a
+// release from it* is not.
+if (/^unreleased$/i.test(version)) {
+  die(
+    'There is no release called Unreleased.\n\n' +
+      'This plan is generated from a promoted section, so run it after `[Unreleased]` becomes\n' +
+      '`[X.Y.Z] - DATE` — otherwise it would describe whatever happens to be pending.',
+  )
+}
+
 if (!existsSync(CHECKLIST)) {
   die(
     `No checklist at ${CHECKLIST}.\n\n` +

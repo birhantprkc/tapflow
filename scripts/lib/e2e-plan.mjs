@@ -62,7 +62,12 @@ export function changelogEntries(markdown, version) {
   // titled v0.20.1 carrying 0.20.10's contents, exit 0. `## [0.21.0-rc.1]` matched `0.21.0` the same
   // way. The lookahead rejects a heading that continues with another version character while still
   // allowing the ` - 2026-09-11` that follows a real one.
-  const start = lines.findIndex((l) => new RegExp(`^## \\[?${esc}\\]?(?![\\w.\\-])`).test(l))
+  // **The brackets are optional as a pair, not one at a time.** Two independent `?` also accepted
+  // `## [0.21.0 - 2026-09-11` — an unclosed heading, which the CLI would then treat as a promoted
+  // release. The lookahead still rejects a heading that continues with another version character,
+  // which is what keeps `0.20.1` out of `## [0.20.10]`.
+  const heading = new RegExp(`^## (?:\\[${esc}\\]|${esc})(?![\\w.\\-])`)
+  const start = lines.findIndex((l) => heading.test(l))
   if (start === -1) return null
   const rest = lines.slice(start + 1)
   const end = rest.findIndex((l) => /^## /.test(l))

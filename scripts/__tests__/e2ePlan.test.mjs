@@ -116,9 +116,33 @@ describe('changelogEntries — takes this release and no other', () => {
 
   // Mutation: `return []`. The script writes a plan whose release half is empty and exits 0 —
   // indistinguishable from a release that changed nothing, which is never true.
+  //
+  // Reading `[Unreleased]` stays legitimate here — it is a heading like any other, and the parser's
+  // job is to find headings. **Planning a release from it is refused by the CLI**, one layer up; see
+  // the refusal case at the bottom of this file. This assertion used to be the only statement about
+  // that word anywhere, which made "it works" look like the intent.
   it('answers null for a version the changelog has not promoted', () => {
     expect(changelogEntries(CHANGELOG, '0.22.0')).toBeNull()
     expect(changelogEntries(CHANGELOG, 'Unreleased')).not.toBeNull()
+  })
+
+  // Mutation: make the brackets independently optional again (`\[?…\]?`). An unclosed heading is
+  // then read as a promoted release.
+  it('will not take a heading whose brackets do not close', () => {
+    expect(changelogEntries('# C\n\n## [0.21.0 - 2026-09-11\n\n### Fixed\n\n- x\n', '0.21.0')).toBeNull()
+  })
+
+  // **Unbracketed, which is the form the lookahead actually guards.** A bracketed `## [0.20.10]`
+  // is already refused by the closing bracket alone — a first version of this case used one and so
+  // passed with the lookahead deleted. Package changelogs are written this way by `changeset
+  // version`, so the alternative is not hypothetical.
+  //
+  // Mutation: drop the lookahead. `0.20.1` matches `## 0.20.10`, and the changelog runs
+  // newest-first, so that heading wins — a plan titled for one version carrying another's contents.
+  it('does not take a version that is a prefix of the next heading', () => {
+    expect(changelogEntries('# C\n\n## 0.20.10\n\n### Fixed\n\n- Ten.\n', '0.20.1')).toBeNull()
+    // And the bracketed form stays refused too, by the pair rather than the lookahead.
+    expect(changelogEntries('# C\n\n## [0.20.10] - x\n\n### Fixed\n\n- Ten.\n', '0.20.1')).toBeNull()
   })
 })
 
@@ -250,6 +274,17 @@ describe('the script refuses loudly', () => {
     const r = inRoot({ changelog: '# Changelog\n\n## [0.21.0] - 2026-09-11\n\n## [0.20.1] - 2026-09-04\n\n### Fixed\n\n- Old.\n' })
     expect(r.status).toBe(1)
     expect(r.stderr).toContain('nothing under it')
+  })
+
+  // **`Unreleased` is findable, which is why the refusal is here rather than in the parser.**
+  // `pnpm e2e:plan Unreleased` used to write `vUnreleased.md` from whatever was pending — the
+  // promotion requirement bypassed by typing the word.
+  //
+  // Mutation: drop the guard. A plan is written for a release that does not exist.
+  it('refuses to plan a release called Unreleased', () => {
+    const r = inRoot({ args: ['Unreleased'], changelog: '# Changelog\n\n## [Unreleased]\n\n### Fixed\n\n- Pending.\n' })
+    expect(r.status).toBe(1)
+    expect(r.stderr).toContain('no release called Unreleased')
   })
 
   // Mutation: escape only the dots. `0.20.1(` reached `new RegExp` and came out as an uncaught
