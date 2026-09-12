@@ -109,6 +109,29 @@ describe('downloadBuild', () => {
     expect(fs.existsSync(dest())).toBe(false)
   })
 
+  // **The size check has to fire while the bytes are arriving, not after they land.** Checking only
+  // on `finish` writes the whole body to disk first, and the idle timeout cannot help: it bounds a
+  // transfer that *stopped*, not one that keeps coming. A file that grew between the relay's stat
+  // and this request, or anything upstream sending an unbounded body, fills the agent's temp
+  // directory before any number is compared.
+  //
+  // Mutation: move the comparison back to `finish`. The 4MB body is written in full first, so the
+  // size assertion below is what fails.
+  it('stops a body that runs past the size it was promised', async () => {
+    const oversize = Buffer.alloc(4 * 1024 * 1024, 0x41)
+    respond = (_req, res) => { res.writeHead(200); res.end(oversize) }
+
+    const err = await downloadBuild({
+      relayUrl: relayUrl(), ticket: 't', destPath: dest(), expectedBytes: 1024,
+    }).catch((e: unknown) => e)
+
+    expect(err).toBeInstanceOf(BuildDownloadError)
+    expect((err as Error).message).toMatch(/larger than the relay said/)
+    // Cut off rather than fully written: what reached disk is nowhere near the 4MB that was offered.
+    const written = fs.existsSync(dest()) ? fs.statSync(dest()).size : 0
+    expect(written).toBeLessThan(oversize.length)
+  })
+
   // Mutation: remove `req.setTimeout`. `node:https` has no default, so this hangs forever — the
   // install promise never settles and the `finally` that deletes the temp directory never runs.
   it('gives up on a response that stops arriving', async () => {

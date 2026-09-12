@@ -81,7 +81,22 @@ export function downloadBuild(opts: {
 
       let received = 0
       const out = fs.createWriteStream(destPath)
-      res.on('data', (chunk: Buffer) => { received += chunk.length })
+      // **Cut it off as it goes past, not after it lands.** Checking only on `finish` means the
+      // whole body is written to disk first, and the idle timeout does not help: it bounds a
+      // transfer that *stopped*, not one that keeps arriving. A file that grew between the relay's
+      // stat and this request — or anything upstream sending an unbounded body — would fill the
+      // agent's temp directory before anyone compared a number.
+      res.on('data', (chunk: Buffer) => {
+        received += chunk.length
+        if (received > expectedBytes) {
+          res.destroy()
+          out.destroy()
+          reject(new BuildDownloadError(
+            `The build is larger than the relay said it would be — expected ${expectedBytes} bytes, ` +
+            'and the transfer was stopped after that. Try installing again.',
+          ))
+        }
+      })
       res.on('error', (err) => { out.destroy(); reject(new BuildDownloadError(`The build transfer failed: ${err.message}`)) })
       out.on('error', (err) => { res.destroy(); reject(new BuildDownloadError(`Could not write the build to disk: ${err.message}`)) })
       out.on('finish', () => {

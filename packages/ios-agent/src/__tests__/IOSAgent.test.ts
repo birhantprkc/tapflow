@@ -402,6 +402,46 @@ describe('IOSAgent', () => {
       expect((simctl.installApp as ReturnType<typeof vi.fn>).mock.calls[0][1]).toMatch(/\/LocalApp\.app$/)
     })
 
+    // **The uninstall must not run before there is a build to put back.** It used to, which was
+    // survivable while the only thing between it and the install was a local extract — this change
+    // put a network transfer in that gap. A tester whose download fails would lose the app they
+    // were using to an install that never had a chance of finishing.
+    //
+    // Mutation: move the uninstall back above the download. `uninstallApp` is then called and the
+    // simulator is left empty.
+    it('does not uninstall the app it is replacing until the build has arrived', async () => {
+      const relay = await fakeRelay(Buffer.from('far too short'))
+      const simctl = mockSimctl()
+      const agent = new IOSAgent({}, simctl) as unknown as WithRemoteInstall
+      agent.relayUrl = `ws://127.0.0.1:${relay.port}`
+
+      await agent.installBuild('dev-1', '/app/nowhere/X.app.zip', 'com.example.demo', {
+        buildTicket: 'tkt', buildName: 'X.app.zip', buildBytes: 9_999,
+      }).catch(() => { /* the download is meant to fail */ })
+
+      expect(simctl.uninstallApp).not.toHaveBeenCalled()
+      expect(simctl.installApp).not.toHaveBeenCalled()
+      await relay.close()
+    })
+
+    // And it still runs on the way through when the build does arrive — otherwise the guard above
+    // would be satisfied by never uninstalling at all.
+    it('uninstalls the previous app once the build is in hand', async () => {
+      const archive = makeSimAppArchive('ReplaceApp', '.app.zip')
+      const relay = await fakeRelay(fs.readFileSync(archive))
+      const simctl = mockSimctl()
+      const agent = new IOSAgent({}, simctl) as unknown as WithRemoteInstall
+      agent.relayUrl = `ws://127.0.0.1:${relay.port}`
+
+      await agent.installBuild('dev-1', '/app/nowhere/ReplaceApp.app.zip', 'com.example.demo', {
+        buildTicket: 'tkt', buildName: 'ReplaceApp.app.zip', buildBytes: fs.statSync(archive).size,
+      })
+
+      expect(simctl.uninstallApp).toHaveBeenCalledWith('dev-1', 'com.example.demo')
+      expect(simctl.installApp).toHaveBeenCalledTimes(1)
+      await relay.close()
+    })
+
     // Mutation: report a download failure as an extraction failure. That collapse is the defect this
     // whole change exists to end — a build that was fine, described as a bad archive.
     it('says the transfer was cut short, not that the archive is damaged', async () => {

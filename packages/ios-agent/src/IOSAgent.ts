@@ -1665,10 +1665,6 @@ export class IOSAgent implements DeviceAgent, NetworkControlCapability {
     bundleId?: string,
     remote?: { buildTicket?: string; buildName?: string; buildBytes?: number },
   ): Promise<void> {
-    if (bundleId) {
-      await this.simctl.uninstallApp(udid, bundleId).catch(() => { /* 미설치 상태면 무시 */ })
-    }
-
     const tmpDir = path.join(tmpdir(), `tapflow-install-${randomUUID()}`)
     fs.mkdirSync(tmpDir, { recursive: true })
     try {
@@ -1689,6 +1685,14 @@ export class IOSAgent implements DeviceAgent, NetworkControlCapability {
           destPath: source,
           expectedBytes: remote.buildBytes ?? 0,
         })
+      }
+      // **The uninstall waits until there is a build to put back.** It used to run first, which was
+      // survivable while the only thing between it and the install was a local extract — this change
+      // put a *network transfer* in that gap. An expired ticket, a dropped link, a timeout or a
+      // short transfer would then leave the simulator with the old app gone and no new one: a tester
+      // loses the build they were using, to an install that never had a chance of finishing.
+      if (bundleId) {
+        await this.simctl.uninstallApp(udid, bundleId).catch(() => { /* 미설치 상태면 무시 */ })
       }
       return await this.installFrom(udid, source, tmpDir)
     } finally {
