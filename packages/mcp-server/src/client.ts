@@ -194,6 +194,26 @@ interface SessionLifecycle {
  */
 const BOOT_DEADLINE_MS = 180_000
 
+/**
+ * How long to wait for an install to answer.
+ *
+ * **Raised from an inline 60_000 because installing now includes a download.** A relay on another
+ * host hands the agent a ticket and the agent fetches the build over HTTP, so bytes on the wire sit
+ * inside this budget where before it was a local extract. 29MB measured over a slow tunnel is most
+ * of a minute on its own.
+ *
+ * Below the relay's 180s ticket TTL on purpose, so a ticket never expires under a request still
+ * being awaited.
+ *
+ * **Nothing enforces that ordering.** `bootDeadlineOutlivesAgent.test.mjs` is the shape that would —
+ * it reads named constants out of two packages and compares them — and naming this one is the first
+ * of the three things such a guard would need. The other two are missing: `flow-runner`'s matching
+ * deadline is still an inline `120_000` (`RelayClient.ts`), and no check reads `TICKET_TTL_MS` at
+ * all. Said plainly rather than implied, because a comment that sounds like it describes a guard is
+ * how a guard stops being written.
+ */
+const INSTALL_DEADLINE_MS = 120_000
+
 const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
 
 /**
@@ -936,7 +956,7 @@ export class TapflowClient {
       (m) =>
         (m['type'] === 'app:install-done' || m['type'] === 'app:install-error') &&
         m['requestId'] === requestId,
-      60_000,
+      INSTALL_DEADLINE_MS,
       sessionId,
     )
     if (msg['type'] === 'app:install-error') {

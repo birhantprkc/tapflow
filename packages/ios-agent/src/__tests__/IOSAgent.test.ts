@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from 'vitest'
 import fs from 'fs'
+import http from 'http'
 import os from 'os'
 import path from 'path'
 import { spawnSync } from 'child_process'
@@ -317,6 +318,147 @@ describe('IOSAgent', () => {
       }
       return out
     }
+
+    // ── Downloading the build instead of opening the relay's path ───────────
+    //
+    // The relay used to send its own filesystem path and this agent opened it, which holds only when
+    // the two share a disk. The downloader and the relay route each have their own tests; **this is
+    // the wiring between them**, and it had none — the half that decides whether a ticket is used at
+    // all, and whether the downloaded file keeps the extension the extract branch below reads.
+    type WithRemoteInstall = {
+      installBuild(
+        udid: string, filePath: string, bundleId?: string,
+        remote?: { buildTicket?: string; buildName?: string; buildBytes?: number },
+      ): Promise<void>
+      relayUrl: string | null
+    }
+
+    /** A relay that serves one file against any ticket, and records what it was asked for. */
+    const fakeRelay = async (body: Buffer) => {
+      const seen: { url?: string; ticket?: string } = {}
+      const server = http.createServer((req, res) => {
+        seen.url = req.url
+        seen.ticket = req.headers['x-tapflow-build-ticket'] as string
+        res.writeHead(200, { 'Content-Length': body.length })
+        res.end(body)
+      })
+      await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
+      const port = (server.address() as { port: number }).port
+      return { seen, port, close: () => new Promise<void>((r) => server.close(() => r())) }
+    }
+
+    it('fetches the build over HTTP when the relay sends a ticket', async () => {
+      const archive = makeSimAppArchive('RemoteApp', '.app.zip')
+      const relay = await fakeRelay(fs.readFileSync(archive))
+      const simctl = mockSimctl()
+      const agent = new IOSAgent({}, simctl) as unknown as WithRemoteInstall
+      agent.relayUrl = `ws://127.0.0.1:${relay.port}`
+
+      // A path that exists **nowhere on this machine** — the shape the relay actually sends from a
+      // container. If the ticket branch is skipped, `unzip` reports it and the install fails.
+      await agent.installBuild('dev-1', '/app/.tapflow/data/uploads/builds/RemoteApp.app.zip', undefined, {
+        buildTicket: 'tkt', buildName: 'RemoteApp.app.zip', buildBytes: fs.statSync(archive).size,
+      })
+
+      expect(simctl.installApp).toHaveBeenCalledTimes(1)
+      expect((simctl.installApp as ReturnType<typeof vi.fn>).mock.calls[0][1]).toMatch(/\/RemoteApp\.app$/)
+      expect(relay.seen.url).toBe('/api/v1/build-download')
+      expect(relay.seen.ticket).toBe('tkt')
+      await relay.close()
+    })
+
+    // Mutation: write the download to a random temp name. `installFrom` branches on the extension,
+    // so a zip would go straight to `simctl` unopened — the comment beside that branch says exactly
+    // this, and nothing held it.
+    it('keeps the upload filename, because the extension decides how it installs', async () => {
+      const archive = makeSimAppArchive('TarRemote', '.tar.gz')
+      const relay = await fakeRelay(fs.readFileSync(archive))
+      const simctl = mockSimctl()
+      const agent = new IOSAgent({}, simctl) as unknown as WithRemoteInstall
+      agent.relayUrl = `ws://127.0.0.1:${relay.port}`
+
+      await agent.installBuild('dev-1', '/app/nowhere/TarRemote.tar.gz', undefined, {
+        buildTicket: 'tkt', buildName: 'TarRemote.tar.gz', buildBytes: fs.statSync(archive).size,
+      })
+
+      // It reached tar rather than `simctl install <the archive>`, which is the whole difference.
+      expect((simctl.installApp as ReturnType<typeof vi.fn>).mock.calls[0][1]).toMatch(/\/TarRemote\.app$/)
+      await relay.close()
+    })
+
+    // Mutation: download whenever a ticket is present, regardless of `relayUrl`. There is no origin
+    // to build one from before the agent has connected, and the URL constructor throws rather than
+    // answering — a crash where the old path would simply have worked.
+    it('falls back to the path when it has no relay url to fetch from', async () => {
+      const archive = makeSimAppArchive('LocalApp', '.app.zip')
+      const simctl = mockSimctl()
+      const agent = new IOSAgent({}, simctl) as unknown as WithRemoteInstall
+      agent.relayUrl = null
+
+      await agent.installBuild('dev-1', archive, undefined, {
+        buildTicket: 'tkt', buildName: 'LocalApp.app.zip', buildBytes: 1,
+      })
+
+      expect((simctl.installApp as ReturnType<typeof vi.fn>).mock.calls[0][1]).toMatch(/\/LocalApp\.app$/)
+    })
+
+    // **The uninstall must not run before there is a build to put back.** It used to, which was
+    // survivable while the only thing between it and the install was a local extract — this change
+    // put a network transfer in that gap. A tester whose download fails would lose the app they
+    // were using to an install that never had a chance of finishing.
+    //
+    // Mutation: move the uninstall back above the download. `uninstallApp` is then called and the
+    // simulator is left empty.
+    it('does not uninstall the app it is replacing until the build has arrived', async () => {
+      const relay = await fakeRelay(Buffer.from('far too short'))
+      const simctl = mockSimctl()
+      const agent = new IOSAgent({}, simctl) as unknown as WithRemoteInstall
+      agent.relayUrl = `ws://127.0.0.1:${relay.port}`
+
+      await agent.installBuild('dev-1', '/app/nowhere/X.app.zip', 'com.example.demo', {
+        buildTicket: 'tkt', buildName: 'X.app.zip', buildBytes: 9_999,
+      }).catch(() => { /* the download is meant to fail */ })
+
+      expect(simctl.uninstallApp).not.toHaveBeenCalled()
+      expect(simctl.installApp).not.toHaveBeenCalled()
+      await relay.close()
+    })
+
+    // And it still runs on the way through when the build does arrive — otherwise the guard above
+    // would be satisfied by never uninstalling at all.
+    it('uninstalls the previous app once the build is in hand', async () => {
+      const archive = makeSimAppArchive('ReplaceApp', '.app.zip')
+      const relay = await fakeRelay(fs.readFileSync(archive))
+      const simctl = mockSimctl()
+      const agent = new IOSAgent({}, simctl) as unknown as WithRemoteInstall
+      agent.relayUrl = `ws://127.0.0.1:${relay.port}`
+
+      await agent.installBuild('dev-1', '/app/nowhere/ReplaceApp.app.zip', 'com.example.demo', {
+        buildTicket: 'tkt', buildName: 'ReplaceApp.app.zip', buildBytes: fs.statSync(archive).size,
+      })
+
+      expect(simctl.uninstallApp).toHaveBeenCalledWith('dev-1', 'com.example.demo')
+      expect(simctl.installApp).toHaveBeenCalledTimes(1)
+      await relay.close()
+    })
+
+    // Mutation: report a download failure as an extraction failure. That collapse is the defect this
+    // whole change exists to end — a build that was fine, described as a bad archive.
+    it('says the transfer was cut short, not that the archive is damaged', async () => {
+      const relay = await fakeRelay(Buffer.from('too short'))
+      const simctl = mockSimctl()
+      const agent = new IOSAgent({}, simctl) as unknown as WithRemoteInstall
+      agent.relayUrl = `ws://127.0.0.1:${relay.port}`
+
+      const err = await agent.installBuild('dev-1', '/app/nowhere/X.app.zip', undefined, {
+        buildTicket: 'tkt', buildName: 'X.app.zip', buildBytes: 9_999,
+      }).catch((e: unknown) => e)
+
+      expect((err as Error).message).toMatch(/not damaged/)
+      expect((err as Error).message).not.toMatch(/압축 해제 실패/)
+      expect(simctl.installApp).not.toHaveBeenCalled()
+      await relay.close()
+    })
 
     it('installBuild extracts a .tar.gz and installs the .app (R4)', async () => {
       const simctl = mockSimctl()
