@@ -2,6 +2,7 @@
 
 import type { BrowserToRelay } from '@tapflowio/protocol'
 import { newRequestId } from '@/lib/requestId';
+import { buttonHitRect, pickButton } from '@/lib/buttonHit';
 import { useCallback, useEffect, useId, useRef, useState, Fragment } from 'react';
 import { useClientRecording } from '@/hooks/useClientRecording';
 import { Home, Keyboard, Loader2, Play } from 'lucide-react';
@@ -27,7 +28,22 @@ const CURSOR_RING_R = 13;
 const CURSOR_DOT_R = 8;
 const MOVE_THROTTLE_MS = 16;
 const DRAG_THRESHOLD = 0.02;
-const BUTTON_HIT_RADIUS = 100;
+/**
+ * How far outside a button's own rectangle a press still counts, in 2× composite px.
+ *
+ * This was a radius measured from the button's *centre*, and the nearest match was not taken — the
+ * first button in `chrome.buttons` within the radius won. On an iPhone 15 Pro the Action button sits
+ * close enough above Volume Up that its circle covered Volume Up's upper half, so pressing there
+ * pressed Action: the tooltip said so, and the press followed the tooltip. Measured on 2026-09-11
+ * against a real simulator.
+ *
+ * The value is unchanged, but what it surrounds is not — a button's rectangle rather than its
+ * centre — so reach is **at least** what it was rather than the same. Further by `buttonH / 2` above
+ * and below and `buttonW / 2` to each side; and *narrower* on one side for a button whose rollover
+ * and normal x differ by more than `buttonW / 2`, since the rectangle is centred on the rollover
+ * pair while the old circle was centred on the normal one. See `buttonHitRect`.
+ */
+const BUTTON_HIT_MARGIN = 100;
 
 interface IOSViewerProps {
   sessionId: string;
@@ -406,15 +422,13 @@ export function IOSViewer({
       cy = (e.clientY - rect.top) * (chrome.compositeHeight / rect.height)
     }
     // Screen area takes priority: a tap inside the screen rect is never a physical-button
-    // press, even if it falls within a button's circular hit radius (buttons near the bezel
-    // edge — e.g. iPhone SE — otherwise hijack screen taps).
+    // press, even if it falls within a button's hit area (buttons near the bezel edge — e.g.
+    // iPhone SE — otherwise hijack screen taps). The area is a rectangle plus a margin now, not
+    // a circle; this guard runs before it either way, so the iPhone SE behaviour is unchanged —
+    // but the reach grew, which is why the shape is named rather than left as it was.
     const sr = chrome.screenRect
     if (cx >= sr.x && cx <= sr.x + sr.width && cy >= sr.y && cy <= sr.y + sr.height) return null
-    for (const btn of chrome.buttons) {
-      const dx = cx - btn.normalOffset.x; const dy = cy - btn.normalOffset.y
-      if (dx * dx + dy * dy < BUTTON_HIT_RADIUS ** 2) return btn.name
-    }
-    return null
+    return pickButton(cx, cy, chrome.buttons, BUTTON_HIT_MARGIN)
   }, [chrome, isLandscape])
 
   const normToRecordCanvas = useCallback((norm: { x: number; y: number }) => {
@@ -741,19 +755,21 @@ export function IOSViewer({
             )}
             {chrome.buttons.map((btn) => {
               const isFlashed = flashedButton === btn.name; const isHovered = hoveredButton === btn.name
-              const isBottomAnchor = btn.anchor === 'bottom'; const isTopAnchor = btn.anchor === 'top'
-              const imgTopPct = isBottomAnchor ? ((btn.normalOffset.y - btn.buttonH / 2) / chrome.compositeHeight) * 100
-                : isTopAnchor ? (btn.rolloverOffset.y / chrome.compositeHeight) * 100
-                : ((btn.normalOffset.y - btn.buttonH / 2) / chrome.compositeHeight) * 100
+              const isTopAnchor = btn.anchor === 'top'
+              // **One formula for where a button sits at rest**, shared with the hit test. It used
+              // to be written out three times here — `imgTopPct`, `tooltipTopPct` and the hit test —
+              // and the first two even kept a `bottom` branch whose body was byte-identical to the
+              // default, which is exactly where a future bottom-anchor tweak would land and leave
+              // the target behind the pixels.
+              const rect = buttonHitRect(btn)
+              const imgTopPct = (rect.top / chrome.compositeHeight) * 100
               const imgHPct = (btn.buttonH / chrome.compositeHeight) * 100
               const imgWPct = (btn.buttonW / chrome.compositeWidth) * 100
               const halfW = btn.buttonW / 2
-              const rolloverLeftPct = ((btn.rolloverOffset.x - halfW) / chrome.compositeWidth) * 100
+              const rolloverLeftPct = (rect.left / chrome.compositeWidth) * 100
               const hoverLeftPct = ((2 * btn.rolloverOffset.x - btn.normalOffset.x - halfW) / chrome.compositeWidth) * 100
               const tooltipLeftPct = (btn.rolloverOffset.x / chrome.compositeWidth) * 100
-              const tooltipTopPct = isBottomAnchor ? ((btn.normalOffset.y - btn.buttonH / 2) / chrome.compositeHeight) * 100
-                : isTopAnchor ? (btn.rolloverOffset.y / chrome.compositeHeight) * 100
-                : ((btn.normalOffset.y - btn.buttonH / 2) / chrome.compositeHeight) * 100
+              const tooltipTopPct = imgTopPct
               const hoverTopPct = isTopAnchor ? ((2 * btn.rolloverOffset.y - btn.normalOffset.y) / chrome.compositeHeight) * 100 : 0
               const btnZ = btn.onTop ? 4 : 1
               return (

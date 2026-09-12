@@ -266,3 +266,32 @@ Tip: agents with skills support get richer guidance via `npx skills add jo-ducha
 
 Self-check against these categories before finishing any UI task — it is cheaper than failing the pre-commit gate.
 <!-- a11y-lens:end -->
+
+> 아래는 이 레포의 결정이고 **마커 밖에 둔다** — `a11y-lens init`은 `begin`/`end` 사이를
+> 템플릿으로 통째 치환하므로, 안에 쓰면 다음 init에 지워진다.
+
+### The streamed device is out of scope, and everything in the DOM is not
+
+**The device frame and what is drawn on it are deliberately not made accessible.** The stream is a
+sequence of images with no semantics — there is nothing under it for a screen reader to read, and a
+tester who cannot see the screen cannot do manual QA on it whatever we label. Putting focusable
+controls over those pixels would announce an affordance that leads nowhere, which is worse than the
+absence: it is a11y theatre, and it costs the keyboard user tab stops that do not help them.
+
+So the physical side buttons drawn on the frame — volume, action, power, and the hit-testing behind
+them in `IOSViewer`'s `toButton` — carry no accessible name and take no focus, on purpose. An
+`a11y-lens` finding against that surface is answered with `A11Y_LENS_SKIP=1` and a line in the commit
+message saying which surface and why.
+
+**Everything else gets the full rule set**, and the line is the DOM rather than the feature: toolbar
+buttons, dialogs, forms, the app centre, settings, invitations. A control that exists as an element
+is a control that must be reachable and named.
+
+**The line is also the answer when a frame control has no DOM equivalent.** `AndroidViewer` already
+renders volume and power as real toolbar buttons (`deviceSlot = buttonsIn(DEVICE_BUTTONS)`, each an
+`aria-label`led `<Button>`), while iOS has only the keyboard toggle there and leaves volume, action
+and power to the frame. That gap is **platform parity, not accessibility** — the fix is to give iOS
+the toolbar buttons Android has, not to overlay the frame. Read it that way whenever a finding says a
+device control is unreachable: ask whether the control should exist in the DOM at all, and if it
+should, put it in the toolbar where the group rules above already say it belongs.
+
